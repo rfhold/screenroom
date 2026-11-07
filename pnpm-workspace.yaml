@@ -1,0 +1,7 @@
+packages:
+  - apps/web
+  - website
+
+allowBuilds:
+  esbuild: false
+  workerd: false

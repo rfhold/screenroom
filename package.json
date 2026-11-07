@@ -1,0 +1,14 @@
+{
+  "name": "screenroom",
+  "private": true,
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": "^22.17.0 || >=24.0.0"
+  },
+  "scripts": {
+    "check": "pnpm -r check",
+    "build": "pnpm -r build",
+    "dev:web": "pnpm --filter @screenroom/web dev",
+    "dev:website": "pnpm --filter @screenroom/website dev"
+  }
+}
