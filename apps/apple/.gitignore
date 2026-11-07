@@ -1,0 +1,9 @@
+/Screenroom.xcodeproj/
+build/
+*.xcarchive/
+*.xcresult/
+*.p12
+*.p8
+*.mobileprovision
+*.provisionprofile
+*.log
