@@ -17,27 +17,36 @@ targetTemplates:
 targets:
   Screenroom-iOS:
     templates: [Shell]
+    sources:
+      - Resources/iOS
     platform: iOS
     deploymentTarget: "17.0"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.ios
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
   Screenroom-macOS:
     templates: [Shell]
+    sources:
+      - Resources/macOS
     platform: macOS
     deploymentTarget: "14.0"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.macos
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_APP_SANDBOX: YES
   Screenroom-tvOS:
     templates: [Shell]
+    sources:
+      - Resources/tvOS
     platform: tvOS
     deploymentTarget: "17.0"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.tvos
+        ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
