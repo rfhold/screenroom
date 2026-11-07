@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Screenroom
+Exec=screenroom-linux
+Icon=org.screenroom.linux
+Terminal=false
+Categories=AudioVideo;Video;
