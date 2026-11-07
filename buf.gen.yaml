@@ -1,0 +1,8 @@
+version: v2
+plugins:
+  - local: protoc-gen-prost
+    out: crates/screenroom-proto/src/generated
+  - local: protoc-gen-tonic
+    out: crates/screenroom-proto/src/generated
+    opt:
+      - no_transport=true

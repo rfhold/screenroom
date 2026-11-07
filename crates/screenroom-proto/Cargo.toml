@@ -1,0 +1,10 @@
+[package]
+name = "screenroom-proto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
