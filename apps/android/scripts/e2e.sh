@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "${E2E_CATEGORY-all}" in
+  happy-path) categories=(happy-path); methods=(happyPath) ;;
+  retry) categories=(retry); methods=(retry) ;;
+  regression) categories=(regression); methods=(regression) ;;
+  all) categories=(happy-path retry regression); methods=(happyPath retry regression) ;;
+  *) echo 'Invalid E2E_CATEGORY; expected happy-path, retry, regression, or all' >&2; exit 2 ;;
+esac
+capture=false
+for category in "${categories[@]}"; do [ "$category" != happy-path ] || capture=true; done
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+case "${1:-}" in
+  '') profiles=(mobile tv) ;;
+  mobile|tv) profiles=("$1") ;;
+  *) echo 'Usage: bash apps/android/scripts/e2e.sh [mobile|tv]' >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { echo 'Expected at most one profile' >&2; exit 2; }
+
+OUT="$ROOT/build/e2e"
+profile_prefix=${SCREENROOM_E2E_PROFILE_PREFIX:-android-$(uuidgen | tr '[:upper:]' '[:lower:]')}
+[[ "$profile_prefix" =~ ^[a-zA-Z0-9_-]{1,90}$ ]] || { echo 'Invalid E2E profile prefix' >&2; exit 2; }
+flows=(home sidebar library search detail)
+mkdir -p "$OUT"
+for profile in "${profiles[@]}"; do
+  for flow in "${flows[@]}"; do
+    rm -f "$OUT/$profile-$flow.png" "$OUT/$profile-$flow.png.tmp"
+  done
+done
+
+export JAVA_HOME=${JAVA_HOME:-/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home}
+export ANDROID_HOME=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}
+if [ -z "${ANDROID_AVD_HOME:-}" ] && [ -d "$ROOT/build/avd" ]; then
+  export ANDROID_AVD_HOME="$ROOT/build/avd"
+fi
+ADB="$ANDROID_HOME/platform-tools/adb"
+EMULATOR="$ANDROID_HOME/emulator/emulator"
+fail() { echo "Android E2E: $*" >&2; exit 1; }
+command -v timeout >/dev/null || fail 'Install coreutils timeout before this suite'
+timeout() { command timeout --foreground "$@"; }
+command -v file >/dev/null || fail 'file is required to validate screenshots'
+[ -x "$JAVA_HOME/bin/java" ] || fail "JDK 17 not found: $JAVA_HOME"
+[ -x "$ADB" ] || fail "adb not found: $ADB"
+[ -x "$EMULATOR" ] || fail "emulator not found: $EMULATOR"
+[ -f "$ANDROID_HOME/platforms/android-37/android.jar" ] \
+  || [ -f "$ANDROID_HOME/platforms/android-37.0/android.jar" ] \
+  || fail 'Android SDK platform 37 is required'
+"$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "17\.' || fail 'JAVA_HOME must select JDK 17'
+
+owned_pid=
+server_pid=
+owned_reverses=()
+verified_serials=()
+verified_packages=()
+cleanup() {
+  status=$?
+  for reverse_serial in "${owned_reverses[@]}"; do "$ADB" -s "$reverse_serial" reverse --remove "tcp:$api_port" >/dev/null 2>&1 || true; done
+  if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
+  for profile in "${profiles[@]}"; do
+    for flow in "${flows[@]}"; do
+      rm -f "$OUT/$profile-$flow.png.tmp"
+      if [ "$status" -ne 0 ]; then rm -f "$OUT/$profile-$flow.png"; fi
+    done
+  done
+  if [ "$status" -ne 0 ]; then
+    for ((index = 0; index < ${#verified_serials[@]}; index++)); do
+      for flow in "${flows[@]}"; do
+        timeout 15 "$ADB" -s "${verified_serials[$index]}" shell run-as "${verified_packages[$index]}" \
+          rm -f "files/screenshots/$flow.png" >/dev/null 2>&1 || true
+      done
+    done
+  fi
+  if [ -n "$owned_pid" ]; then
+    kill "$owned_pid" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+      kill -0 "$owned_pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -9 "$owned_pid" 2>/dev/null || true
+    wait "$owned_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ -z "${SCREENROOM_API_ENDPOINT:-}" ]; then
+  if (exec 3<>/dev/tcp/127.0.0.1/50062) 2>/dev/null; then fail 'Mock port 50062 is occupied; set SCREENROOM_API_ENDPOINT to use an external server'; fi
+  export SCREENROOM_API_ENDPOINT=http://127.0.0.1:50062
+  SCREENROOM_MOCK_LISTEN=127.0.0.1:50062 SCREENROOM_MOCK_PUBLIC_BASE="$SCREENROOM_API_ENDPOINT" bash "$ROOT/../../scripts/mock-server.sh" > "$OUT/mock-server.log" 2>&1 &
+  server_pid=$!
+fi
+api_port=${SCREENROOM_API_ENDPOINT##*:}
+[[ "$api_port" =~ ^[0-9]+$ ]] || fail 'Endpoint must specify an explicit port'
+deadline=$((SECONDS + 120))
+until curl --silent --fail --connect-timeout 2 --max-time 3 "$SCREENROOM_API_ENDPOINT/health" >/dev/null; do
+  if [ -n "$server_pid" ]; then kill -0 "$server_pid" 2>/dev/null || fail 'Mock server exited'; fi
+  (( SECONDS < deadline )) || fail 'Mock server readiness timed out'
+  sleep 1
+done
+if [ -n "$server_pid" ]; then kill -0 "$server_pid" 2>/dev/null || fail 'Owned mock server exited'; fi
+
+tasks=()
+for profile in "${profiles[@]}"; do
+  rm -f "$OUT/$profile-instrumentation.txt"
+  tasks+=(":$profile:assembleDebug" ":$profile:assembleDebugAndroidTest")
+done
+
+for profile in "${profiles[@]}"; do
+  if [ "$profile" = mobile ]; then
+    serial=${E2E_ANDROID_MOBILE_SERIAL:-emulator-5554}
+    avd=${E2E_ANDROID_MOBILE_AVD:-screenroom_home_mobile}
+  else
+    serial=${E2E_ANDROID_TV_SERIAL:-emulator-5556}
+    avd=${E2E_ANDROID_TV_AVD:-screenroom_home_tv}
+  fi
+  [[ "$serial" =~ ^emulator-[0-9]+$ ]] || fail "Not an emulator serial: $serial"
+  port=${serial#emulator-}
+  [[ "$port" =~ ^[1-9][0-9]{3}$ ]] || fail "Invalid emulator port: $port"
+  (( port >= 5554 && port <= 5682 && port % 2 == 0 )) || fail "Invalid emulator port: $port"
+  adb() { timeout 15 "$ADB" -s "$serial" "$@"; }
+
+  devices=$(timeout 15 "$ADB" devices)
+  if echo "$devices" | awk -v serial="$serial" '$1 == serial { found = 1 } END { exit !found }'; then
+    echo "Android E2E: reuse $serial ($avd)"
+  else
+    timeout 15 "$EMULATOR" -list-avds | grep -Fxq "$avd" || fail "AVD not found: $avd"
+    echo "Android E2E: boot $serial ($avd)"
+    nohup "$EMULATOR" -avd "$avd" -port "$port" -no-window -no-audio \
+      -no-boot-anim -gpu swiftshader -camera-back none \
+      >"$OUT/$profile-emulator.log" 2>&1 &
+    owned_pid=$!
+  fi
+
+  deadline=$((SECONDS + 180))
+  until [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+    if [ -n "$owned_pid" ]; then
+      kill -0 "$owned_pid" 2>/dev/null || fail "Emulator exited; inspect $OUT/$profile-emulator.log"
+    fi
+    (( SECONDS < deadline )) || fail "$serial boot exceeded 180 seconds"
+    sleep 2
+  done
+  actual_avd=$(adb emu avd name | tr -d '\r' | sed '/^OK$/d')
+  [ "$actual_avd" = "$avd" ] || fail "$serial uses AVD '$actual_avd', expected '$avd'"
+  [ "$(adb shell getprop ro.kernel.qemu | tr -d '\r')" = 1 ] || fail "$serial is not an Android emulator"
+  features=$(adb shell pm list features)
+  if echo "$features" | grep -q 'feature:android.software.leanback'; then
+    [ "$profile" = tv ] || fail "$serial is a TV emulator, not mobile"
+  else
+    [ "$profile" = mobile ] || fail "$serial is a mobile emulator, not TV"
+  fi
+  # A ready, verified emulator stays available for the next run.
+  owned_pid=
+
+  package="org.screenroom.$profile"
+  verified_serials+=("$serial")
+  verified_packages+=("$package")
+  reverse=$(adb reverse --list)
+  if ! echo "$reverse" | grep -q "tcp:$api_port tcp:$api_port"; then
+    echo "$reverse" | grep -q "tcp:$api_port " && fail 'Existing reverse maps endpoint port elsewhere'
+    adb reverse "tcp:$api_port" "tcp:$api_port"
+    owned_reverses+=("$serial")
+  fi
+  if adb shell pm path "$package" | grep -q '^package:'; then
+    for flow in "${flows[@]}"; do
+      adb shell run-as "$package" rm -f "files/screenshots/$flow.png"
+    done
+  fi
+done
+
+echo 'Android E2E: incremental APK build'
+(cd "$ROOT" && timeout 600 ./gradlew --build-cache -Pandroid.builder.sdkDownload=false "${tasks[@]}") 2>&1 | tee "$OUT/build.log"
+
+for ((index = 0; index < ${#profiles[@]}; index++)); do
+  profile=${profiles[$index]}
+  serial=${verified_serials[$index]}
+  package=${verified_packages[$index]}
+  timeout 120 "$ADB" -s "$serial" install -r -t "$ROOT/$profile/build/outputs/apk/debug/$profile-debug.apk"
+  timeout 120 "$ADB" -s "$serial" install -r -t "$ROOT/$profile/build/outputs/apk/androidTest/debug/$profile-debug-androidTest.apk"
+  adb shell input keyevent KEYCODE_WAKEUP
+  adb shell wm dismiss-keyguard
+  for flow in "${flows[@]}"; do
+    adb shell run-as "$package" rm -f "files/screenshots/$flow.png"
+  done
+  for ((category_index = 0; category_index < ${#categories[@]}; category_index++)); do
+    category=${categories[$category_index]}
+    method=${methods[$category_index]}
+    log="$OUT/$profile-$category-instrumentation.txt"
+    echo "Android E2E: $profile category=$category method=$method"
+    timeout 300 "$ADB" -s "$serial" shell am instrument -w -r -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_MOCK_PROFILE "$profile_prefix-$profile-$category" -e class \
+      "$package.e2e.HomeE2ETest#$method" \
+      "$package.test/androidx.test.runner.AndroidJUnitRunner" \
+      | tee "$log" | tee -a "$OUT/$profile-instrumentation.txt"
+    grep -Eq '^OK \(1 test\)' "$log" || fail "$profile $category E2E failed; no screenshot exported"
+  done
+  [ "$capture" = true ] || continue
+  for flow in "${flows[@]}"; do
+    timeout 30 "$ADB" -s "$serial" exec-out run-as "$package" cat "files/screenshots/$flow.png" \
+      >"$OUT/$profile-$flow.png.tmp"
+    signature=$(od -An -tx1 -N8 "$OUT/$profile-$flow.png.tmp" | tr -d ' \n')
+    [ "$signature" = 89504e470d0a1a0a ] || fail "$profile $flow screenshot is not a PNG"
+    dimensions=$(file -b "$OUT/$profile-$flow.png.tmp")
+    echo "$dimensions" | grep -Eq '^PNG image data, [1-9][0-9]* x [1-9][0-9]*,' \
+      || fail "$profile $flow PNG dimensions are invalid"
+  done
+done
+
+for profile in "${profiles[@]}"; do
+  if [ "$capture" != true ]; then
+    echo "Android E2E: passed $profile categories=${categories[*]}; no screenshots for non-happy categories"
+    continue
+  fi
+  for flow in "${flows[@]}"; do
+    mv "$OUT/$profile-$flow.png.tmp" "$OUT/$profile-$flow.png"
+  done
+  echo "Android E2E: passed $profile; five screenshots in $OUT"
+done

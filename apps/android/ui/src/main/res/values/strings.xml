@@ -1,0 +1,9 @@
+<resources>
+    <string name="brand">Screenroom</string>
+    <string name="home">Home</string>
+    <string name="tagline">A place for your next watch.</string>
+    <string name="disconnected">Not connected</string>
+    <string name="library_title">Your library starts here</string>
+    <string name="library_description">No service is connected. Catalog and playback are not available in this preview.</string>
+    <string name="preview_footer">Home preview · No account or connection required</string>
+</resources>

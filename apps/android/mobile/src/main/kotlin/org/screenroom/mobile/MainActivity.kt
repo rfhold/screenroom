@@ -1,21 +1,27 @@
 package org.screenroom.mobile
 
 import android.os.Bundle
+import android.graphics.Color
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.text.BasicText
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
+import androidx.activity.compose.BackHandler
+import androidx.activity.enableEdgeToEdge
+import org.screenroom.ui.HomeScreen
+import org.screenroom.ui.ScreenroomTheme
 
 class MainActivity : ComponentActivity() {
+    private var navigateBack: () -> Boolean = { false }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+        )
         setContent {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                BasicText(stringResource(R.string.app_name))
+            ScreenroomTheme {
+                BackHandler { if (!navigateBack()) finish() }
+                HomeScreen(endpoint = intent.getStringExtra("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051", profile = intent.getStringExtra("SCREENROOM_MOCK_PROFILE") ?: "android-mobile", debug = BuildConfig.DEBUG, registerBack = { navigateBack = it })
             }
         }
     }
