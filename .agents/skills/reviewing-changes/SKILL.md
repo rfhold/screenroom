@@ -23,7 +23,8 @@ This skill supplies repository-specific inputs to installed `making-changes`; it
 | Root Rust workspace | `Cargo.toml` selects `crates/*` and excludes `apps/linux`; preserve separate manifests and lockfiles. |
 | Protobuf | Inspect `proto/`, `buf.yaml`, `buf.gen.yaml`, and `crates/screenroom-proto/src/generated/` together. Empty packages produce comments-only Rust output. |
 | Observability | `crates/screenroom-observability/Cargo.toml` keeps telemetry and profiling dependencies optional, with no default features or runtime initialization. |
-| Native clients | SwiftUI, Android Compose, and GTK4/libadwaita remain native shells, without core bridges, players, or adapter behavior. |
+| Client core and mock API | Inspect `proto/screenroom/client/v1/`, `crates/screenroom-client-core/`, `crates/screenroom-mock-server/`, and `fixtures/catalog/` together. The Rust core owns RPC and artwork retrieval; preserve native gRPC and browser WASM/gRPC-web parity, cancellation, bounded caches, fixture provenance, and isolated mock preferences. |
+| Native clients | SwiftUI, Android Compose, and GTK4/libadwaita remain native shells. Check core bindings, UI-thread isolation, request-generation guards, native focus, and network error states; no playback or real-provider integration. |
 | Web SPA | `apps/web/vite.config.ts` sets the `index.html` fallback; `apps/web/src/routes/+layout.ts` disables SSR. |
 | Static website | `website/vite.config.ts` has no SPA fallback; `website/src/routes/+layout.ts` enables prerender and disables client JavaScript. |
 | Cloudflare Pages | Preserve `website/static/404.html` in `website/build/404.html` to prevent Pages' implicit SPA fallback. |
