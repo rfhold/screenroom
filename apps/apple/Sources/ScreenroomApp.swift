@@ -4,8 +4,13 @@ import SwiftUI
 struct ScreenroomApp: App {
     var body: some Scene {
         WindowGroup {
-            Text("Screenroom")
-                .padding()
+            HomeView()
+                #if os(macOS)
+                .frame(minWidth: 320, minHeight: 480)
+                #endif
         }
+        #if os(macOS)
+        .defaultSize(width: 1200, height: 850)
+        #endif
     }
 }

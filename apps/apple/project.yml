@@ -1,6 +1,7 @@
 name: Screenroom
 options:
   minimumXcodeGenVersion: 2.44.1
+  preGenCommand: bash scripts/prepare-core.sh
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -14,6 +15,24 @@ targetTemplates:
     type: application
     sources:
       - Sources
+      - path: ../../target/client-core/bindings/ScreenroomClientCore.swift
+    dependencies:
+      - framework: ../../target/client-core/apple/ScreenroomClientCore.xcframework
+        embed: false
+    settings:
+      base:
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/../../target/client-core/bindings
+      configs:
+        Debug:
+          INFOPLIST_KEY_NSAppTransportSecurity_NSAllowsLocalNetworking: YES
+  HomeE2ETests:
+    type: bundle.ui-testing
+    sources:
+      - E2ETests
+    settings:
+      base:
+        PRODUCT_NAME: $(TARGET_NAME)
+        PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.$(TARGET_NAME)
 targets:
   Screenroom-iOS:
     templates: [Shell]
@@ -39,6 +58,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.macos
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ENABLE_APP_SANDBOX: YES
+        CODE_SIGN_ENTITLEMENTS: Resources/macOS/Screenroom.entitlements
   Screenroom-tvOS:
     templates: [Shell]
     sources:
@@ -50,3 +70,43 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: org.screenroom.tvos
         ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  Screenroom-iOS-E2ETests:
+    templates: [HomeE2ETests]
+    platform: iOS
+    deploymentTarget: "17.0"
+    dependencies:
+      - target: Screenroom-iOS
+    settings:
+      base:
+        TARGETED_DEVICE_FAMILY: "1,2"
+  Screenroom-macOS-E2ETests:
+    templates: [HomeE2ETests]
+    platform: macOS
+    deploymentTarget: "14.0"
+    dependencies:
+      - target: Screenroom-macOS
+  Screenroom-tvOS-E2ETests:
+    templates: [HomeE2ETests]
+    platform: tvOS
+    deploymentTarget: "17.0"
+    dependencies:
+      - target: Screenroom-tvOS
+schemes:
+  Screenroom-iOS:
+    build:
+      targets:
+        Screenroom-iOS: all
+    test:
+      targets: [Screenroom-iOS-E2ETests]
+  Screenroom-macOS:
+    build:
+      targets:
+        Screenroom-macOS: all
+    test:
+      targets: [Screenroom-macOS-E2ETests]
+  Screenroom-tvOS:
+    build:
+      targets:
+        Screenroom-tvOS: all
+    test:
+      targets: [Screenroom-tvOS-E2ETests]

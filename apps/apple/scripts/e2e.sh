@@ -1,0 +1,139 @@
+#!/bin/bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+source scripts/test-category.sh
+configure_apple_test_category
+source scripts/mock-port.sh
+configure_apple_mock_port
+case "${E2E_MACOS-0}" in
+    0|1) ;;
+    *) echo 'E2E_MACOS must be 0 or 1 (or unset)' >&2; exit 2 ;;
+esac
+if [ "$#" -gt 1 ]; then
+    echo "Usage: bash apps/apple/scripts/e2e.sh [ios|ipad|tvos|macos]" >&2
+    exit 2
+fi
+case "${1:-all}" in
+    all)
+        profiles=(ios ipad tvos)
+        if [ "${E2E_MACOS-0}" = 1 ]; then profiles+=(macos); fi
+        ;;
+    ios|ipad|tvos|macos) profiles=("$1") ;;
+    *) echo "Unknown Apple E2E profile: $1" >&2; exit 2 ;;
+esac
+
+timeout=$(command -v timeout || command -v gtimeout || true)
+if [ -z "$timeout" ] || ! command -v jq >/dev/null; then
+    echo "Install GNU coreutils and jq: brew install coreutils jq" >&2
+    exit 1
+fi
+mkdir -p build/e2e/cache build/e2e/runs
+if [ -n "${E2E_APPLE_RUN_DIR:-}" ]; then
+    case "$E2E_APPLE_RUN_DIR" in
+        /*) run=$E2E_APPLE_RUN_DIR ;;
+        *) echo 'E2E_APPLE_RUN_DIR must be an absolute, new directory' >&2; exit 2 ;;
+    esac
+    mkdir "$run"
+else
+    run=$(mktemp -d "$PWD/build/e2e/runs/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXX")
+fi
+echo "Apple E2E artifacts: $run"
+trap 'echo "Apple E2E failed; see $run" >&2' ERR
+mock_pid=
+cleanup() {
+    if [ -n "$mock_pid" ]; then
+        kill "$mock_pid" 2>/dev/null || true
+        wait "$mock_pid" 2>/dev/null || true
+        echo "Stopped owned Apple mock PID $mock_pid" >>"$run/mock-lifecycle.log"
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+if [ -z "${SCREENROOM_API_ENDPOINT:-}" ]; then
+    export SCREENROOM_API_ENDPOINT="$apple_mock_endpoint"
+    if curl -fsS --max-time 1 "$SCREENROOM_API_ENDPOINT/health" >/dev/null 2>&1; then
+        echo "Port $apple_mock_port is already in use; set SCREENROOM_API_ENDPOINT to opt into an external server." >&2
+        exit 2
+    fi
+    SCREENROOM_MOCK_LISTEN="$apple_mock_listen" SCREENROOM_MOCK_PUBLIC_BASE="$SCREENROOM_API_ENDPOINT" \
+        bash ../../scripts/mock-server.sh >"$run/mock-server.log" 2>&1 &
+    mock_pid=$!
+    echo "Started owned Apple mock PID $mock_pid at $SCREENROOM_API_ENDPOINT" >"$run/mock-lifecycle.log"
+fi
+ready=0
+for ((attempt=0; attempt<180; attempt++)); do
+    if curl -fsS --max-time 1 "$SCREENROOM_API_ENDPOINT/health" >"$run/mock-health.json" 2>/dev/null; then ready=1; break; fi
+    if [ -n "$mock_pid" ] && ! kill -0 "$mock_pid" 2>/dev/null; then break; fi
+    sleep 1
+done
+if [ "$ready" != 1 ]; then echo "Mock API did not become ready; see $run/mock-server.log" >&2; exit 1; fi
+echo "Ready $SCREENROOM_API_ENDPOINT" >>"$run/mock-lifecycle.log"
+export TEST_RUNNER_SCREENROOM_API_ENDPOINT="$SCREENROOM_API_ENDPOINT"
+"$timeout" --foreground -k 10s 1200s bash scripts/prepare-core.sh >"$run/core-build.log" 2>&1
+if [ "$apple_test_category" = regression ] || [ "$apple_test_category" = all ]; then
+    "$timeout" --foreground -k 10s 120s bash scripts/test-catalog-state.sh >"$run/catalog-state.log" 2>&1
+    "$timeout" --foreground -k 10s 120s bash scripts/test-endpoint-policy.sh >"$run/endpoint-policy.log" 2>&1
+fi
+"$timeout" --foreground -k 10s 60s xcodegen generate --use-cache \
+    --cache-path build/e2e/cache/xcodegen >"$run/generate.log" 2>&1
+
+for profile in "${profiles[@]}"; do
+    signing=(CODE_SIGNING_ALLOWED=NO)
+    case "$profile" in
+        ios) scheme=iOS; pattern='^iPhone'; platform='iOS Simulator'; destination=${E2E_IOS_DESTINATION:-} ;;
+        ipad) scheme=iOS; pattern='^iPad'; platform='iOS Simulator'; destination=${E2E_IPAD_DESTINATION:-} ;;
+        tvos) scheme=tvOS; pattern='^Apple TV'; platform='tvOS Simulator'; destination=${E2E_TVOS_DESTINATION:-} ;;
+        macos)
+            scheme=macOS; destination='platform=macOS'
+            signing=(CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM=)
+            ;;
+    esac
+    if [ "$profile" != macos ]; then
+            devices=$("$timeout" --foreground -k 10s 30s xcrun simctl list devices available --json)
+        candidates=$(jq -r --arg pattern "$pattern" --arg runtime "com.apple.CoreSimulator.SimRuntime.$scheme-" '
+            [.devices | to_entries[] | select(.key | startswith($runtime)) | .value[]
+             | select(.isAvailable and (.name | test($pattern)))]
+            | sort_by(.state != "Booted") | .[].udid' <<<"$devices")
+        if [ -z "$destination" ]; then
+            id=${candidates%%$'\n'*}
+            destination="platform=$platform,id=$id"
+        else
+            id=${destination#"platform=$platform,id="}
+        fi
+        if [ -z "$id" ] || [ "$destination" != "platform=$platform,id=$id" ] ||
+            ! grep -Fxq "$id" <<<"$candidates"; then
+            echo "No matching available simulator for $profile: $destination" >&2
+            exit 2
+        fi
+    fi
+
+    output="$run/$profile"
+    mkdir -p "$output"
+    echo "E2E $profile: $destination"
+    selectors=()
+    for method in "${apple_test_methods[@]}"; do
+        selectors+=("-only-testing:Screenroom-$scheme-E2ETests/HomeE2ETests/$method")
+    done
+    if [ "$profile" = tvos ] && { [ "$apple_test_category" = regression ] || [ "$apple_test_category" = all ]; }; then
+        selectors+=("-only-testing:Screenroom-$scheme-E2ETests/HomeE2ETests/testSidebarRemoteControls")
+    fi
+    echo "Category $apple_test_category: ${selectors[*]}" >>"$output/test-selection.log"
+    "$timeout" --foreground -k 10s 480s xcodebuild test -project Screenroom.xcodeproj \
+        -scheme "Screenroom-$scheme" -destination "$destination" -destination-timeout 60 \
+        -derivedDataPath "$PWD/build/e2e/cache/$scheme" "${signing[@]}" "${selectors[@]}" \
+        -resultBundlePath "$output/Home.xcresult" -parallel-testing-enabled NO \
+        -test-timeouts-enabled YES -maximum-test-execution-time-allowance 120 \
+        >"$output/test.log" 2>&1
+    for report in tests summary; do
+        "$timeout" --foreground -k 10s 60s xcrun xcresulttool get test-results "$report" \
+            --path "$output/Home.xcresult" >"$output/test-results-$report.json" 2>"$output/test-results-$report.log"
+    done
+    node scripts/verify-test-results.mjs "$output/test-results-tests.json" "$output/test-results-summary.json" \
+        "${selectors[@]}" >"$output/test-verification.json" 2>"$output/test-verification.log"
+    "$timeout" --foreground -k 10s 60s xcrun xcresulttool export attachments \
+        --path "$output/Home.xcresult" --output-path "$output/screenshots" \
+        >"$output/export.log" 2>&1
+    echo "PASS $profile: $output"
+done
