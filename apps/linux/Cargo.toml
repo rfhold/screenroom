@@ -8,5 +8,26 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gtk = { package = "gtk4", version = "0.11.5" }
+gtk = { package = "gtk4", version = "0.11.5", features = ["v4_10"] }
 adw = { package = "libadwaita", version = "0.9.2" }
+serde_json = "1"
+screenroom-client-core = { path = "../../crates/screenroom-client-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[features]
+e2e = []
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["http2"] }
+screenroom-mock-server = { path = "../../crates/screenroom-mock-server" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+waydriver = "=0.3.10"
+waydriver-compositor-mutter = "=0.3.10"
+waydriver-input-mutter = "=0.3.10"
+waydriver-capture-mutter = "=0.3.10"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["e2e"]

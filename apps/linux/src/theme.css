@@ -1,0 +1,25 @@
+.screenroom { background: #101010; color: #f2f2f2; font-family: sans-serif; font-size: 14px; }
+.screenroom .sidebar { background: #171717; border-right: 1px solid rgba(255,255,255,.11); }
+.screenroom .rail-toggle { margin-bottom: 20px; }
+.screenroom button { background: rgba(255,255,255,.045); color: #f2f2f2; border: 1px solid rgba(255,255,255,.11); border-radius: 8px; box-shadow: none; padding: 9px 12px; font-weight: 400; }
+.screenroom button:hover { background: rgba(255,255,255,.09); }
+.screenroom button:focus-visible, .screenroom entry:focus-within, .screenroom checkbutton:focus-visible { outline: 2px solid #a8c9ff; outline-offset: 3px; }
+.screenroom .nav-button, .screenroom .rail-toggle { min-height: 22px; padding: 10px; background: transparent; border-color: transparent; color: #a0a0a0; }
+.screenroom .nav-button.selected, .screenroom .nav-button:hover { background: rgba(255,255,255,.045); color: #f2f2f2; }
+.screenroom .heading { font-size: 28px; font-weight: 700; letter-spacing: -.6px; }
+.screenroom .row-heading { font-size: 21px; font-weight: 700; margin-left: 12px; }
+.screenroom .muted, .screenroom .card-meta { color: #a0a0a0; font-size: 12px; }
+.screenroom .breadcrumbs button { background: transparent; border: 0; padding: 0 2px; min-height: 44px; color: #a0a0a0; font-size: 13px; }
+.screenroom .poster-card { background: transparent; border: 0; padding: 0; border-radius: 10px; }
+.screenroom .poster-card:hover { background: rgba(255,255,255,.04); }
+.screenroom .card-title { font-size: 14px; font-weight: 500; }
+.screenroom flowboxchild { padding: 0; }
+.screenroom .settings { background: #171717; border: 1px solid rgba(255,255,255,.11); border-radius: 12px; }
+.screenroom entry { background: rgba(255,255,255,.03); color: #f2f2f2; border: 1px solid rgba(255,255,255,.11); border-radius: 10px; padding: 8px 12px; }
+.screenroom checkbutton { padding: 6px 0; }
+.screenroom .overview { line-height: 1.6; }
+.screenroom .accessible-only { font-size: 0; opacity: 0; }
+.screenroom .artwork { border-radius: 10px; }
+.screenroom .portrait-placeholder { background: #202020; border-radius: 10px; }
+.screenroom menubutton > button, .screenroom button.link { min-height: 24px; }
+.screenroom .row-heading { margin-left: 0; }
