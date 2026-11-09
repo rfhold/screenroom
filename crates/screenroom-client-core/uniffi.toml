@@ -1,0 +1,7 @@
+[bindings.swift]
+module_name = "ScreenroomClientCore"
+ffi_module_name = "ScreenroomClientCoreFFI"
+
+[bindings.kotlin]
+package_name = "org.screenroom.core"
+cdylib_name = "screenroom_client_core"
