@@ -4,16 +4,25 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts/prepare-core.mjs",
+    "prebuild": "node scripts/prepare-core.mjs",
+    "precheck": "node scripts/prepare-core.mjs",
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
     "prepare": "svelte-kit sync",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test:e2e": "node e2e/run.mjs",
+    "test:e2e:install": "playwright install chromium",
+    "import:tmdb": "node ../../scripts/import-tmdb.mjs",
+    "test:importer": "node --test ../../scripts/import-tmdb.test.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.0",
     "@sveltejs/adapter-static": "4.0.1",
     "@sveltejs/kit": "3.1.1",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@types/node": "22.20.5",
     "svelte": "5.57.3",
     "svelte-check": "4.7.8",
     "typescript": "6.0.3",
