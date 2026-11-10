@@ -1,6 +1,9 @@
 use super::*;
 use wasm_bindgen::prelude::*;
 
+mod artwork;
+pub(super) use artwork::fetch_artwork;
+
 #[wasm_bindgen(typescript_custom_section)]
 const DOMAIN_TYPES: &str = include_str!("wasm-models.ts");
 
@@ -59,21 +62,28 @@ impl WasmClient {
         self.inner.invalidate_reads();
     }
     #[wasm_bindgen(unchecked_return_type = "HomeRow[]")]
-    pub async fn get_home(&self, library_id: String) -> Result<JsValue, JsValue> {
+    pub async fn get_home(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+    ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .get_home(library_id)
+                .get_home(from_js(scope)?)
                 .await
                 .map_err(js_error)?,
         )
     }
-    #[wasm_bindgen(unchecked_return_type = "MediaLibrary[]")]
-    pub async fn list_libraries(&self) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(unchecked_return_type = "LibraryPage")]
+    pub async fn list_libraries(
+        &self,
+        source_id: String,
+        #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+    ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .list_libraries()
+                .list_libraries(source_id, from_js(page)?)
                 .await
                 .map_err(js_error)?,
         )
@@ -81,20 +91,30 @@ impl WasmClient {
     #[wasm_bindgen(unchecked_return_type = "ItemPage")]
     pub async fn list_library_items(
         &self,
-        library_id: String,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
         #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
     ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .list_library_items(library_id, from_js(page)?)
+                .list_library_items(from_js(scope)?, from_js(page)?)
                 .await
                 .map_err(js_error)?,
         )
     }
     #[wasm_bindgen(unchecked_return_type = "Item")]
-    pub async fn get_item(&self, id: String) -> Result<JsValue, JsValue> {
-        to_js(self.inner.clone().get_item(id).await.map_err(js_error)?)
+    pub async fn get_item(
+        &self,
+        id: String,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .get_item(id, from_js(scope)?)
+                .await
+                .map_err(js_error)?,
+        )
     }
     #[wasm_bindgen(unchecked_return_type = "CatalogInfo")]
     pub async fn get_catalog_info(&self) -> Result<JsValue, JsValue> {
@@ -111,11 +131,12 @@ impl WasmClient {
         &self,
         parent_id: String,
         #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
     ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .list_children(parent_id, from_js(page)?)
+                .list_children(parent_id, from_js(page)?, from_js(scope)?)
                 .await
                 .map_err(js_error)?,
         )
@@ -125,16 +146,17 @@ impl WasmClient {
         &self,
         item_id: String,
         #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
     ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .list_credits(item_id, from_js(page)?)
+                .list_credits(item_id, from_js(page)?, from_js(scope)?)
                 .await
                 .map_err(js_error)?,
         )
     }
-    #[wasm_bindgen(unchecked_return_type = "ItemPage")]
+    #[wasm_bindgen(unchecked_return_type = "SearchPage")]
     pub async fn search(
         &self,
         #[wasm_bindgen(unchecked_param_type = "SearchRequest")] request: JsValue,
@@ -157,26 +179,26 @@ impl WasmClient {
                 .map_err(js_error)?,
         )
     }
-    #[wasm_bindgen(unchecked_return_type = "Preferences")]
-    pub async fn get_preferences(&self) -> Result<JsValue, JsValue> {
+    #[wasm_bindgen(unchecked_return_type = "User")]
+    pub async fn get_current_user(&self) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .get_preferences()
+                .get_current_user()
                 .await
                 .map_err(js_error)?,
         )
     }
-    #[wasm_bindgen(unchecked_return_type = "Preferences")]
-    pub async fn update_preferences(
+    #[wasm_bindgen(unchecked_return_type = "ArtworkPage")]
+    pub async fn list_artwork(
         &self,
-        #[wasm_bindgen(unchecked_param_type = "Preferences")] preferences: JsValue,
-        #[wasm_bindgen(unchecked_param_type = "string[]")] update_mask: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+        #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
     ) -> Result<JsValue, JsValue> {
         to_js(
             self.inner
                 .clone()
-                .update_preferences(from_js(preferences)?, from_js(update_mask)?)
+                .list_artwork(from_js(scope)?, from_js(page)?)
                 .await
                 .map_err(js_error)?,
         )
@@ -184,4 +206,16 @@ impl WasmClient {
     pub async fn load_artwork(&self, url: String) -> Result<Vec<u8>, JsValue> {
         self.inner.clone().load_artwork(url).await.map_err(js_error)
     }
+}
+
+#[wasm_bindgen(js_name = default_settings, unchecked_return_type = "ClientSettings")]
+pub fn wasm_default_settings() -> Result<JsValue, JsValue> {
+    to_js(default_settings())
+}
+
+#[wasm_bindgen(js_name = validate_settings, unchecked_return_type = "ClientSettings")]
+pub fn wasm_validate_settings(
+    #[wasm_bindgen(unchecked_param_type = "ClientSettings")] settings: JsValue,
+) -> Result<JsValue, JsValue> {
+    to_js(validate_settings(from_js(settings)?).map_err(js_error)?)
 }

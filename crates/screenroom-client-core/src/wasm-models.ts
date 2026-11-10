@@ -32,9 +32,9 @@ export interface CatalogNotice {
   link_url: string;
 }
 export interface CatalogInfo {
-  artwork: Array<Artwork>;
   notices: Array<CatalogNotice>;
   retrieved_at: string;
+  branding: Array<Artwork>;
 }
 export interface Rating {
   provider: string;
@@ -90,6 +90,15 @@ export interface HomeRow {
   title: string;
   items: Array<Item>;
 }
+export interface SearchRequest {
+  query: string;
+  library_id: string;
+  types: SearchTypes | null;
+  methods: SearchMethods | null;
+  source: string;
+  page: Page | null;
+  source_id: string;
+}
 export interface SearchTypes {
   movie: boolean;
   series: boolean;
@@ -101,20 +110,13 @@ export interface SearchMethods {
   fuzzy: boolean;
   semantic: boolean;
 }
-export interface Preferences {
-  search_types: SearchTypes | null;
-  search_methods: SearchMethods | null;
+export interface SourceLibraryScope {
+  source_id: string;
   library_id: string;
-  source: string;
-  subtitle_preference: string;
 }
-export interface SearchRequest {
-  query: string;
-  library_id: string;
-  types: SearchTypes | null;
-  methods: SearchMethods | null;
-  source: string;
-  page: Page | null;
+export interface User {
+  id: string;
+  display_name: string;
 }
 export interface ItemPage {
   items: Array<Item>;
@@ -131,8 +133,29 @@ export interface SearchCapabilities {
   semantic_description: string;
   maximum_query_length: number;
 }
+export interface LibraryPage {
+  libraries: Array<MediaLibrary>;
+  next_page_token: string;
+}
+export interface ArtworkPage {
+  artwork: Array<Artwork>;
+  next_page_token: string;
+}
+export interface SearchPage {
+  items: Array<Item>;
+  next_page_token: string;
+  effective_methods: SearchMethods | null;
+  degradation_reason: string;
+}
 export interface ClientConfig {
   endpoint: string;
-  mock_profile: string;
+  user_id: string;
   timeout_ms: number;
+}
+export interface ClientSettings {
+  scope: SourceLibraryScope | null;
+  source: string;
+  types: SearchTypes | null;
+  methods: SearchMethods | null;
+  subtitle_preference: string;
 }

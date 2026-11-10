@@ -48,9 +48,9 @@ pub struct CatalogNotice {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 pub struct CatalogInfo {
-    pub artwork: Vec<Artwork>,
     pub notices: Vec<CatalogNotice>,
     pub retrieved_at: String,
+    pub branding: Vec<Artwork>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -130,6 +130,18 @@ pub struct HomeRow {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct SearchRequest {
+    pub query: String,
+    pub library_id: String,
+    pub types: Option<SearchTypes>,
+    pub methods: Option<SearchMethods>,
+    pub source: String,
+    pub page: Option<Page>,
+    pub source_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 pub struct SearchTypes {
     pub movie: bool,
     pub series: bool,
@@ -147,23 +159,16 @@ pub struct SearchMethods {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
-pub struct Preferences {
-    pub search_types: Option<SearchTypes>,
-    pub search_methods: Option<SearchMethods>,
+pub struct SourceLibraryScope {
+    pub source_id: String,
     pub library_id: String,
-    pub source: String,
-    pub subtitle_preference: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
-pub struct SearchRequest {
-    pub query: String,
-    pub library_id: String,
-    pub types: Option<SearchTypes>,
-    pub methods: Option<SearchMethods>,
-    pub source: String,
-    pub page: Option<Page>,
+pub struct User {
+    pub id: String,
+    pub display_name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -192,8 +197,42 @@ pub struct SearchCapabilities {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct LibraryPage {
+    pub libraries: Vec<MediaLibrary>,
+    pub next_page_token: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct ArtworkPage {
+    pub artwork: Vec<Artwork>,
+    pub next_page_token: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct SearchPage {
+    pub items: Vec<Item>,
+    pub next_page_token: String,
+    pub effective_methods: Option<SearchMethods>,
+    pub degradation_reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 pub struct ClientConfig {
     pub endpoint: String,
-    pub mock_profile: String,
+    /// Empty for anonymous catalog reads, otherwise an explicit trusted-local UUID; not authentication.
+    pub user_id: String,
     pub timeout_ms: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct ClientSettings {
+    pub scope: Option<SourceLibraryScope>,
+    pub source: String,
+    pub types: Option<SearchTypes>,
+    pub methods: Option<SearchMethods>,
+    pub subtitle_preference: String,
 }

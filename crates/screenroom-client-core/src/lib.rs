@@ -5,7 +5,9 @@ use futures::{
     future::{AbortHandle, Abortable, Shared},
 };
 pub use models::*;
-use screenroom_proto::client::v1 as wire;
+mod wire {
+    pub use screenroom_proto::{catalog::v1::*, user::v1::*};
+}
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
@@ -60,6 +62,72 @@ fn invalid(reason: impl Into<String>) -> ClientError {
     ClientError::InvalidArgument {
         reason: reason.into(),
     }
+}
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(i, b)| {
+            if [8, 13, 18, 23].contains(&i) {
+                b == b'-'
+            } else {
+                b.is_ascii_hexdigit()
+            }
+        })
+}
+fn valid_artwork_path(path: &str) -> bool {
+    let parts = path.split('/').collect::<Vec<_>>();
+    parts.len() == 6
+        && parts[1] == "artwork"
+        && valid_uuid(parts[2])
+        && parts[3] == "revisions"
+        && parts[4].bytes().all(|b| b.is_ascii_digit())
+        && parts[4].parse::<u64>().is_ok_and(|n| n > 0)
+        && ["native", "original"].contains(&parts[5])
+}
+
+/// Platform-owned settings: callers persist these locally, never through an RPC.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn default_settings() -> ClientSettings {
+    ClientSettings {
+        scope: Some(SourceLibraryScope::default()),
+        source: "all".into(),
+        types: Some(SearchTypes {
+            movie: true,
+            series: true,
+            episode: true,
+        }),
+        methods: Some(SearchMethods {
+            text: true,
+            fuzzy: true,
+            semantic: true,
+            title_only: false,
+        }),
+        subtitle_preference: "off".into(),
+    }
+}
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn validate_settings(settings: ClientSettings) -> Result<ClientSettings, ClientError> {
+    if !["all", "tmdb", "jellyfin"].contains(&settings.source.as_str()) {
+        return Err(invalid("source must be all, tmdb, or jellyfin"));
+    }
+    if !["off", "library_tracks", "transcription"].contains(&settings.subtitle_preference.as_str())
+    {
+        return Err(invalid("invalid subtitle preference"));
+    }
+    if settings
+        .types
+        .as_ref()
+        .is_some_and(|t| !t.movie && !t.series && !t.episode)
+    {
+        return Err(invalid("at least one search type required"));
+    }
+    if settings
+        .methods
+        .as_ref()
+        .is_some_and(|m| !m.text && !m.fuzzy && (!m.semantic || m.title_only))
+    {
+        return Err(invalid("at least one search engine required"));
+    }
+    Ok(settings)
 }
 fn bridge<A: Serialize, B: DeserializeOwned>(a: A) -> Result<B, ClientError> {
     serde_json::to_value(a)
@@ -156,6 +224,8 @@ pub struct Client {
     channel: Arc<tokio::sync::OnceCell<Transport>>,
     generation: AtomicU64,
     cache: Mutex<Cache>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    artwork_completion_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export(async_runtime = "tokio"))]
@@ -178,15 +248,9 @@ impl Client {
         if config.endpoint.ends_with('/') {
             return Err(invalid("endpoint must not end in slash"));
         }
-        if config.mock_profile.is_empty()
-            || config.mock_profile.len() > 128
-            || !config
-                .mock_profile
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
-        {
+        if !config.user_id.is_empty() && !valid_uuid(&config.user_id) {
             return Err(invalid(
-                "explicit opaque mock_profile required (1–128 ASCII letters/digits/-_.)",
+                "user_id must be empty or a canonical local UUID; this selector is not authentication",
             ));
         }
         if !(1..=120_000).contains(&config.timeout_ms) {
@@ -206,14 +270,23 @@ impl Client {
             channel: Arc::new(tokio::sync::OnceCell::new()),
             generation: AtomicU64::new(0),
             cache: Mutex::new(Cache::default()),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            artwork_completion_hook: Mutex::new(None),
         }))
     }
     pub fn cancel_all(&self) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        if let Ok(mut c) = self.cache.lock() {
-            for (_, entry) in c.pending.drain() {
-                entry.abort.abort();
-            }
+        let pending = if let Ok(mut c) = self.cache.lock() {
+            // Cancellation and cache completion share this linearization point.
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            c.pending
+                .drain()
+                .map(|(_, entry)| entry.abort)
+                .collect::<Vec<_>>()
+        } else {
+            return;
+        };
+        for abort in pending {
+            abort.abort();
         }
     }
     pub fn invalidate_reads(&self) {
@@ -224,36 +297,62 @@ impl Client {
     }
     pub async fn get_home(
         self: Arc<Self>,
-        library_id: String,
+        scope: SourceLibraryScope,
     ) -> Result<Vec<HomeRow>, ClientError> {
         let response: wire::GetHomeResponse = self
-            .read("home", wire::GetHomeRequest { library_id })
+            .read(
+                "home",
+                wire::GetHomeRequest {
+                    library_id: scope.library_id,
+                    source_id: scope.source_id,
+                },
+            )
             .await?;
         bridge(response.rows)
     }
-    pub async fn list_libraries(self: Arc<Self>) -> Result<Vec<MediaLibrary>, ClientError> {
-        let response: wire::ListLibrariesResponse = self
-            .read("libraries", wire::ListLibrariesRequest {})
-            .await?;
-        bridge(response.libraries)
-    }
-    pub async fn list_library_items(
+    pub async fn list_libraries(
         self: Arc<Self>,
-        library_id: String,
+        source_id: String,
         page: Page,
-    ) -> Result<ItemPage, ClientError> {
+    ) -> Result<LibraryPage, ClientError> {
         self.read(
-            "items",
-            wire::ListLibraryItemsRequest {
-                library_id,
+            "libraries",
+            wire::ListLibrariesRequest {
+                source_id,
                 page: Some(bridge(page)?),
             },
         )
         .await
     }
-    pub async fn get_item(self: Arc<Self>, id: String) -> Result<Item, ClientError> {
-        let response: wire::GetItemResponse =
-            self.read("item", wire::GetItemRequest { id }).await?;
+    pub async fn list_library_items(
+        self: Arc<Self>,
+        scope: SourceLibraryScope,
+        page: Page,
+    ) -> Result<ItemPage, ClientError> {
+        self.read(
+            "items",
+            wire::ListLibraryItemsRequest {
+                library_id: scope.library_id,
+                source_id: scope.source_id,
+                page: Some(bridge(page)?),
+            },
+        )
+        .await
+    }
+    pub async fn get_item(
+        self: Arc<Self>,
+        id: String,
+        scope: SourceLibraryScope,
+    ) -> Result<Item, ClientError> {
+        let response: wire::GetItemResponse = self
+            .read(
+                "item",
+                wire::GetItemRequest {
+                    id,
+                    scope: Some(bridge(scope)?),
+                },
+            )
+            .await?;
         bridge(response.item.ok_or_else(|| ClientError::InvalidResponse {
             reason: "missing item".into(),
         })?)
@@ -270,11 +369,13 @@ impl Client {
         self: Arc<Self>,
         parent_id: String,
         page: Page,
+        scope: SourceLibraryScope,
     ) -> Result<ItemPage, ClientError> {
         self.read(
             "children",
             wire::ListChildrenRequest {
                 parent_id,
+                scope: Some(bridge(scope)?),
                 page: Some(bridge(page)?),
             },
         )
@@ -284,17 +385,22 @@ impl Client {
         self: Arc<Self>,
         item_id: String,
         page: Page,
+        scope: SourceLibraryScope,
     ) -> Result<CreditPage, ClientError> {
         self.read(
             "credits",
             wire::ListCreditsRequest {
                 item_id,
+                scope: Some(bridge(scope)?),
                 page: Some(bridge(page)?),
             },
         )
         .await
     }
-    pub async fn search(self: Arc<Self>, request: SearchRequest) -> Result<ItemPage, ClientError> {
+    pub async fn search(
+        self: Arc<Self>,
+        request: SearchRequest,
+    ) -> Result<SearchPage, ClientError> {
         self.read("search", bridge::<_, wire::SearchRequest>(request)?)
             .await
     }
@@ -304,57 +410,38 @@ impl Client {
         self.read("capabilities", wire::GetSearchCapabilitiesRequest {})
             .await
     }
-    pub async fn get_preferences(self: Arc<Self>) -> Result<Preferences, ClientError> {
-        // Preferences intentionally bypass the read cache so different clients sharing a profile see updates.
-        let value = self
-            .dedup(
-                "preferences".into(),
-                "preferences".into(),
-                Value::Null,
-                false,
-            )
+    pub async fn get_current_user(self: Arc<Self>) -> Result<User, ClientError> {
+        if self.config.user_id.is_empty() {
+            return Err(invalid(
+                "get_current_user requires an explicit local user_id",
+            ));
+        }
+        let response: wire::GetCurrentUserResponse = self
+            .read("current_user", wire::GetCurrentUserRequest {})
             .await?;
-        bridge(
-            value
-                .get("preferences")
-                .ok_or_else(|| ClientError::InvalidResponse {
-                    reason: "missing preferences".into(),
-                })?,
-        )
+        bridge(response.user.ok_or_else(|| ClientError::InvalidResponse {
+            reason: "missing user".into(),
+        })?)
     }
-    pub async fn update_preferences(
+    pub async fn list_artwork(
         self: Arc<Self>,
-        preferences: Preferences,
-        update_mask: Vec<String>,
-    ) -> Result<Preferences, ClientError> {
-        static NEXT_WRITE: AtomicU64 = AtomicU64::new(0);
-        let key = format!(
-            "update_preferences:{}",
-            NEXT_WRITE.fetch_add(1, Ordering::Relaxed)
-        );
-        let value = self
-            .clone()
-            .dedup(
-                key,
-                "update_preferences".into(),
-                serde_json::json!({"preferences":preferences,"paths":update_mask}),
-                false,
-            )
-            .await?;
-        self.lock()?.values.clear();
-        bridge(
-            value
-                .get("preferences")
-                .ok_or_else(|| ClientError::InvalidResponse {
-                    reason: "missing preferences".into(),
-                })?,
+        scope: SourceLibraryScope,
+        page: Page,
+    ) -> Result<ArtworkPage, ClientError> {
+        self.read(
+            "artwork",
+            wire::ListArtworkRequest {
+                scope: Some(bridge(scope)?),
+                page: Some(bridge(page)?),
+            },
         )
+        .await
     }
     pub async fn load_artwork(self: Arc<Self>, url: String) -> Result<Vec<u8>, ClientError> {
         let parsed = url::Url::parse(&url).map_err(|e| invalid(e.to_string()))?;
         let base = url::Url::parse(&self.config.endpoint).map_err(|e| invalid(e.to_string()))?;
         if parsed.origin() != base.origin()
-            || !parsed.path().starts_with("/artwork/")
+            || !valid_artwork_path(parsed.path())
             || parsed.query().is_some()
             || parsed.fragment().is_some()
             || !parsed.username().is_empty()
@@ -365,19 +452,21 @@ impl Client {
             ));
         }
         let key = format!("art:{url}");
-        if let Some(bytes) = self
-            .lock()?
-            .art
-            .iter()
-            .find(|(k, _)| k == &url)
-            .map(|(_, v)| v.clone())
-        {
-            return Ok(bytes);
-        }
+        let generation = {
+            let cache = self.lock()?;
+            if let Some((_, bytes)) = cache.art.iter().find(|(k, _)| k == &url) {
+                return Ok(bytes.clone());
+            }
+            self.generation.load(Ordering::SeqCst)
+        };
         let value = self
             .clone()
             .dedup(key, "art".into(), Value::String(url.clone()), false)
             .await?;
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(hook) = self.artwork_completion_hook.lock().unwrap().take() {
+            hook();
+        }
         let bytes = STANDARD
             .decode(value.as_str().ok_or_else(|| ClientError::InvalidResponse {
                 reason: "missing artwork bytes".into(),
@@ -385,7 +474,11 @@ impl Client {
             .map_err(|e| ClientError::InvalidResponse {
                 reason: e.to_string(),
             })?;
-        self.lock()?.insert_art(url, bytes.clone());
+        let mut cache = self.lock()?;
+        if self.generation.load(Ordering::SeqCst) != generation {
+            return Err(ClientError::Cancelled);
+        }
+        cache.insert_art(url, bytes.clone());
         Ok(bytes)
     }
 }
@@ -424,13 +517,15 @@ impl Client {
     }
     fn request<T>(&self, body: T) -> Result<tonic::Request<T>, ClientError> {
         let mut r = tonic::Request::new(body);
-        r.metadata_mut().insert(
-            "x-screenroom-mock-profile",
-            self.config
-                .mock_profile
-                .parse()
-                .map_err(|_| invalid("invalid profile header"))?,
-        );
+        if !self.config.user_id.is_empty() {
+            r.metadata_mut().insert(
+                "x-screenroom-user-id",
+                self.config
+                    .user_id
+                    .parse()
+                    .map_err(|_| invalid("invalid local user header"))?,
+            );
+        }
         Ok(r)
     }
     async fn read<Q: Serialize, R: DeserializeOwned>(
@@ -439,7 +534,10 @@ impl Client {
         request: Q,
     ) -> Result<R, ClientError> {
         let value = serde_json::to_value(request).map_err(|e| invalid(e.to_string()))?;
-        let key = format!("{op}:{value}");
+        let key = format!(
+            "{}:{}:{op}:{value}",
+            self.config.endpoint, self.config.user_id
+        );
         if let Some(v) = self
             .lock()?
             .values
@@ -481,6 +579,8 @@ impl Client {
                     channel: self.channel.clone(),
                     generation: AtomicU64::new(0),
                     cache: Mutex::default(),
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
+                    artwork_completion_hook: Mutex::new(None),
                 };
                 let f = async move {
                     Abortable::new(client.call(&op, value), registration)
@@ -518,10 +618,8 @@ impl Client {
         if self.generation.load(Ordering::SeqCst) != generation {
             return Err(ClientError::Cancelled);
         }
-        if cache {
-            if let Ok(v) = &result {
-                c.insert_read(key, v.clone());
-            }
+        if cache && let Ok(v) = &result {
+            c.insert_read(key, v.clone());
         }
         result
     }
@@ -531,57 +629,64 @@ impl Client {
     async fn network(&self, op: &str, value: Value) -> Result<Value, ClientError> {
         if op == "art" {
             let url = value.as_str().ok_or_else(|| invalid("missing art URL"))?;
-            let response =
-                self.http
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| ClientError::Unavailable {
-                        reason: e.to_string(),
-                    })?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
-                return Err(ClientError::NotFound {
-                    reason: "artwork not found".into(),
-                });
-            }
-            if !response.status().is_success() {
-                return Err(ClientError::Unavailable {
-                    reason: format!("artwork HTTP {}", response.status()),
-                });
-            }
-            if response
-                .content_length()
-                .is_some_and(|n| n > 4 * 1024 * 1024)
+            #[cfg(target_arch = "wasm32")]
+            return Ok(Value::String(
+                STANDARD.encode(wasm::fetch_artwork(url).await?),
+            ));
+            #[cfg(not(target_arch = "wasm32"))]
             {
-                return Err(ClientError::ResourceExhausted {
-                    reason: "artwork exceeds 4 MiB".into(),
-                });
-            }
-            let mime = response
-                .headers()
-                .get("content-type")
-                .and_then(|h| h.to_str().ok())
-                .unwrap_or("");
-            if !["image/jpeg", "image/png", "image/svg+xml"].contains(&mime) {
-                return Err(ClientError::InvalidResponse {
-                    reason: "unsupported artwork MIME".into(),
-                });
-            }
-            let mut stream = response.bytes_stream();
-            let mut bytes = Vec::new();
-            use futures::StreamExt;
-            while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|e| ClientError::Unavailable {
-                    reason: e.to_string(),
-                })?;
-                if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+                let response =
+                    self.http
+                        .get(url)
+                        .send()
+                        .await
+                        .map_err(|e| ClientError::Unavailable {
+                            reason: e.to_string(),
+                        })?;
+                if response.status() == reqwest::StatusCode::NOT_FOUND {
+                    return Err(ClientError::NotFound {
+                        reason: "artwork not found".into(),
+                    });
+                }
+                if !response.status().is_success() {
+                    return Err(ClientError::Unavailable {
+                        reason: format!("artwork HTTP {}", response.status()),
+                    });
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|n| n > 4 * 1024 * 1024)
+                {
                     return Err(ClientError::ResourceExhausted {
                         reason: "artwork exceeds 4 MiB".into(),
                     });
                 }
-                bytes.extend_from_slice(&chunk);
+                let mime = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|h| h.to_str().ok())
+                    .unwrap_or("");
+                if !["image/jpeg", "image/png", "image/svg+xml"].contains(&mime) {
+                    return Err(ClientError::InvalidResponse {
+                        reason: "unsupported artwork MIME".into(),
+                    });
+                }
+                let mut stream = response.bytes_stream();
+                let mut bytes = Vec::new();
+                use futures::StreamExt;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.map_err(|e| ClientError::Unavailable {
+                        reason: e.to_string(),
+                    })?;
+                    if bytes.len() + chunk.len() > 4 * 1024 * 1024 {
+                        return Err(ClientError::ResourceExhausted {
+                            reason: "artwork exceeds 4 MiB".into(),
+                        });
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                return Ok(Value::String(STANDARD.encode(bytes)));
             }
-            return Ok(Value::String(STANDARD.encode(bytes)));
         }
         let transport = self.transport().await?;
         macro_rules! rpc {
@@ -648,26 +753,18 @@ impl Client {
                 get_search_capabilities,
                 wire::GetSearchCapabilitiesRequest
             ),
-            "preferences" => {
-                let response =
-                    wire::preferences_service_client::PreferencesServiceClient::new(transport)
-                        .get_preferences(self.request(wire::GetPreferencesRequest {})?)
-                        .await?;
-                bridge(response.into_inner())
-            }
-            "update_preferences" => {
-                let body = wire::UpdatePreferencesRequest {
-                    preferences: Some(bridge(value["preferences"].clone())?),
-                    update_mask: Some(prost_types::FieldMask {
-                        paths: bridge(value["paths"].clone())?,
-                    }),
-                };
-                let response =
-                    wire::preferences_service_client::PreferencesServiceClient::new(transport)
-                        .update_preferences(self.request(body)?)
-                        .await?;
-                bridge(response.into_inner())
-            }
+            "artwork" => rpc!(
+                catalog_service_client,
+                CatalogServiceClient,
+                list_artwork,
+                wire::ListArtworkRequest
+            ),
+            "current_user" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                get_current_user,
+                wire::GetCurrentUserRequest
+            ),
             _ => Err(invalid("unknown operation")),
         }
     }
@@ -699,11 +796,43 @@ mod wasm;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn cancellation_after_artwork_transport_cannot_populate_cache() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let client = Client::new(ClientConfig {
+                endpoint: endpoint.clone(), user_id: String::new(), timeout_ms: 1000,
+            }).unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc").await.unwrap();
+            });
+            let completed = Arc::new(std::sync::Barrier::new(2));
+            let resume = Arc::new(std::sync::Barrier::new(2));
+            let (at_completion, continue_completion) = (completed.clone(), resume.clone());
+            *client.artwork_completion_hook.lock().unwrap() = Some(Box::new(move || {
+                at_completion.wait();
+                continue_completion.wait();
+            }));
+            let operation = tokio::spawn(client.clone().load_artwork(format!("{endpoint}/artwork/00000000-0000-0000-0000-000000000001/revisions/1/native")));
+            completed.wait(); // The real transport and dedup have completed, insertion has not.
+            client.cancel_all();
+            resume.wait();
+            assert!(matches!(operation.await.unwrap(), Err(ClientError::Cancelled)));
+            assert!(client.lock().unwrap().art.is_empty());
+            assert!(client.lock().unwrap().pending.is_empty());
+            server.await.unwrap();
+        });
+    }
     async fn stalled_client() -> (Arc<Client>, tokio::net::TcpListener) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = Client::new(ClientConfig {
             endpoint: format!("http://{}", listener.local_addr().unwrap()),
-            mock_profile: "ownership".into(),
+            user_id: String::new(),
             timeout_ms: 25,
         })
         .unwrap();
@@ -714,7 +843,13 @@ mod tests {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let (client, _listener) = stalled_client().await;
             let mut requests = (0..32)
-                .map(|n| Box::pin(client.clone().get_item(n.to_string())))
+                .map(|n| {
+                    Box::pin(
+                        client
+                            .clone()
+                            .get_item(n.to_string(), SourceLibraryScope::default()),
+                    )
+                })
                 .collect::<Vec<_>>();
             for request in &mut requests {
                 assert!(futures::poll!(request.as_mut()).is_pending());
@@ -724,7 +859,10 @@ mod tests {
             assert!(client.lock().unwrap().pending.is_empty());
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             assert!(matches!(
-                client.clone().get_item("new-request".into()).await,
+                client
+                    .clone()
+                    .get_item("new-request".into(), SourceLibraryScope::default())
+                    .await,
                 Err(ClientError::DeadlineExceeded)
             ));
             assert!(client.lock().unwrap().pending.is_empty());
@@ -735,8 +873,16 @@ mod tests {
     fn dropping_one_dedup_waiter_preserves_the_other() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let (client, _listener) = stalled_client().await;
-            let mut first = Box::pin(client.clone().get_item("shared".into()));
-            let mut second = Box::pin(client.clone().get_item("shared".into()));
+            let mut first = Box::pin(
+                client
+                    .clone()
+                    .get_item("shared".into(), SourceLibraryScope::default()),
+            );
+            let mut second = Box::pin(
+                client
+                    .clone()
+                    .get_item("shared".into(), SourceLibraryScope::default()),
+            );
             assert!(futures::poll!(first.as_mut()).is_pending());
             assert!(futures::poll!(second.as_mut()).is_pending());
             assert_eq!(
@@ -771,11 +917,19 @@ mod tests {
     fn old_generation_waiter_cannot_remove_replacement_request() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let (client, _listener) = stalled_client().await;
-            let mut old = Box::pin(client.clone().get_item("shared".into()));
+            let mut old = Box::pin(
+                client
+                    .clone()
+                    .get_item("shared".into(), SourceLibraryScope::default()),
+            );
             assert!(futures::poll!(old.as_mut()).is_pending());
             client.cancel_all();
             assert_eq!(client.generation.load(Ordering::SeqCst), 1);
-            let mut replacement = Box::pin(client.clone().get_item("shared".into()));
+            let mut replacement = Box::pin(
+                client
+                    .clone()
+                    .get_item("shared".into(), SourceLibraryScope::default()),
+            );
             assert!(futures::poll!(replacement.as_mut()).is_pending());
             assert!(matches!(old.await, Err(ClientError::Cancelled)));
             assert_eq!(client.lock().unwrap().pending.len(), 1);

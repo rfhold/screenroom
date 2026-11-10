@@ -40,3 +40,6 @@ required-features = ["bindgen"]
 
 [features]
 bindgen = ["uniffi/cli"]
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tonic = { workspace = true, features = ["router"] }
