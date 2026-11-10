@@ -11,12 +11,17 @@ publish = false
 [workspace.dependencies]
 opentelemetry = "0.33.1"
 opentelemetry-appender-tracing = "0.33.1"
-opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "reqwest-rustls", "trace"] }
 opentelemetry_sdk = { version = "0.33.1", features = ["rt-tokio"] }
 prost = "0.14"
 pyroscope = { version = "2.0.6", default-features = false, features = ["backend-pprof-rs"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen"] }
 tonic-prost = "0.14"
+tonic-tracing-opentelemetry = { version = "0.42.1", features = ["tracing_level_info"] }
+tonic-web = "0.14"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tracing = "0.1"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
