@@ -3,9 +3,12 @@ plugins:
   - local: protoc-gen-prost
     out: crates/screenroom-proto/src/generated
     opt:
-      - 'type_attribute=.screenroom.client.v1=#[derive(serde::Serialize)]'
-      - 'type_attribute=.screenroom.client.v1=#[derive(serde::Deserialize)]'
-      - 'field_attribute=.screenroom.client.v1.UpdatePreferencesRequest.update_mask=#[serde(skip)]'
+      - 'type_attribute=.screenroom.catalog.v1=#[derive(serde::Serialize)]'
+      - 'type_attribute=.screenroom.catalog.v1=#[derive(serde::Deserialize)]'
+      - 'type_attribute=.screenroom.user.v1=#[derive(serde::Serialize)]'
+      - 'type_attribute=.screenroom.user.v1=#[derive(serde::Deserialize)]'
+      - 'type_attribute=.screenroom.common.v1=#[derive(serde::Serialize)]'
+      - 'type_attribute=.screenroom.common.v1=#[derive(serde::Deserialize)]'
   - local: protoc-gen-tonic
     out: crates/screenroom-proto/src/generated
     opt:

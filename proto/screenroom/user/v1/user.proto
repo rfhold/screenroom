@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package screenroom.user.v1;
+
+// Public trusted-local read API. x-screenroom-user-id metadata must contain one
+// UUID string selecting an enabled local user. It is not authentication.
+service UserService {
+  rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse);
+}
+
+message User {
+  string id = 1;
+  string display_name = 2;
+}
+message GetCurrentUserRequest {}
+message GetCurrentUserResponse { User user = 1; }

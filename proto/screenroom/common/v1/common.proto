@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package screenroom.common.v1;
+
+message SearchTypes {
+  bool movie = 1;
+  bool series = 2;
+  bool episode = 3;
+}
+message SearchMethods {
+  bool title_only = 1;
+  bool text = 2;
+  bool fuzzy = 3;
+  bool semantic = 4;
+}
+
+// Stable public IDs, not database UUID assumptions. Empty fields select all
+// enabled records; a library must belong to source_id when both are supplied.
+message SourceLibraryScope {
+  string source_id = 1;
+  string library_id = 2;
+}

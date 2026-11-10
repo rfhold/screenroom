@@ -1,3 +1,212 @@
 syntax = "proto3";
 
 package screenroom.catalog.v1;
+
+import "screenroom/common/v1/common.proto";
+
+service BrowseService {
+  rpc GetHome(GetHomeRequest) returns (GetHomeResponse);
+  rpc ListLibraries(ListLibrariesRequest) returns (ListLibrariesResponse);
+  rpc ListLibraryItems(ListLibraryItemsRequest) returns (ListLibraryItemsResponse);
+}
+service CatalogService {
+  rpc GetCatalogInfo(GetCatalogInfoRequest) returns (GetCatalogInfoResponse);
+  rpc GetItem(GetItemRequest) returns (GetItemResponse);
+  rpc ListChildren(ListChildrenRequest) returns (ListChildrenResponse);
+  rpc ListCredits(ListCreditsRequest) returns (ListCreditsResponse);
+  rpc ListArtwork(ListArtworkRequest) returns (ListArtworkResponse);
+}
+service SearchService {
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc GetSearchCapabilities(GetSearchCapabilitiesRequest) returns (GetSearchCapabilitiesResponse);
+}
+
+message Rights {
+  string label = 1;
+  string note = 2;
+  string source = 3;
+  string license_url = 4;
+  string attribution = 5;
+}
+message Artwork {
+  string id = 1;
+  string url = 2;
+  string label = 3;
+  string creator = 4;
+  string license = 5;
+  string source = 6;
+  string license_url = 7;
+  string kind = 8;
+}
+message Credit {
+  string id = 1;
+  string name = 2;
+  string role = 3;
+  string department = 4;
+  Artwork artwork = 5;
+}
+message CatalogNotice {
+  string id = 1;
+  string section = 2;
+  string title = 3;
+  string text = 4;
+  string link_label = 5;
+  string link_url = 6;
+}
+message CatalogInfo {
+  reserved 1;
+  reserved "artwork";
+  // At most 32 notices and 8 branding images; full credits use ListArtwork.
+  repeated CatalogNotice notices = 2;
+  string retrieved_at = 3;
+  repeated Artwork branding = 4;
+}
+message Rating {
+  string provider = 1;
+  double value = 2;
+  double scale = 3;
+  optional uint64 votes = 4;
+  string retrieved_at = 5;
+}
+message Runtime {
+  optional uint32 seconds = 1;
+  optional uint32 minimum_seconds = 2;
+  optional uint32 maximum_seconds = 3;
+  string note = 4;
+  string display = 5;
+}
+message ProviderReference {
+  string provider = 1;
+  string status = 2;
+  string url = 3;
+}
+message Item {
+  string id = 1;
+  string title = 2;
+  string kind = 3;
+  optional string parent_id = 4;
+  uint32 year = 5;
+  string subtitle = 6;
+  string overview = 7;
+  repeated string tags = 8;
+  repeated string colors = 9;
+  string release_date = 10;
+  uint32 added_order = 11;
+  Rights title_rights = 12;
+  Rights metadata_rights = 13;
+  Artwork artwork = 14;
+  Rating rating = 15;
+  Runtime runtime = 16;
+  repeated ProviderReference provider_references = 17;
+  optional uint32 progress_percent = 18;
+  repeated string provenance_notes = 19;
+  string metadata_retrieved_at = 20;
+}
+message Page {
+  // Zero selects 50; maximum 200. Tokens are opaque and bound to request scope.
+  uint32 size = 1;
+  string token = 2;
+}
+message Library {
+  string id = 1;
+  string title = 2;
+}
+message HomeRow {
+  string id = 1;
+  string title = 2;
+  repeated Item items = 3;
+}
+message GetHomeRequest {
+  string library_id = 1;
+  string source_id = 2;
+}
+message GetHomeResponse { repeated HomeRow rows = 1; }
+message ListLibrariesRequest {
+  string source_id = 1;
+  Page page = 2;
+}
+message ListLibrariesResponse {
+  repeated Library libraries = 1;
+  string next_page_token = 2;
+}
+message ListLibraryItemsRequest {
+  string library_id = 1;
+  Page page = 2;
+  string source_id = 3;
+}
+message ListLibraryItemsResponse {
+  repeated Item items = 1;
+  string next_page_token = 2;
+}
+message GetItemRequest {
+  string id = 1;
+  // Absent or empty selects all enabled installation sources/libraries.
+  // Apply scope before metadata precedence.
+  screenroom.common.v1.SourceLibraryScope scope = 2;
+}
+message GetCatalogInfoRequest {}
+message GetCatalogInfoResponse { CatalogInfo info = 1; }
+message GetItemResponse { Item item = 1; }
+message ListChildrenRequest {
+  string parent_id = 1;
+  // Bounded page; token binds operation, parent_id, and normalized scope.
+  Page page = 2;
+  // Absent or empty selects all enabled installation sources/libraries.
+  // Apply scope before metadata precedence.
+  screenroom.common.v1.SourceLibraryScope scope = 3;
+}
+message ListChildrenResponse {
+  repeated Item items = 1;
+  string next_page_token = 2;
+}
+message ListCreditsRequest {
+  string item_id = 1;
+  // Bounded page; token binds operation, item_id, and normalized scope.
+  Page page = 2;
+  // Absent or empty selects all enabled installation sources/libraries.
+  // Apply scope before metadata precedence.
+  screenroom.common.v1.SourceLibraryScope scope = 3;
+}
+message ListCreditsResponse {
+  repeated Credit credits = 1;
+  string next_page_token = 2;
+}
+message ListArtworkRequest {
+  screenroom.common.v1.SourceLibraryScope scope = 1;
+  Page page = 2;
+}
+message ListArtworkResponse {
+  // Complete enabled-scope credits, deduplicated and ordered by stable artwork
+  // ID across pages; not limited to artwork on items the caller has visited.
+  repeated Artwork artwork = 1;
+  string next_page_token = 2;
+}
+message SearchRequest {
+  string query = 1;
+  string library_id = 2;
+  screenroom.common.v1.SearchTypes types = 3;
+  screenroom.common.v1.SearchMethods methods = 4;
+  // Provider choice: all, tmdb, or jellyfin; not an installation source ID.
+  string source = 5;
+  Page page = 6;
+  string source_id = 7;
+}
+message SearchResponse {
+  repeated Item items = 1;
+  string next_page_token = 2;
+  // Actual methods used, including on pages of a saved result snapshot.
+  screenroom.common.v1.SearchMethods effective_methods = 3;
+  // Empty without degradation; otherwise embedding_unavailable,
+  // embedding_incompatible, or embedding_coverage_incomplete. Semantic is false
+  // in effective_methods when lexical-only fallback is returned. If no valid
+  // lexical fallback exists, fail the RPC rather than fabricating results.
+  string degradation_reason = 4;
+}
+message GetSearchCapabilitiesRequest {}
+message GetSearchCapabilitiesResponse {
+  repeated string methods = 1;
+  repeated string types = 2;
+  repeated string sources = 3;
+  string semantic_description = 4;
+  uint32 maximum_query_length = 5;
+}

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package screenroom.user.internal.v1;
+
+import "screenroom/common/v1/common.proto";
+
+// Private catalog-to-user listener only; never routed through client ingress.
+service PlaybackStateService {
+  rpc GetContinueWatching(GetContinueWatchingRequest) returns (GetContinueWatchingResponse);
+}
+
+message GetContinueWatchingRequest {
+  // Explicit local UUID selector, not authentication or a Jellyfin identity.
+  string user_id = 1;
+  // Between 1 and 32 scopes, each with a nonempty source_id. Empty library_id
+  // selects that source's libraries. Resolve only operator-assigned links.
+  repeated screenroom.common.v1.SourceLibraryScope scopes = 2;
+  // Zero selects 50; maximum 200. Token binds user and normalized scopes.
+  uint32 page_size = 3;
+  string page_token = 4;
+}
+message ContinueWatchingEntry {
+  string source_id = 1;
+  string external_item_id = 2;
+  uint64 position_seconds = 3;
+  // Zero when duration is unknown.
+  uint64 duration_seconds = 4;
+  // Inclusive range 0..100.
+  uint32 progress_percent = 5;
+  // UTC RFC 3339; newest first, then source_id/external_item_id ascending.
+  string updated_at = 6;
+}
+message GetContinueWatchingResponse {
+  // No mapping yields an empty page, never another Jellyfin user's progress.
+  repeated ContinueWatchingEntry entries = 1;
+  string next_page_token = 2;
+}
