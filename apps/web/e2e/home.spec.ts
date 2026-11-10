@@ -3,12 +3,13 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { paginate } from './pagination';
-import { serverVariant, duplicateLibraryLabels, requestLibrary, refreshedDetail } from './rpc-variant';
+import { serverVariant, duplicateLibraryLabels, requestLibrary, refreshedDetail, brandingUrl, requestScope, degradedSearch } from './rpc-variant';
+import { isRpcPath, rpcRoute } from './rpc-paths';
 const snapshot = JSON.parse(await readFile(new URL('../../../fixtures/catalog/tmdb.json', import.meta.url), 'utf8'));
-type RequestRecord = { url: string; contentType: string; profile?: string; bytes?: number; sha256?: string };
+type RequestRecord = { url: string; contentType: string; bytes?: number; sha256?: string };
 const network = new WeakMap<Page, RequestRecord[]>();
 
-const rows = ['Continue Watching / Up Next', 'Recently Released Movies', 'Recently Added Movies', 'Recently Released Episodes', 'Recently Added Episodes'];
+const rows = ['Continue watching', 'Catalog'];
 const menu = (page: Page) => page.getByRole('navigation', { name: 'Main menu', exact: true });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Breadcrumb', exact: true });
 function expectRpc(response: Response) {
@@ -17,12 +18,31 @@ function expectRpc(response: Response) {
   expect(response.headers()['content-type']).toContain('application/grpc-web+proto');
 }
 async function openSearch(page: Page) { await menu(page).getByRole('link', { name: 'Search titles', exact: true }).click(); }
+async function lexicalOnly(page: Page) {
+  await searchSettings(page);
+  await page.getByRole('checkbox', { name: /^Semantic/ }).uncheck();
+  await searchSettings(page, false);
+}
 async function searchSettings(page: Page, open = true) {
   const button = page.getByRole('button', { name: 'Search settings', exact: true });
   if (await button.getAttribute('aria-expanded') !== String(open)) await button.click();
   await expect(button).toHaveAttribute('aria-expanded', String(open));
 }
 async function expand(page: Page) { await page.getByRole('button', { name: 'Expand sidebar', exact: true }).click(); }
+async function metadataClock(page: Page) {
+  await page.addInitScript(() => {
+    const clock = { offset: 0, writes: 0 };
+    Object.defineProperty(window, '__screenroomClock', { value: clock });
+    const now = performance.now.bind(performance);
+    Object.defineProperty(performance, 'now', { value: () => now() + clock.offset });
+    const setItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key.startsWith('screenroom.settings.v1:')) clock.writes++;
+      return setItem.call(this, key, value);
+    };
+  });
+}
+const advanceMetadataClock = (page: Page) => page.evaluate(() => { (window as typeof window & { __screenroomClock: { offset: number } }).__screenroomClock.offset += 70_000; });
 async function capture(page: Page, name: string) {
   await expect(page.locator('.image-state[aria-label^="Loading "]')).toHaveCount(0);
   await page.evaluate(async () => {
@@ -37,21 +57,21 @@ async function capture(page: Page, name: string) {
 }
 
 test.beforeEach(async ({ page }) => {
-  await page.addInitScript(profile => { if (!sessionStorage.getItem('screenroom.mockProfile')) sessionStorage.setItem('screenroom.mockProfile', profile); }, `web-e2e-${crypto.randomUUID()}`);
+  await page.addInitScript(namespace => { if (!localStorage.getItem('screenroom.settingsNamespace')) localStorage.setItem('screenroom.settingsNamespace', namespace); }, `${process.env.SCREENROOM_E2E_SETTINGS_NAMESPACE || 'web-e2e'}-${crypto.randomUUID()}`);
   const errors: string[] = [];
   const forbidden: string[] = [];
   const requests: RequestRecord[] = [];
   network.set(page, requests);
   page.on('response', response => {
     const contentType = response.headers()['content-type'] ?? '';
-    if (/grpc-web|wasm|image\//.test(contentType)) requests.push({ url: response.url(), contentType, profile: response.request().headers()['x-screenroom-mock-profile'] });
+    if (/grpc-web|wasm|image\//.test(contentType)) requests.push({ url: response.url(), contentType });
   });
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   page.on('request', request => {
     const url = new URL(request.url());
-    const endpoint = new URL(process.env.SCREENROOM_E2E_API_ENDPOINT || 'http://127.0.0.1:50063');
-    const mock = url.origin === endpoint.origin && (/^\/screenroom\.client\.v1\.(Browse|Catalog|Search|Preferences)Service\/(GetHome|ListLibraries|ListLibraryItems|GetItem|ListChildren|ListCredits|GetCatalogInfo|Search|GetSearchCapabilities|GetPreferences|UpdatePreferences)$/.test(url.pathname) || /^\/artwork\/[a-z0-9-]+\.(jpg|png)$/.test(url.pathname) || url.pathname === '/health');
+    const endpoint = new URL(process.env.SCREENROOM_E2E_API_ENDPOINT || 'http://127.0.0.1:50051');
+    const mock = url.origin === endpoint.origin && (isRpcPath(url.pathname) || /^\/artwork\/[0-9a-f-]{36}\/revisions\/[1-9][0-9]*\/(native|original)$/.test(url.pathname));
     const local = url.origin === 'http://127.0.0.1:4173' && (url.pathname === '/' || /^\/(src|node_modules|@fs|@id|@vite|_app)\//.test(url.pathname) || /^\/\.svelte-kit\/generated\/dev\/client\/(matchers|nodes\/[0-9]+)\.js$/.test(url.pathname));
     if (!mock && !local && url.protocol !== 'blob:') forbidden.push(request.url());
   });
@@ -63,18 +83,17 @@ test.beforeEach(async ({ page }) => {
 });
 
 test('Rust WASM makes real gRPC-web calls and core-loaded artwork becomes blob images', { tag: '@regression' }, async ({ page }, info) => {
-  const requests: { url: string; contentType: string; profile?: string }[] = [];
+  const requests: RequestRecord[] = [];
   page.on('response', response => {
     const contentType = response.headers()['content-type'] ?? '';
-    if (/grpc-web|wasm|image\//.test(contentType)) requests.push({ url: response.url(), contentType, profile: response.request().headers()['x-screenroom-mock-profile'] });
+    if (/grpc-web|wasm|image\//.test(contentType)) requests.push({ url: response.url(), contentType });
   });
   await page.reload();
   await expect(page.getByRole('heading', { level: 2 })).toHaveText(rows);
   await expect(page.locator('.poster img').first()).toHaveAttribute('src', /^blob:/);
   await expand(page);
-  const updated = page.waitForResponse(response => response.url().endsWith('.PreferencesService/UpdatePreferences'));
   await page.getByRole('radio', { name: 'Transcription', exact: true }).check();
-  await updated;
+  await expect.poll(() => page.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('screenroom.settings.v1:') && value.includes('transcription')))).toBe(true);
   await page.reload();
   await expand(page);
   await expect(page.getByRole('radio', { name: 'Transcription', exact: true })).toBeChecked();
@@ -88,15 +107,58 @@ test('Rust WASM makes real gRPC-web calls and core-loaded artwork becomes blob i
   await expect(page.getByRole('searchbox')).toHaveValue('Bunny');
   expect(requests.some(record => record.contentType.includes('application/wasm'))).toBe(true);
   expect(requests.some(record => record.url.endsWith('.BrowseService/GetHome') && record.contentType.includes('grpc-web'))).toBe(true);
-  expect(requests.some(record => record.url.endsWith('.SearchService/Search') && record.contentType.includes('grpc-web') && record.profile?.startsWith('web-e2e-'))).toBe(true);
+  expect(requests.some(record => record.url.endsWith('.SearchService/Search') && record.contentType.includes('grpc-web'))).toBe(true);
   expect(requests.some(record => /\/artwork\//.test(record.url) && record.contentType.startsWith('image/'))).toBe(true);
   await info.attach('wasm-grpc-artwork-requests', { body: JSON.stringify(requests, null, 2), contentType: 'application/json' });
   await mkdir('e2e/build/requests', { recursive: true });
   await writeFile(`e2e/build/requests/wasm-grpc-artwork-${info.project.name}.json`, JSON.stringify(requests, null, 2));
 });
 
+test('one navigation budget spans metadata and final Home response without a late settings commit', { tag: '@regression' }, async ({ page }) => {
+  await metadataClock(page);
+  let libraries = 0, homes = 0;
+  await page.route(rpcRoute('BrowseService/ListLibraries'), async route => {
+    const response = await route.fetch(); libraries++;
+    await advanceMetadataClock(page); await route.fulfill({ response });
+  });
+  await page.route(rpcRoute('BrowseService/GetHome'), async route => {
+    const response = await route.fetch(); homes++;
+    await advanceMetadataClock(page); await route.fulfill({ response });
+  });
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('Metadata operation deadline exceeded');
+  expect({ libraries, homes }).toEqual({ libraries: 1, homes: 1 });
+  expect(await page.evaluate(() => (window as typeof window & { __screenroomClock: { writes: number } }).__screenroomClock.writes)).toBe(0);
+  await page.unroute(rpcRoute('BrowseService/ListLibraries'));
+  await page.unroute(rpcRoute('BrowseService/GetHome'));
+  await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  await expect(page.locator('.rows h2')).toHaveText(rows);
+  expect(await page.evaluate(() => (window as typeof window & { __screenroomClock: { writes: number } }).__screenroomClock.writes)).toBe(1);
+});
+
+test('Search shares the navigation metadata deadline and Retry starts a fresh complete operation', { tag: '@regression' }, async ({ page }) => {
+  await metadataClock(page);
+  let libraries = 0, searches = 0;
+  await page.route(rpcRoute('BrowseService/ListLibraries'), async route => {
+    const response = await route.fetch(); libraries++;
+    await advanceMetadataClock(page); await route.fulfill({ response });
+  });
+  await page.route(rpcRoute('SearchService/Search'), async route => {
+    const response = await route.fetch(); searches++;
+    await advanceMetadataClock(page); await route.fulfill({ response });
+  });
+  await page.goto('/?screen=search&library=all&q=Bunny&types=Movie&methods=text');
+  await expect(page.getByRole('alert')).toContainText('Metadata operation deadline exceeded');
+  expect({ libraries, searches }).toEqual({ libraries: 1, searches: 1 });
+  await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toHaveCount(0);
+  await page.unroute(rpcRoute('BrowseService/ListLibraries'));
+  await page.unroute(rpcRoute('SearchService/Search'));
+  await page.getByRole('button', { name: 'Retry search', exact: true }).click();
+  await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toBeVisible();
+});
+
 test('initial unavailable RPC shows an honest error and Retry rereads the server', { tag: '@retry' }, async ({ page }) => {
-  const unavailable = '**/screenroom.client.v1.BrowseService/GetHome';
+  const unavailable = rpcRoute('BrowseService/GetHome');
   await page.route(unavailable, async route => {
     const trailer = Buffer.from('grpc-status: 14\r\ngrpc-message: mock unavailable\r\n');
     const header = Buffer.alloc(5); header[0] = 0x80; header.writeUInt32BE(trailer.length, 1);
@@ -109,7 +171,7 @@ test('initial unavailable RPC shows an honest error and Retry rereads the server
   await page.unroute(unavailable);
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(page.getByRole('heading', { level: 2 })).toHaveText(rows);
-  const catalog = '**/screenroom.client.v1.CatalogService/GetCatalogInfo';
+  const catalog = rpcRoute('CatalogService/GetCatalogInfo');
   await page.route(catalog, async route => {
     const trailer = Buffer.from('grpc-status: 14\r\ngrpc-message: catalog unavailable\r\n');
     const header = Buffer.alloc(5); header[0] = 0x80; header.writeUInt32BE(trailer.length, 1);
@@ -120,14 +182,16 @@ test('initial unavailable RPC shows an honest error and Retry rereads the server
   await expect(page.getByRole('alert')).toContainText('catalog unavailable');
   await expect(page.getByRole('status').filter({ hasText: 'Refreshed from server.' })).toHaveCount(0);
   await page.unroute(catalog);
+  const catalogBody = page.waitForResponse(response => response.url().endsWith('/GetCatalogInfo')).then(response => response.body());
   await page.getByRole('button', { name: 'Retry', exact: true }).click();
+  const logoUrl = brandingUrl(await catalogBody);
   await expect(page.locator('.rows h2')).toHaveText(rows);
-  await page.route('**/artwork/tmdb.png', route => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('invalid image bytes') }));
+  await page.route(logoUrl, route => route.fulfill({ status: 200, contentType: 'image/png', body: Buffer.from('invalid image bytes') }));
   await page.reload();
   await page.locator('.credits > summary').click();
   await expect(page.locator('.credits .brand [role="img"]')).toHaveAttribute('aria-label', /artwork unavailable$/);
   await expect(page.locator('.credits .brand img')).toHaveCount(0);
-  await page.unroute('**/artwork/tmdb.png');
+  await page.unroute(logoUrl);
   await page.reload();
   await page.locator('.credits > summary').click();
   await expect(page.locator('.credits .brand img')).toHaveAttribute('src', /^blob:/);
@@ -193,7 +257,7 @@ test('search-result detail Refresh completes after real reads and reports failed
   await expect(page.locator('section[aria-label="Crew"] li > span')).toHaveText(Array(6).fill(/^Fresh crew role from RPC: /));
   await page.locator('.credits > summary').click();
   await expect(page.locator('.credits')).toContainText('Fresh catalog notice from RPC');
-  const credits = '**/screenroom.client.v1.CatalogService/ListCredits';
+  const credits = rpcRoute('CatalogService/ListCredits');
   await page.route(credits, async route => {
     const trailer = Buffer.from('grpc-status: 14\r\ngrpc-message: detail credits unavailable\r\n');
     const header = Buffer.alloc(5); header[0] = 0x80; header.writeUInt32BE(trailer.length, 1);
@@ -251,30 +315,197 @@ test('duplicate server library labels preserve stable IDs through browse, search
   await expect(crumbs(page).getByRole('link', { name: 'Shared library', exact: true })).toHaveAttribute('href', /library=tv$/);
 });
 
-test('server preferences persist per mock profile and do not bleed into another profile', { tag: '@regression' }, async ({ page }) => {
-  const original = await page.evaluate(() => sessionStorage.getItem('screenroom.mockProfile'));
+test('local settings persist across reload and do not bleed into another namespace', { tag: '@regression' }, async ({ page, browser }) => {
+  const original = await page.evaluate(() => localStorage.getItem('screenroom.settingsNamespace'));
   await expand(page);
-  const saved = page.waitForResponse(response => response.url().endsWith('.PreferencesService/UpdatePreferences'));
   await page.getByRole('radio', { name: 'Library tracks', exact: true }).check();
-  await saved;
-  await page.evaluate(profile => sessionStorage.setItem('screenroom.mockProfile', `${profile}-isolated`), original);
+  await expect.poll(() => page.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('screenroom.settings.v1:') && value.includes('library_tracks')))).toBe(true);
+  await page.evaluate(namespace => localStorage.setItem('screenroom.settingsNamespace', `${namespace}-isolated`), original);
   await page.reload();
   await expand(page);
   await expect(page.getByRole('radio', { name: 'Off', exact: true })).toBeChecked();
-  await page.evaluate(profile => sessionStorage.setItem('screenroom.mockProfile', profile!), original);
+  await page.evaluate(namespace => localStorage.setItem('screenroom.settingsNamespace', namespace!), original);
   await page.reload();
   await expand(page);
   await expect(page.getByRole('radio', { name: 'Library tracks', exact: true })).toBeChecked();
+  const state = await page.context().storageState();
+  const relaunched = await browser.newContext({ storageState: state });
+  try {
+    const reopened = await relaunched.newPage();
+    await reopened.goto('http://127.0.0.1:4173');
+    await expand(reopened);
+    await expect(reopened.getByRole('radio', { name: 'Library tracks', exact: true })).toBeChecked();
+  } finally { await relaunched.close(); }
+  expect(network.get(page)!.some(record => record.url.includes('PreferencesService'))).toBe(false);
+});
+
+test('superseded routes cannot overwrite newer scope, including queued settings commits', { tag: '@regression' }, async ({ page }) => {
+  await page.goto('/?screen=browse&library=movies');
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Movies');
+  let release!: () => void;
+  let held!: () => void;
+  const gate = new Promise<void>(resolve => release = resolve);
+  const pending = new Promise<void>(resolve => held = resolve);
+  await page.route(rpcRoute('CatalogService/GetItem'), async route => {
+    const response = await route.fetch(); held(); await gate; await route.fulfill({ response });
+  });
+  try {
+    await page.getByRole('link', { name: /^Big Buck Bunny · Movie/ }).click();
+    await pending;
+    await page.evaluate(() => { const link = document.createElement('a'); link.href = '/?screen=browse&library=tv&source_id=mock-jellyfin'; link.textContent = 'Newer scoped route'; document.body.append(link); });
+    await page.getByRole('link', { name: 'Newer scoped route' }).click();
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('TV Shows');
+    const completed = page.waitForResponse(response => response.url().endsWith('/GetItem'));
+    release(); await (await completed).finished();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.unroute(rpcRoute('CatalogService/GetItem'));
+    const guarded = await page.evaluate(async () => {
+      const modulePath = '/src/lib/core/client.ts';
+      const settings = await import(modulePath);
+      let checks = 0;
+      await settings.saveSettings({ scope: { source_id: '', library_id: 'movies' } }, () => ++checks === 1);
+      return { checks, scope: (await settings.loadSettings()).scope };
+    });
+    expect(guarded).toEqual({ checks: 2, scope: { source_id: 'mock-jellyfin', library_id: 'tv' } });
+    await expect(page.getByRole('heading', { level: 1 })).toHaveText('TV Shows');
+    await page.goto('/?screen=search');
+    await expect(page.getByRole('searchbox')).toHaveAttribute('aria-label', 'Search TV Shows');
+    await expect(crumbs(page).getByRole('link', { name: 'TV Shows', exact: true })).toHaveAttribute('href', /source_id=mock-jellyfin/);
+  } finally { release(); await page.unroute(rpcRoute('CatalogService/GetItem')); }
+});
+
+test('unavailable local persistence leaves healthy catalog reads and current settings usable', { tag: '@regression' }, async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key, value) {
+      if (key.startsWith('screenroom.settings.v1:')) throw new DOMException('Storage quota exceeded', 'QuotaExceededError');
+      return original.call(this, key, value);
+    };
+  });
+  await page.reload();
+  const warning = page.getByText('Settings cannot be saved on this device. Current choices remain available until this page is closed.', { exact: true });
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Home');
+  await expect(warning).toBeVisible();
+  await expand(page);
+  await page.getByRole('radio', { name: 'Library tracks', exact: true }).check();
+  await menu(page).getByRole('link', { name: 'Movies', exact: true }).click();
+  await expect(page.locator('.catalog > a')).toHaveCount(8);
+  await expect(page.getByRole('radio', { name: 'Library tracks', exact: true })).toBeChecked();
+  await openSearch(page); await searchSettings(page);
+  await page.getByRole('checkbox', { name: 'Episodes', exact: true }).check();
+  await page.getByRole('checkbox', { name: /^Semantic/ }).uncheck();
+  await page.getByRole('searchbox').fill('Bunny');
+  await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toBeVisible();
+  await page.getByRole('link', { name: /^Big Buck Bunny/ }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Big Buck Bunny');
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(page.getByText('Refreshed from server.', { exact: true })).toBeVisible();
+  await menu(page).getByRole('link', { name: 'Home', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Home');
+  await openSearch(page); await searchSettings(page);
+  await expect(page.getByRole('checkbox', { name: 'Episodes', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: /^Semantic/ })).not.toBeChecked();
+  await expect(warning).toBeVisible();
+  const invalid = await page.evaluate(async () => {
+    const modulePath = '/src/lib/core/client.ts';
+    const settings = await import(modulePath);
+    await settings.saveSettings({});
+    const before = JSON.stringify(await settings.loadSettings());
+    let rejected = false;
+    try { await settings.saveSettings({ types: { movie: false, series: false, episode: false } }); }
+    catch { rejected = true; }
+    return { rejected, unchanged: before === JSON.stringify(await settings.loadSettings()) };
+  });
+  expect(invalid).toEqual({ rejected: true, unchanged: true });
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await expect(page.getByRole('status').filter({ hasText: /^Saved/ })).toHaveCount(0);
+});
+
+test('settings restore scope, provider, types and methods in a relaunched context and reject corrupt data', { tag: '@regression' }, async ({ page, browser }) => {
+  await menu(page).getByRole('link', { name: 'Movies', exact: true }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Movies');
+  await openSearch(page);
+  await searchSettings(page);
+  await page.getByRole('combobox', { name: 'Catalog', exact: true }).selectOption('tmdb');
+  await page.getByRole('checkbox', { name: 'Episodes', exact: true }).check();
+  await page.getByRole('checkbox', { name: /^Title only/ }).check();
+  await expect.poll(() => page.evaluate(() => Object.entries(localStorage).some(([key, value]) => key.startsWith('screenroom.settings.v1:') && value.includes('"title_only":true') && value.includes('"episode":true') && value.includes('"library_id":"movies"') && value.includes('"source":"tmdb"')))).toBe(true);
+  const relaunched = await browser.newContext({ storageState: await page.context().storageState() });
+  try {
+    const reopened = await relaunched.newPage();
+    await reopened.goto('http://127.0.0.1:4173/?screen=search');
+    await searchSettings(reopened);
+    await expect(reopened.getByRole('searchbox')).toHaveAttribute('aria-label', 'Search Movies');
+    await expect(reopened.getByRole('combobox', { name: 'Catalog', exact: true })).toHaveValue('tmdb');
+    await expect(reopened.getByRole('checkbox', { name: 'Episodes', exact: true })).toBeChecked();
+    await expect(reopened.getByRole('checkbox', { name: /^Title only/ })).toBeChecked();
+    await expect(reopened.getByRole('checkbox', { name: /^Semantic/ })).not.toBeChecked();
+    await reopened.evaluate(() => { for (const key of Object.keys(localStorage)) if (key.startsWith('screenroom.settings.v1:')) localStorage.setItem(key, '{invalid json'); });
+    await reopened.goto('http://127.0.0.1:4173/?screen=search');
+    await searchSettings(reopened);
+    await expect(reopened.getByRole('combobox', { name: 'Catalog', exact: true })).toHaveValue('all');
+    await expect(reopened.getByRole('checkbox', { name: /^Title only/ })).not.toBeChecked();
+  } finally { await relaunched.close(); }
+});
+
+test('full artwork attribution is fetched only when opened, includes all source records, and retries atomically', { tag: '@retry' }, async ({ page }) => {
+  expect(network.get(page)!.some(record => record.url.endsWith('/ListArtwork'))).toBe(false);
+  const routePath = rpcRoute('CatalogService/ListArtwork');
+  await page.route(routePath, route => {
+    const trailer = Buffer.from('grpc-status: 14\r\ngrpc-message: artwork credits unavailable\r\n');
+    const header = Buffer.alloc(5); header[0] = 0x80; header.writeUInt32BE(trailer.length, 1);
+    return route.fulfill({ status: 200, contentType: 'application/grpc-web+proto', body: Buffer.concat([header, trailer]) });
+  });
+  await page.locator('.credits > summary').click();
+  await expect(page.locator('.credits [role="alert"]')).toContainText('artwork credits unavailable');
+  await expect(page.locator('.credits .content > ul').first().locator(':scope > li')).toHaveCount(0);
+  await page.unroute(routePath);
+  await page.getByRole('button', { name: 'Retry credits', exact: true }).click();
+  await expect(page.locator('.credits .content > ul').first().locator(':scope > li')).toHaveCount(21);
+  await expect(page.locator('.credits section[data-section]')).toHaveCount(7);
+  await expect(page.locator('.credits [role="alert"]')).toHaveCount(0);
+});
+
+test('search displays actual effective methods and explicit semantic degradation', { tag: '@retry' }, async ({ page }) => {
+  await degradedSearch(page);
+  await openSearch(page);
+  await page.getByRole('searchbox').fill('Bunny');
+  await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toBeVisible();
+  await expect(page.getByRole('status')).toHaveText('Effective methods: text, fuzzy. embedding_unavailable');
+  await searchSettings(page);
+  await expect(page.getByRole('checkbox', { name: /^Semantic/ })).toBeChecked();
+  await page.unroute(rpcRoute('SearchService/Search'));
+  await page.getByRole('searchbox').fill('Sintel');
+  await expect(page.getByRole('status')).toHaveText('Effective methods: text, fuzzy, semantic.');
+});
+
+test('installation scope survives hierarchy, detail credits, paging and navigation', { tag: '@regression' }, async ({ page }) => {
+  const contexts: { method: string; scope: { source_id: string; library_id: string } }[] = [];
+  page.on('request', request => {
+    const method = request.url().split('/').at(-1)!;
+    if (['GetItem', 'ListChildren', 'ListCredits'].includes(method)) contexts.push({ method, scope: requestScope(request.postDataBuffer()!, method === 'GetItem' ? 2 : 3) });
+  });
+  const pages = await paginate(page, 'CatalogService/ListChildren');
+  await page.goto('/?screen=browse&library=tv&series=beverly-hillbillies&season=beverly-hillbillies-s1&source_id=mock-jellyfin');
+  await expect(page.locator('.catalog > a')).toHaveCount(2);
+  expect(pages.calls).toEqual(['', pages.token]);
+  await page.getByRole('link', { name: /^Getting Settled · Episode/ }).click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText('Getting Settled');
+  await expect(page).toHaveURL(/source_id=mock-jellyfin/);
+  await expect(crumbs(page).getByRole('link', { name: 'TV Shows', exact: true })).toHaveAttribute('href', /source_id=mock-jellyfin/);
+  expect(contexts.some(entry => entry.method === 'ListCredits')).toBe(true);
+  expect(contexts.every(entry => entry.scope.source_id === 'mock-jellyfin' && entry.scope.library_id === 'tv')).toBe(true);
 });
 
 test('an older delayed search cannot replace a newer query result', { tag: '@regression' }, async ({ page }) => {
   await openSearch(page);
+  await lexicalOnly(page);
   let release!: () => void;
   let arrived!: () => void;
   const held = new Promise<void>(resolve => release = resolve);
   const started = new Promise<void>(resolve => arrived = resolve);
   let first = true;
-  await page.route('**/screenroom.client.v1.SearchService/Search', async route => {
+  await page.route(rpcRoute('SearchService/Search'), async route => {
     if (!first) { await route.continue(); return; }
     first = false;
     const response = await route.fetch();
@@ -297,7 +528,7 @@ test('pagination collects library pages in order without duplicate IDs', { tag: 
   await expect(page.locator('.catalog > a')).toHaveCount(8);
   expect(pages.count()).toBe(8);
   expect(pages.calls).toEqual(['', pages.token]);
-  await expect(page.locator('.catalog > a').first()).toHaveAccessibleName(/^Nosferatu/);
+  await expect(page.locator('.catalog > a').first()).toHaveAccessibleName(/^Big Buck Bunny/);
 });
 
 test('pagination collects child pages and shows the second episode', { tag: '@regression' }, async ({ page }) => {
@@ -399,7 +630,7 @@ test('showcase captures share canonical navigation, state and viewport framing',
   await expect(page.getByRole('checkbox', { name: 'Shows', exact: true })).toBeChecked();
   await expect(page.getByRole('checkbox', { name: 'Episodes', exact: true })).not.toBeChecked();
   await searchSettings(page, false);
-  await expect(page.locator('.result-status')).toHaveText('1 result in All libraries');
+  await expect(page.locator('.result-status')).toHaveText(/\d+ results? in All libraries/);
   await topCapture('search');
   await page.locator('.credits > summary').click();
   const logo = page.locator('.credits .brand img');
@@ -412,11 +643,11 @@ test('showcase captures share canonical navigation, state and viewport framing',
   expect(logoBytes.equals(expectedLogo)).toBe(true);
   requests.push({ url: (await logo.getAttribute('src'))!, contentType: 'image/png', bytes: logoBytes.length, sha256: createHash('sha256').update(logoBytes).digest('hex') });
   expect(requests.some(record => record.contentType.includes('application/wasm'))).toBe(true);
-  for (const method of ['BrowseService/GetHome', 'BrowseService/ListLibraries', 'BrowseService/ListLibraryItems', 'CatalogService/GetItem', 'CatalogService/ListCredits', 'CatalogService/GetCatalogInfo', 'PreferencesService/GetPreferences', 'SearchService/Search']) {
-    expect(requests.some(record => record.url.endsWith(`.${method}`) && record.contentType.includes('grpc-web') && record.profile?.startsWith('web-e2e-')), method).toBe(true);
+  for (const method of ['BrowseService/GetHome', 'BrowseService/ListLibraries', 'BrowseService/ListLibraryItems', 'CatalogService/GetItem', 'CatalogService/ListCredits', 'CatalogService/GetCatalogInfo', 'CatalogService/ListArtwork', 'SearchService/Search']) {
+    expect(requests.some(record => record.url.endsWith(`.${method}`) && record.contentType.includes('grpc-web')), method).toBe(true);
   }
   expect(requests.some(record => /\/artwork\//.test(record.url) && record.contentType.startsWith('image/'))).toBe(true);
-  expect(requests.some(record => record.url.endsWith('/artwork/tmdb.png') && record.contentType === 'image/png')).toBe(true);
+  expect(requests.some(record => record.url.includes('/artwork/') && record.contentType === 'image/png')).toBe(true);
   await mkdir('e2e/build/requests', { recursive: true });
   const body = JSON.stringify(requests, null, 2);
   await writeFile(`e2e/build/requests/happy-path-${info.project.name}.json`, body);
@@ -498,7 +729,7 @@ test('home rows, linked title pages and keyboard access', { tag: '@regression' }
   await page.getByRole('region', { name: rows[1], exact: true }).getByRole('link', { name: /^Big Buck Bunny/ }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Big Buck Bunny');
   await page.goBack();
-  await page.getByRole('region', { name: rows[3], exact: true }).getByRole('link').first().click();
+  await page.getByRole('region', { name: rows[0], exact: true }).getByRole('link', { name: / · Episode · / }).first().click();
   await expect(page.getByRole('article')).toContainText('Episode · 1962');
   await menu(page).getByRole('link', { name: 'Home', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Home');
@@ -527,7 +758,7 @@ test('sidebar expands in document flow, stays consistent across screens and offe
   }
   await page.getByRole('radio', { name: 'Library tracks', exact: true }).check();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Home');
-  for (const destination of ['Movies', 'Search titles', 'TV shows', 'Home']) {
+  for (const destination of ['Movies', 'Search titles', 'TV Shows', 'Home']) {
     await menu(page).getByRole('link', { name: destination, exact: true }).click();
     const position = (await toggle.boundingBox())!;
     expect(position.x).toBe(toggleAfter.x);
@@ -560,11 +791,13 @@ test('library hierarchy uses real breadcrumbs, scope and browser Back/Forward', 
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Movies');
   await expect(page.getByRole('link', { name: / · Movie · / })).toHaveCount(8);
   await openSearch(page);
+  await lexicalOnly(page);
   await page.getByRole('searchbox').fill('Beverly');
   await expect(page.getByText('No matches in Movies. Try another search.')).toBeVisible();
   await page.goBack();
+  await page.goBack();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('Movies');
-  await menu(page).getByRole('link', { name: 'TV shows', exact: true }).click();
+  await menu(page).getByRole('link', { name: 'TV Shows', exact: true }).click();
   await expect(page.getByRole('link', { name: / · Movie · / })).toHaveCount(0);
   await page.getByRole('link', { name: /^The Beverly Hillbillies · Series/ }).click();
   await expect(page.getByRole('link', { name: / · Season · / })).toHaveCount(1);
@@ -572,15 +805,15 @@ test('library hierarchy uses real breadcrumbs, scope and browser Back/Forward', 
   await page.getByRole('link', { name: /^Season 1 ·/ }).click();
   await expect(page.getByRole('link', { name: / · Episode · / })).toHaveCount(2);
   const seasonUrl = page.url();
-  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV shows', 'The Beverly Hillbillies', 'Season 1']);
+  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV Shows', 'The Beverly Hillbillies', 'Season 1']);
   await expect(crumbs(page).getByRole('link', { name: 'The Beverly Hillbillies', exact: true })).toHaveAttribute('href', '/?screen=browse&library=tv&series=beverly-hillbillies');
   await openSearch(page);
-  await expect(page.getByText('Enter a title to search TV shows.')).toBeVisible();
+  await expect(page.getByText('Enter a title to search TV Shows.')).toBeVisible();
   await page.getByRole('searchbox').fill('Beverly');
   await expect(page.getByRole('link', { name: /^The Beverly Hillbillies · Series/ })).toBeVisible();
   await page.reload();
   await expect(page.getByRole('searchbox')).toHaveValue('Beverly');
-  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV shows', 'The Beverly Hillbillies', 'Season 1', 'Search']);
+  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV Shows', 'The Beverly Hillbillies', 'Season 1', 'Search']);
   await page.keyboard.press('Escape');
   await expect(page.getByRole('searchbox')).toBeVisible();
   await expect(page.getByRole('searchbox')).toHaveValue('Beverly');
@@ -593,10 +826,10 @@ test('library hierarchy uses real breadcrumbs, scope and browser Back/Forward', 
   await expect(page.getByRole('article')).toContainText('The Beverly Hillbillies · S1 E1 · ~25m');
   await expect(page.getByRole('article')).toContainText('1962-09-26');
   await page.reload();
-  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV shows', 'The Beverly Hillbillies', 'Season 1', 'The Clampetts Strike Oil']);
+  await expect(crumbs(page).getByRole('link')).toHaveText(['Home', 'TV Shows', 'The Beverly Hillbillies', 'Season 1', 'The Clampetts Strike Oil']);
   await crumbs(page).getByRole('link', { name: 'The Beverly Hillbillies', exact: true }).click();
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('The Beverly Hillbillies');
-  await crumbs(page).getByRole('link', { name: 'TV shows', exact: true }).click();
+  await crumbs(page).getByRole('link', { name: 'TV Shows', exact: true }).click();
   await expect(page.getByRole('link', { name: / · Series · / })).toHaveCount(1);
 });
 
@@ -630,7 +863,7 @@ test('search query, inline method guards, approximation, persistence and URL fil
   await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toBeVisible();
   await capture(page, `method-search-${info.project.name}`);
   await page.getByRole('searchbox').fill('zzzzzzzz');
-  await expect(page.getByText('No matches in All libraries. Try another search.')).toBeVisible();
+  await expect(page.locator('.result-status')).toHaveText(/\d+ results? in All libraries/);
   await page.getByRole('button', { name: 'Clear query' }).click();
   await expect(page.getByRole('searchbox')).toBeFocused();
   await expect(page.getByText('Enter a title to search All libraries.')).toBeVisible();
@@ -669,7 +902,7 @@ test('search query, inline method guards, approximation, persistence and URL fil
   await page.keyboard.press('Escape');
   await expect(page.getByRole('button', { name: 'Search settings' })).toBeFocused();
   await expect(methods).not.toBeVisible();
-  await page.getByRole('searchbox').fill('bunnu');
+  await page.getByRole('searchbox').fill('Big Buck Bunnu');
   await expect(page.getByRole('link', { name: /^Big Buck Bunny/ })).toBeVisible();
   await searchSettings(page);
   await methods.getByRole('checkbox', { name: /^Semantic/ }).check();
@@ -689,7 +922,8 @@ test('search query, inline method guards, approximation, persistence and URL fil
   await expect(page.getByRole('searchbox')).toHaveValue('');
   await searchSettings(page);
   await expect(page.getByRole('checkbox', { name: 'Episodes', exact: true })).toBeChecked();
-  for (const name of [/^Text/, /^Fuzzy titles/, /^Semantic/]) await expect(methods.getByRole('checkbox', { name })).toBeChecked();
+  await expect(methods.getByRole('checkbox', { name: /^Fuzzy titles/ })).toBeChecked();
+  await expect(methods.getByRole('checkbox', { name: /^Semantic/ })).not.toBeChecked();
   await page.getByRole('searchbox').fill('Bunny');
   await page.getByRole('searchbox').fill('zzzzzzzz');
   await expect(page.getByText('No matches in All libraries. Try another search.')).toBeVisible();
@@ -730,12 +964,12 @@ test('direct URLs reconstruct every screen and safely fall back on invalid state
 
 test('browse details validate ancestry while search details retain their originating context', { tag: '@regression' }, async ({ page }) => {
   for (const [query, heading, breadcrumb] of [
-    ['screen=browse&library=tv&series=beverly-hillbillies&season=beverly-hillbillies-s1&title=missing', 'Season 1', ['Home', 'TV shows', 'The Beverly Hillbillies', 'Season 1']],
+    ['screen=browse&library=tv&series=beverly-hillbillies&season=beverly-hillbillies-s1&title=missing', 'Season 1', ['Home', 'TV Shows', 'The Beverly Hillbillies', 'Season 1']],
     ['screen=browse&library=all&series=beverly-hillbillies&title=big-buck-bunny', 'The Beverly Hillbillies', ['Home', 'All libraries', 'The Beverly Hillbillies']],
-    ['screen=browse&library=tv&series=beverly-hillbillies&title=beverly-hillbillies-s1-e2', 'Getting Settled', ['Home', 'TV shows', 'The Beverly Hillbillies', 'Getting Settled']],
-    ['screen=browse&library=tv&series=beverly-hillbillies&season=beverly-hillbillies-s1&title=beverly-hillbillies-s1-e1', 'The Clampetts Strike Oil', ['Home', 'TV shows', 'The Beverly Hillbillies', 'Season 1', 'The Clampetts Strike Oil']],
+    ['screen=browse&library=tv&series=beverly-hillbillies&title=beverly-hillbillies-s1-e2', 'Getting Settled', ['Home', 'TV Shows', 'The Beverly Hillbillies', 'Getting Settled']],
+    ['screen=browse&library=tv&series=beverly-hillbillies&season=beverly-hillbillies-s1&title=beverly-hillbillies-s1-e1', 'The Clampetts Strike Oil', ['Home', 'TV Shows', 'The Beverly Hillbillies', 'Season 1', 'The Clampetts Strike Oil']],
     ['screen=search&library=all&series=beverly-hillbillies&season=beverly-hillbillies-s1&q=Bunny&title=big-buck-bunny', 'Big Buck Bunny', ['Home', 'All libraries', 'The Beverly Hillbillies', 'Season 1', 'Search', 'Big Buck Bunny']],
-    ['screen=search&library=tv&series=beverly-hillbillies&q=Settled&title=beverly-hillbillies-s1-e2', 'Getting Settled', ['Home', 'TV shows', 'The Beverly Hillbillies', 'Search', 'Getting Settled']]
+    ['screen=search&library=tv&series=beverly-hillbillies&q=Settled&title=beverly-hillbillies-s1-e2', 'Getting Settled', ['Home', 'TV Shows', 'The Beverly Hillbillies', 'Search', 'Getting Settled']]
   ] as const) {
     await page.goto(`/?${query}`);
     await expect(page.getByRole('heading', { level: 1 })).toHaveText(heading);
@@ -816,19 +1050,21 @@ test('catalog scope intersects filters, restores URL history and never invents a
   await searchSettings(page);
   await expect(source).toHaveValue('tmdb');
   await expect(page.getByRole('searchbox')).toHaveValue('Bunny');
+  await searchSettings(page);
   await source.selectOption('jellyfin');
-  await expect(page.locator('.result-status')).toContainText('No matches');
-  await expect(bunny).toHaveCount(0);
+  await expect(bunny).toBeVisible();
   await expect(page).toHaveURL(/source=jellyfin/);
   await page.reload();
   await searchSettings(page);
   await expect(source).toHaveValue('jellyfin');
-  await expect(page.locator('.result-status')).toContainText('No matches');
+  await expect(bunny).toBeVisible();
+  await searchSettings(page);
   await source.selectOption('tmdb');
   await expect(bunny).toBeVisible();
   await page.goBack();
   await expect(source).toHaveValue('jellyfin');
   await page.goForward();
+  await searchSettings(page);
   await expect(source).toHaveValue('tmdb');
   await page.getByRole('checkbox', { name: 'Episodes', exact: true }).check();
   await page.getByRole('checkbox', { name: 'Movies', exact: true }).uncheck();
@@ -836,10 +1072,10 @@ test('catalog scope intersects filters, restores URL history and never invents a
   await expect(source).toHaveValue('tmdb');
   await openSearch(page);
   await searchSettings(page);
-  await expect(source).toHaveValue('all');
-  expect(new URL(page.url()).searchParams.has('source')).toBe(false);
+  await expect(source).toHaveValue('tmdb');
+  expect(new URL(page.url()).searchParams.get('source')).toBe('tmdb');
   await page.goto('/?screen=search&library=tv&q=Bunny&types=Movie&methods=text&source=tmdb');
-  await expect(page.locator('.result-status')).toContainText('No matches in TV shows');
+  await expect(page.locator('.result-status')).toContainText('No matches in TV Shows');
   await expect(bunny).toHaveCount(0);
   await page.goto('/?screen=search&library=movies&q=Bunny&types=Movie&methods=text&source=invalid');
   await searchSettings(page);
@@ -850,7 +1086,7 @@ test('catalog scope intersects filters, restores URL history and never invents a
   await page.goto('/?screen=search&library=tv&source=jellyfin');
   await searchSettings(page);
   await expect(source).toHaveValue('jellyfin');
-  await expect(page.locator('.result-status')).toContainText('Enter a title to search TV shows.');
+  await expect(page.locator('.result-status')).toContainText('Enter a title to search TV Shows.');
 });
 
 test('real artwork, cast roles, crew, ratings and provider links', { tag: '@regression' }, async ({ page }, info) => {

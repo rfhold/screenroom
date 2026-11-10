@@ -3,7 +3,7 @@
   import { defaultMethods } from '../core/search';
   import { href, libraryHref, type Location } from '../core/navigation';
   let { location, libraries, expanded = $bindable(false), subtitle = 'Off', setSubtitle, refresh }: { location: Location; libraries: Library[]; expanded: boolean; subtitle: string; setSubtitle: (value: string) => void; refresh: () => void } = $props();
-  const searchHref = $derived(href(location, { screen: 'search', query: '', methods: defaultMethods(), source: 'all', types: undefined, title: undefined }));
+  const searchHref = $derived(href(location, { screen: 'search', query: '', types: undefined, title: undefined }));
 </script>
 
 <aside class:expanded aria-label="Sidebar">
@@ -16,7 +16,7 @@
       <a href={searchHref} aria-label="Search titles" aria-current={location.screen === 'search' ? 'page' : undefined}><span class="icon" aria-hidden="true">⌕</span><span class="label">Search titles</span></a>
       {#if expanded}<h2>Libraries</h2>{/if}
       {#each libraries as library}
-        <a href={libraryHref(library)} aria-label={library.title} aria-current={location.screen === 'browse' && location.library.id === library.id ? 'page' : undefined}><span class="icon" aria-hidden="true">▤</span><span class="label">{library.title}</span></a>
+        <a href={libraryHref(library, location.sourceId)} aria-label={library.title} aria-current={location.screen === 'browse' && location.library.id === library.id ? 'page' : undefined}><span class="icon" aria-hidden="true">▤</span><span class="label">{library.title}</span></a>
       {/each}
     </nav>
     {#if expanded}

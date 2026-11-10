@@ -1,8 +1,7 @@
 import { defineConfig } from '@playwright/test';
 import { selectedCategory } from './e2e/categories.mjs';
 const category = selectedCategory();
-const externalEndpoint = process.env.SCREENROOM_E2E_API_ENDPOINT;
-const endpoint = externalEndpoint || 'http://127.0.0.1:50063';
+const endpoint = process.env.SCREENROOM_E2E_API_ENDPOINT || process.env.SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051';
 
 export default defineConfig({
   testDir: './e2e',
@@ -28,9 +27,10 @@ export default defineConfig({
     { name: 'desktop', use: { viewport: { width: 1440, height: 900 } } },
     { name: 'mobile', use: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true } }
   ],
-  webServer: [...(externalEndpoint ? [] : [{ command: 'node e2e/mock-server.mjs', url: `${endpoint}/health`, reuseExistingServer: false, timeout: 120_000 }]), {
-    command: 'pnpm dev --host 127.0.0.1 --port 4173 --strictPort',
-    env: { VITE_SCREENROOM_API_ENDPOINT: endpoint },
+  globalSetup: './e2e/backend-setup.ts',
+  webServer: [{
+    command: 'node e2e/dev-server.mjs',
+    env: { VITE_SCREENROOM_API_ENDPOINT: endpoint, VITE_SCREENROOM_USER_ID: process.env.SCREENROOM_USER_ID || '00000000-0000-0000-0000-000000000001', SCREENROOM_CORE_PREPARED: '1' },
     url: 'http://127.0.0.1:4173',
     reuseExistingServer: false,
     timeout: 120_000

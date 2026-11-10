@@ -1,7 +1,9 @@
-import init, { Client, type ClientFailure, type Item as CoreItem, type Credit, type Artwork as CoreArtwork, type Preferences, type MediaLibrary, type SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
+import init, { Client, default_settings, validate_settings, type ClientSettings, type SourceLibraryScope, type ClientFailure, type Item as CoreItem, type Credit, type Artwork as CoreArtwork, type MediaLibrary, type SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
 import wasmUrl from '../../../../../target/client-core/wasm/screenroom_client_core_bg.wasm?url';
 import type { Item, Artwork, PersonCredit, Rights } from './models';
 import { collectPages } from './pagination';
+import { writable } from 'svelte/store';
+import { MetadataOperation } from './operation.mjs';
 
 let initialized: Promise<unknown> | undefined;
 let instance: Promise<Client> | undefined;
@@ -11,15 +13,15 @@ export function client(): Promise<Client> {
 export async function newClient(): Promise<Client> {
     await (initialized ??= init({ module_or_path: wasmUrl }));
     const endpoint = import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051';
-    const profile = sessionStorage.getItem('screenroom.mockProfile') || import.meta.env.VITE_SCREENROOM_MOCK_PROFILE || 'web';
-    return new Client({ endpoint, mock_profile: profile, timeout_ms: 3000 });
+    const user_id = import.meta.env.VITE_SCREENROOM_USER_ID || '';
+    return new Client({ endpoint, user_id, timeout_ms: 3000 });
 }
 export let libraries: MediaLibrary[] = [];
 export let capabilities: SearchCapabilities | undefined;
-export function configure(available: MediaLibrary[], search: SearchCapabilities) { libraries = available; capabilities = search; }
+export function configure(available: MediaLibrary[], search: SearchCapabilities) { libraries = available; search.types = search.types.map(type => ({ movie: 'Movie', series: 'Series', episode: 'Episode' })[type] || type); capabilities = search; }
 export function failure(error: unknown): string {
   const e = error as Partial<ClientFailure>;
-  return `${e.code ?? 'unavailable'}: ${e.message ?? 'The mock server could not be reached.'}`;
+  return `${e.code ?? 'unavailable'}: ${e.message ?? 'The server could not be reached.'}`;
 }
 export const records = new Map<string, Item>();
 export const rights = (r: CoreItem['title_rights']): Rights => ({ label: r?.label || 'Rights not supplied', note: r?.note || '', source: r?.source || '', licenseUrl: r?.license_url, attribution: r?.attribution });
@@ -30,20 +32,62 @@ export function item(record: CoreItem): Item {
   records.set(value.id, value);
   return value;
 }
-export async function getItem(id: string): Promise<Item | undefined> {
-  try { return item(await (await client()).get_item(id)); }
-  catch (error) { if ((error as ClientFailure).code === 'not_found' || (error as ClientFailure).code === 'invalid_argument') return; throw error; }
+export const scope = (library = 'all', source_id = ''): SourceLibraryScope => ({ source_id, library_id: library === 'all' ? '' : library });
+export async function getItem(id: string, context = scope(), operation = new MetadataOperation()): Promise<Item | undefined> {
+  const c = await operation.read(client);
+  const record = await operation.read(() => c.get_item(id, context).catch(error => {
+    if ((error as ClientFailure).code === 'not_found' || (error as ClientFailure).code === 'invalid_argument') return;
+    throw error;
+  }));
+  operation.check();
+  return record ? item(record) : undefined;
 }
-export async function allCredits(id: string) {
-  const c = await client();
-  return collectPages(async page => { const result = await c.list_credits(id, page); return { entries: result.credits, next_page_token: result.next_page_token }; }, undefined, credit => JSON.stringify([credit.id, credit.department, credit.role]));
+export async function allCredits(id: string, context = scope(), operation = new MetadataOperation()) {
+  const c = await operation.read(client);
+  return collectPages(async page => { const result = await c.list_credits(id, page, context); return { entries: result.credits, next_page_token: result.next_page_token }; }, undefined, credit => JSON.stringify([credit.id, credit.department, credit.role]), operation);
 }
-export async function preferences(): Promise<Preferences> { return (await client()).get_preferences(); }
-let updates = Promise.resolve();
-export function updatePreferences(change: Partial<Preferences>, mask: string[]): Promise<void> {
-  const operation = updates.then(async () => { const c = await client(); const current = await c.get_preferences(); await c.update_preferences({ ...current, ...change }, mask); });
-  updates = operation.catch(() => {});
-  return operation;
+export const settingsWarning = writable('');
+const settingsCache = new Map<string, ClientSettings>();
+const persistenceWarning = 'Settings cannot be saved on this device. Current choices remain available until this page is closed.';
+function settingsKey() {
+  let namespace = 'default';
+  try { namespace = localStorage.getItem('screenroom.settingsNamespace') || namespace; }
+  catch { settingsWarning.set(persistenceWarning); }
+  return `screenroom.settings.v1:${JSON.stringify([location.origin, import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051', import.meta.env.VITE_SCREENROOM_USER_ID || '', namespace])}`;
+}
+export async function loadSettings(operation = new MetadataOperation()): Promise<ClientSettings> {
+  await operation.read(client);
+  operation.check();
+  const key = settingsKey();
+  const cached = settingsCache.get(key);
+  if (cached) return cached;
+  const defaults = () => ({ ...default_settings(), types: { movie: true, series: true, episode: false } });
+  let settings: ClientSettings = defaults();
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(key); }
+  catch { settingsWarning.set(persistenceWarning); }
+  try { if (raw) settings = validate_settings(JSON.parse(raw)); }
+  catch { settings = defaults(); }
+  operation.check();
+  settingsCache.set(key, settings);
+  return settings;
+}
+let settingsWrites = Promise.resolve();
+export function saveSettings(change: Partial<ClientSettings>, active = () => true, budget = new MetadataOperation()): Promise<void> {
+  const write = settingsWrites.then(async () => {
+    budget.check();
+    if (!active()) return;
+    const current = await loadSettings(budget);
+    const next = validate_settings({ ...current, ...change });
+    if (!active()) return;
+    budget.check();
+    const key = settingsKey();
+    settingsCache.set(key, next);
+    try { localStorage.setItem(key, JSON.stringify(next)); settingsWarning.set(''); }
+    catch { settingsWarning.set(persistenceWarning); }
+  });
+  settingsWrites = write.catch(() => {});
+  return budget.read(() => write);
 }
 
 const images = new Map<string, { promise: Promise<string>; refs: number; url?: string }>();
@@ -54,7 +98,8 @@ export function acquireArtwork(url: string): { loaded: Promise<string>; release:
     const current = entry;
     entry.promise = client().then(c => c.load_artwork(url)).then(bytes => {
       const data = new Uint8Array(bytes.length); data.set(bytes);
-      current.url = URL.createObjectURL(new Blob([data]));
+      const type = data[0] === 0x89 ? 'image/png' : data[0] === 0xff ? 'image/jpeg' : 'image/svg+xml';
+      current.url = URL.createObjectURL(new Blob([data], { type }));
       return current.url;
     });
     images.set(url, entry);

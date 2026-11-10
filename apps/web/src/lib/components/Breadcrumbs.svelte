@@ -7,7 +7,7 @@
 <nav aria-label="Breadcrumb"><ol>
   <li><a href="/" aria-current={location.screen === 'home' && !location.title ? 'page' : undefined}>Home</a></li>
     {#if location.screen !== 'home'}
-      <li><a href={libraryHref(location.library)} aria-current={!location.path.length && location.screen === 'browse' && !location.title ? 'page' : undefined}>{location.library.title}</a></li>
+      <li><a href={libraryHref(location.library, location.sourceId)} aria-current={!location.path.length && location.screen === 'browse' && !location.title ? 'page' : undefined}>{location.library.title}</a></li>
       {#each location.path as item, index}
         <li><a href={href(browse, { path: location.path.slice(0, index + 1) })} aria-current={index === location.path.length - 1 && location.screen === 'browse' && !location.title ? 'page' : undefined}>{item.title}</a></li>
        {/each}

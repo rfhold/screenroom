@@ -1,12 +1,14 @@
 <script lang="ts">
-  import { client, item, artwork, failure } from '../core/client';
+  import { client, item, artwork, failure, scope } from '../core/client';
   import { collectPages } from '../core/pagination';
   import type { Item } from '../core/models';
-  import type { CatalogInfo } from '../../../../../target/client-core/wasm/screenroom_client_core';
+  import type { CatalogInfo, Artwork } from '../../../../../target/client-core/wasm/screenroom_client_core';
   import RemoteImage from './RemoteImage.svelte';
   import ItemRights from './ItemRights.svelte';
+  import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
   let { info, refreshVersion }: { info: CatalogInfo; refreshVersion: number } = $props();
   let titles = $state<Item[]>([]);
+  let artworks = $state<Artwork[]>([]);
   let open = $state(false);
   let error = $state('');
   let generation = 0;
@@ -14,12 +16,17 @@
     refreshVersion;
     const current = ++generation;
     if (!open) return;
+    const operation = new MetadataOperation(() => current === generation);
     error = '';
-    void client().then(c => collectPages(async page => {
-      const response = await c.list_library_items('all', page);
+    titles = []; artworks = [];
+    void operation.read(client).then(c => operation.read(() => Promise.all([collectPages(async page => {
+      const response = await c.list_library_items(scope(), page);
       return { entries: response.items, next_page_token: response.next_page_token };
-    }, () => current === generation)).then(records => { if (current === generation) titles = records.map(item); }).catch(cause => { if (current === generation) error = failure(cause); });
-    return () => { generation++; };
+    }, () => current === generation, entry => entry.id, operation), collectPages(async page => {
+      const response = await c.list_artwork(scope(), page);
+      return { entries: response.artwork, next_page_token: response.next_page_token };
+    }, () => current === generation, entry => entry.id, operation)]))).then(([records, arts]) => { operation.check(); const mapped = records.map(record => { operation.check(); return item(record); }); operation.check(); if (current === generation) { titles = mapped; artworks = arts; } }).catch(cause => { if (current === generation && !(cause instanceof MetadataCancelled)) { operation.stop(cause instanceof Error ? cause : new Error(String(cause))); error = failure(cause); } });
+    return () => { generation++; operation.cancel(); };
   });
 </script>
 
@@ -27,7 +34,7 @@
   <summary>Data & artwork credits</summary>
   <div class="content">
     <h2>Data & artwork credits</h2>
-    {#each info.artwork.filter(art => art.kind === 'logo') as logo (logo.id)}
+    {#each info.branding.filter(art => art.kind === 'logo') as logo (logo.id)}
       <div class="brand"><RemoteImage art={artwork(logo)!} /></div>
     {/each}
     {#each info.notices as notice (notice.id)}
@@ -39,7 +46,7 @@
     {/each}
     {#if info.retrieved_at}<p>Retrieved {info.retrieved_at}</p>{/if}
     <h3>Artwork</h3>
-    <ul>{#each info.artwork as art (art.id)}<li><strong>{art.label}</strong><br />{art.creator}<br /><a href={art.license_url} target="_blank" rel="noopener noreferrer">{art.license}</a> · <a href={art.source} target="_blank" rel="noopener noreferrer">Source & provenance</a></li>{/each}</ul>
+    <ul>{#each artworks as art (art.id)}<li><strong>{art.label}</strong><br />{art.creator}<br /><a href={art.license_url} target="_blank" rel="noopener noreferrer">{art.license}</a> · <a href={art.source} target="_blank" rel="noopener noreferrer">Source & provenance</a></li>{/each}</ul>
     <h3>Title & metadata rights</h3>
     {#if error}<p role="alert">{error}</p><button onclick={() => refreshVersion++}>Retry credits</button>{/if}
     <ul>{#each titles as title (title.id)}<li><strong>{title.title}</strong><ItemRights item={title} /></li>{/each}</ul>

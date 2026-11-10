@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import { rpcPath, rpcRoute, rpcRoutes } from './rpc-paths';
 
 type Field = { number: number; wire: number; value: Buffer };
 const varint = (value: number) => {
@@ -26,9 +27,10 @@ const nested = (entries: Field[], number: number, update: (fields: Field[]) => F
 
 export async function serverVariant(page: Page) {
   let notice = 'Alternate server notice';
-  await page.route('**/screenroom.client.v1.**', async route => {
+  await page.route(rpcRoutes, async route => {
+    const pathname = new URL(route.request().url()).pathname;
+    if (![rpcPath('CatalogService/GetCatalogInfo'), rpcPath('BrowseService/ListLibraries'), rpcPath('SearchService/GetSearchCapabilities'), rpcPath('CatalogService/GetItem')].includes(pathname)) return route.continue();
     const method = route.request().url().split('/').at(-1);
-    if (!['GetCatalogInfo', 'ListLibraries', 'GetSearchCapabilities', 'GetItem'].includes(method!)) return route.continue();
     const response = await route.fetch(), body = await response.body();
     const end = 5 + body.readUInt32BE(1);
     let entries = fields(body.subarray(5, end));
@@ -50,9 +52,33 @@ export async function serverVariant(page: Page) {
 export function requestLibrary(body: Buffer, fieldNumber: number) {
   return fields(body.subarray(5, 5 + body.readUInt32BE(1))).find(field => field.number === fieldNumber)?.value.toString();
 }
+export function brandingUrl(body: Buffer) {
+  const info = fields(body.subarray(5, 5 + body.readUInt32BE(1))).find(field => field.number === 1)!;
+  const logo = fields(info.value).filter(field => field.number === 4).map(field => fields(field.value)).find(art => art.some(field => field.number === 8 && field.value.toString() === 'logo'))!;
+  return logo.find(field => field.number === 2)!.value.toString();
+}
+export function requestScope(body: Buffer, fieldNumber: number) {
+  const scope = fields(body.subarray(5, 5 + body.readUInt32BE(1))).find(field => field.number === fieldNumber);
+  const entries = scope ? fields(scope.value) : [];
+  return { source_id: entries.find(field => field.number === 1)?.value.toString() || '', library_id: entries.find(field => field.number === 2)?.value.toString() || '' };
+}
+
+export async function degradedSearch(page: Page) {
+  await page.route(rpcRoute('SearchService/Search'), async route => {
+    const request = route.request().postDataBuffer()!;
+    const entries = fields(request.subarray(5, 5 + request.readUInt32BE(1)));
+    const lexical = encode(nested(entries, 4, methods => methods.filter(field => field.number !== 4)));
+    const header = Buffer.alloc(5); header.writeUInt32BE(lexical.length, 1);
+    const response = await route.fetch({ postData: Buffer.concat([header, lexical]) });
+    const body = await response.body(), end = 5 + body.readUInt32BE(1);
+    const data = encode([...fields(body.subarray(5, end)).filter(field => field.number !== 4), string(4, 'embedding_unavailable')]);
+    const frame = Buffer.alloc(5); frame.writeUInt32BE(data.length, 1);
+    await route.fulfill({ response, body: Buffer.concat([frame, data, body.subarray(end)]) });
+  });
+}
 
 export async function duplicateLibraryLabels(page: Page) {
-  await page.route('**/screenroom.client.v1.BrowseService/ListLibraries', async route => {
+  await page.route(rpcRoute('BrowseService/ListLibraries'), async route => {
     const response = await route.fetch(), body = await response.body();
     const end = 5 + body.readUInt32BE(1);
     const entries = nested(fields(body.subarray(5, end)), 1, entry => {
@@ -65,7 +91,7 @@ export async function duplicateLibraryLabels(page: Page) {
 }
 
 export async function refreshedDetail(page: Page) {
-  await page.route('**/screenroom.client.v1.CatalogService/*', async route => {
+  await page.route(/^https?:\/\/[^/]+\/screenroom\.catalog\.v1\.CatalogService\/(?:GetItem|ListCredits|GetCatalogInfo)$/, async route => {
     const method = route.request().url().split('/').at(-1);
     if (!['GetItem', 'ListCredits', 'GetCatalogInfo'].includes(method!)) return route.continue();
     const response = await route.fetch(), body = await response.body();

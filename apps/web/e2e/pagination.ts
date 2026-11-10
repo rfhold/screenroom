@@ -1,4 +1,5 @@
 import { expect, type Page } from '@playwright/test';
+import { rpcRoute, type RpcMethod } from './rpc-paths';
 
 function varint(value: number): Buffer {
   const bytes = [];
@@ -12,13 +13,13 @@ function frame(data: Buffer): Buffer {
   const header = Buffer.alloc(5); header.writeUInt32BE(data.length, 1);
   return Buffer.concat([header, data]);
 }
-export async function paginate(page: Page, method: string, repeat = false) {
+export async function paginate(page: Page, method: RpcMethod, repeat = false) {
   const token = 'opaque:next/page?cursor=two';
   let remaining: Buffer;
   let trailers: Buffer;
   const calls: string[] = [];
   let count = 0;
-  await page.route(`**/screenroom.client.v1.${method}`, async route => {
+  await page.route(rpcRoute(method), async route => {
     const continuation = route.request().postDataBuffer()!.includes(Buffer.from(token));
     calls.push(continuation ? token : '');
     if (!continuation) {

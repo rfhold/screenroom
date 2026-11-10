@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { readFile, readdir, stat, writeFile, utimes } from 'node:fs/promises';
 
 const web = new URL('../', import.meta.url);
@@ -35,14 +36,14 @@ test('CLI no-match discovery preserves ten sentinel captures and all test artifa
       ['-gpagination'],
       ['__no_matching_path__.spec.ts']
     ]) {
-      const result = spawnSync('pnpm', ['test:e2e', ...args], { cwd: web, env: { ...process.env, E2E_CATEGORY: 'happy-path' }, encoding: 'utf8' });
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('../e2e/run.mjs', import.meta.url)), ...args], { cwd: web, env: { ...process.env, E2E_CATEGORY: 'happy-path' }, encoding: 'utf8' });
       assert.equal(result.status, 1);
       assert.match(result.stdout + result.stderr, /No tests found/);
       assert.doesNotMatch(result.stdout + result.stderr, /WebServer|prepare-core|vite dev|Screenroom mock/);
       assert.deepEqual(await tree(build), before);
     }
     for (const category of ['', 'unknown']) {
-      const result = spawnSync('pnpm', ['test:e2e'], { cwd: web, env: { ...process.env, E2E_CATEGORY: category }, encoding: 'utf8' });
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL('../e2e/run.mjs', import.meta.url))], { cwd: web, env: { ...process.env, E2E_CATEGORY: category }, encoding: 'utf8' });
       assert.equal(result.status, 1);
       assert.match(result.stderr, /Invalid E2E_CATEGORY/);
       assert.deepEqual(await tree(build), before);

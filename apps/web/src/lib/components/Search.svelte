@@ -3,12 +3,13 @@
   import { beforeNavigate, goto } from '$app/navigation';
   import { href, itemHref, type Location } from '../core/navigation';
   import { defaultTypes, loadTypes, saveTypes, search, type Types, type Methods, type Source } from '../core/search';
-  import { client, newClient, failure } from '../core/client';
+  import { client, newClient, failure, saveSettings } from '../core/client';
   import type { SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
   import type { Item } from '../core/models';
   import PosterCard from './PosterCard.svelte';
+  import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
 
-  let { location: route, capabilities, refreshVersion = 0, onReadComplete }: { location: Location; capabilities: SearchCapabilities; refreshVersion?: number; onReadComplete: (error?: string) => void } = $props();
+  let { location: route, capabilities, operation, refreshVersion = 0, onReadComplete, onRetry }: { location: Location; capabilities: SearchCapabilities; operation: MetadataOperation; refreshVersion?: number; onReadComplete: (error?: string) => void; onRetry: () => void } = $props();
   let pending = $state<Location | null>(null);
   let revision = 0;
   let generation = 0;
@@ -36,6 +37,7 @@
   let results = $state<Item[]>([]);
   let searching = $state(false);
   let error = $state('');
+  let searchStatus = $state('');
   const semanticDescription = $derived(capabilities?.semantic_description ?? '');
   const maximumQueryLength = $derived(capabilities?.maximum_query_length ?? 160);
   const typeLabels: Record<string, string> = { Movie: 'Movies', Series: 'Shows', Episode: 'Episodes' };
@@ -48,9 +50,10 @@
 
   onMount(() => {
     input.focus();
-    void loadTypes().then(value => { if (!active) return; savedTypes = value; if (!route.types && revision === 0) navigate({ types: value }, true); }).catch(cause => error = failure(cause));
+    const budget = operation;
+    void loadTypes(budget).then(value => { budget.check(); if (!active) return; savedTypes = value; if (!route.types && revision === 0) navigate({ types: value }, true); }).catch(cause => { if (active && budget.active() && !(cause instanceof MetadataCancelled)) error = failure(cause); });
   });
-  onDestroy(() => { active = false; searchGeneration++; searchClient?.cancel_all(); searchClient?.free(); });
+  onDestroy(() => { active = false; searchGeneration++; searchClient?.cancel_all(); });
   beforeNavigate(navigation => {
     if (navigation.type !== 'goto') { generation++; revision++; pending = null; }
   });
@@ -62,22 +65,28 @@
     const current = ++searchGeneration;
     searchClient?.cancel_all();
     results = []; searching = !!query.trim(); error = '';
+    const budget = operation;
+    if (href(location) !== href(route)) return;
     const timer = setTimeout(async () => {
       try {
+        budget.check();
         if (query.trim()) {
-          searchClient ??= await newClient();
+          searchClient ??= await budget.read(newClient);
           if (!active) { searchClient.free(); searchClient = undefined; return; }
           if (current !== searchGeneration) return;
-          const response = await search(query, library, selectedTypes, selectedMethods, source, searchClient, () => active && current === searchGeneration);
-          if (active && current === searchGeneration) results = response;
+           const response = await search(query, library, selectedTypes, selectedMethods, source, searchClient, () => active && current === searchGeneration, location.sourceId, budget);
+           budget.check();
+           if (active && current === searchGeneration) { results = response.items; searchStatus = `Effective methods: ${response.effective}.${response.degradation ? ` ${response.degradation}` : ''}`; }
         }
+        budget.check();
         if (active && current === searchGeneration) { settled = query; searching = false; onReadComplete(); }
-      } catch (cause) { if (active && current === searchGeneration) { error = failure(cause); searching = false; onReadComplete(error); } }
-    }, 350);
+      } catch (cause) { if (active && current === searchGeneration && budget.active() && !(cause instanceof MetadataCancelled)) { error = failure(cause); searching = false; onReadComplete(error); } }
+    }, Math.max(0, Math.min(350, budget.deadline - budget.now())));
     return () => { clearTimeout(timer); searchGeneration++; };
   });
   function navigate(changes: Partial<Location>, replace = false) {
     const next = { ...location, types, ...changes };
+    void saveSettings({ source: next.source, types: { movie: next.types.Movie, series: next.types.Series, episode: next.types.Episode }, methods: { title_only: next.methods.titleOnly, text: next.methods.text, fuzzy: next.methods.fuzzy, semantic: next.methods.semantic } }).catch(cause => error = failure(cause));
     pending = next;
     const current = ++revision;
     const batch = generation;
@@ -137,12 +146,13 @@
   {/if}
 </div>
 <div aria-live="polite" aria-atomic="true" class="result-status">
-  {#if error}<span role="alert">{error}</span><button onclick={() => refreshVersion++}>Retry search</button>
+  {#if error}<span role="alert">{error}</span><button onclick={onRetry}>Retry search</button>
   {:else if !location.query.trim()}Enter a title to search {location.library.title}.
   {:else if searching || location.query !== settled}Searching titles…
   {:else if results.length === 0}No matches in {location.library.title}. Try another search.
   {:else}{results.length} {results.length === 1 ? 'result' : 'results'} in {location.library.title}{/if}
 </div>
+{#if !searching && !error && location.query.trim() && searchStatus}<p role="status">{searchStatus}</p>{/if}
 {#if !searching && !error && location.query.trim() && location.query === settled}
   <div class="grid" aria-label="Search results">{#each results as item (item.id)}<PosterCard {item} href={itemHref(location, item)} />{/each}</div>
 {/if}

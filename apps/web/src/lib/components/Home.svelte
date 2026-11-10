@@ -2,8 +2,9 @@
   import { page } from '$app/state';
   import { onDestroy } from 'svelte';
   import type { Item, Library } from '../core/models';
-  import { client, credit, allCredits, failure, item, preferences, updatePreferences, configure } from '../core/client';
+  import { client, credit, allCredits, failure, item, loadSettings, saveSettings, settingsWarning, configure, scope } from '../core/client';
   import { collectPages } from '../core/pagination';
+  import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
   import { itemHref, readLocation, resolveLocation, type Location } from '../core/navigation';
   import type { CatalogInfo, SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
   import PosterCard from './PosterCard.svelte';
@@ -26,51 +27,76 @@
   let catalogInfo = $state<CatalogInfo>();
   let searchCapabilities = $state<SearchCapabilities>();
   let refreshing = $state(false);
+  let metadataOperation = $state<MetadataOperation>();
   const subtitles: Record<string, string> = { off: 'Off', library_tracks: 'Library tracks', transcription: 'Transcription' };
   $effect(() => {
     const url = new URL(page.url.href);
     version;
     const current = ++generation;
-    void load(url, current);
+    const operation = new MetadataOperation(() => current === generation);
+    void load(url, current, operation);
+    return () => operation.cancel();
   });
-  async function load(url: URL, current: number) {
+  async function load(url: URL, current: number, operation: MetadataOperation) {
     try {
       error = '';
-      const c = await client();
-      const [available, prefs, info, capabilities] = await Promise.all([c.list_libraries(), preferences(), c.get_catalog_info(), c.get_search_capabilities()]);
+      const c = await operation.read(client);
+      operation.check();
+      if (refreshing) c.invalidate_reads();
+      const prefs = await loadSettings(operation);
+      const sourceId = url.searchParams.get('source_id') ?? prefs.scope?.source_id ?? '';
+      const [availableRecords, info, capabilities] = await operation.read(() => Promise.all([
+        collectPages(async page => { const response = await c.list_libraries(sourceId, page); return { entries: response.libraries, next_page_token: response.next_page_token }; }, undefined, entry => entry.id, operation),
+        operation.read(() => c.get_catalog_info()), operation.read(() => c.get_search_capabilities()),
+      ]));
+      const available = [{ id: 'all', title: 'All libraries' }, ...availableRecords];
+      operation.check();
       if (current !== generation) return;
       configure(available, capabilities);
-      const next = await resolveLocation(url);
+      const next = await resolveLocation(url, operation);
+      operation.check();
+      if (current !== generation) return;
+      const context = scope(next.library.id, next.sourceId);
       let rows: typeof homeRows = [];
       let list: Item[] = [];
       if (next.title) {
-        const credits = await allCredits(next.title.id);
-        next.title.cast = credits.filter(person => person.department.toLowerCase() === 'cast').map(credit);
-        next.title.crew = credits.filter(person => person.department.toLowerCase() !== 'cast').map(credit);
-      } else if (next.screen === 'home') rows = (await c.get_home('all')).map(row => ({ title: row.title, items: row.items.map(item) }));
-      else if (next.screen === 'browse') list = (await collectPages(async page => {
-        const response = next.path.length ? await c.list_children(next.path.at(-1)!.id, page) : await c.list_library_items(next.library.id, page);
-        return { entries: response.items, next_page_token: response.next_page_token };
-      }, () => current === generation)).map(item);
+        const credits = await allCredits(next.title.id, context, operation);
+        operation.check();
+        const cast = credits.filter(person => person.department.toLowerCase() === 'cast').map(credit);
+        const crew = credits.filter(person => person.department.toLowerCase() !== 'cast').map(credit);
+        operation.check();
+        next.title.cast = cast; next.title.crew = crew;
+      } else if (next.screen === 'home') {
+        const response = await operation.read(() => c.get_home(context));
+        operation.check();
+        rows = response.map(row => ({ title: row.title, items: row.items.map(record => { operation.check(); return item(record); }) }));
+      } else if (next.screen === 'browse') {
+        const response = await collectPages(async page => {
+          const response = next.path.length ? await c.list_children(next.path.at(-1)!.id, page, context) : await c.list_library_items(context, page);
+          return { entries: response.items, next_page_token: response.next_page_token };
+        }, () => current === generation, entry => entry.id, operation);
+        operation.check();
+        list = response.map(record => { operation.check(); return item(record); }).filter(record => next.path.length || !record.parent);
+      }
+      await saveSettings({ scope: context }, () => current === generation, operation);
+      operation.check();
       if (current !== generation) return;
       libraries = available;
       catalogInfo = info;
       searchCapabilities = capabilities;
+      metadataOperation = operation;
       subtitle = subtitles[prefs.subtitle_preference] ?? 'Off';
       homeRows = rows; items = list; location = next; ready = true;
       if (refreshing && (next.title || next.screen !== 'search' || !next.query.trim())) completeRefresh();
-    } catch (cause) { if (current === generation) { error = failure(cause); ready = true; refreshing = false; status = ''; } }
+    } catch (cause) { if (current === generation && !(cause instanceof MetadataCancelled)) { operation.stop(cause instanceof Error ? cause : new Error(String(cause))); error = failure(cause); ready = true; refreshing = false; status = ''; } }
   }
-  async function refresh() {
-    try { (await client()).invalidate_reads(); refreshing = true; status = 'Refreshing…'; version++; }
-    catch (cause) { error = failure(cause); status = ''; refreshing = false; }
-  }
+  function refresh() { refreshing = true; status = 'Refreshing…'; version++; }
   function completeRefresh(cause?: string) { if (!refreshing) return; status = cause ? '' : 'Refreshed from server.'; refreshing = false; }
   async function setSubtitle(value: string) {
-    try { await updatePreferences({ subtitle_preference: Object.keys(subtitles).find(key => subtitles[key] === value)! }, ['subtitle_preference']); subtitle = value; }
+     try { await saveSettings({ subtitle_preference: Object.keys(subtitles).find(key => subtitles[key] === value)! }); subtitle = value; }
     catch (cause) { error = failure(cause); }
   }
-  onDestroy(() => { generation++; void client().then(c => { c.cancel_all(); c.free(); }); });
+  onDestroy(() => { generation++; metadataOperation?.cancel(); });
 </script>
 
 <svelte:head><title>{location.title?.title ?? (location.screen === 'search' ? 'Search' : location.screen === 'home' ? 'Home' : location.path.at(-1)?.title ?? location.library.title)} · Screenroom</title></svelte:head>
@@ -79,13 +105,14 @@
   <Menu {location} {libraries} bind:expanded {subtitle} {setSubtitle} {refresh} />
   <main id="main" tabindex="-1" class:detail-page={!!location.title}>
     <Breadcrumbs {location} />
-    {#if status}<p role="status" class="status">{status}</p>{/if}
+     {#if status}<p role="status" class="status">{status}</p>{/if}
+     {#if $settingsWarning}<p role="status" class="settings-warning">{$settingsWarning}</p>{/if}
     {#if error}<section role="alert"><h1>Unable to load Screenroom</h1><p>{error}</p><button onclick={() => version++}>Retry</button></section>
     {:else if !ready}<p role="status">Loading Screenroom…</p>
     {:else if location.title}
       <Detail item={location.title} />
     {:else if location.screen === 'search'}
-      {#if searchCapabilities}<Search {location} capabilities={searchCapabilities} refreshVersion={version} onReadComplete={completeRefresh} />{/if}
+      {#if searchCapabilities && metadataOperation}<Search {location} capabilities={searchCapabilities} operation={metadataOperation} refreshVersion={version} onReadComplete={completeRefresh} onRetry={() => version++} />{/if}
     {:else}
       <div class="page-header"><h1>{location.screen === 'home' ? 'Home' : location.path.at(-1)?.title ?? location.library.title}</h1>
         {#if location.screen === 'home'}<a class="button browse" href="/?screen=browse&library=all">Browse libraries</a>{/if}
