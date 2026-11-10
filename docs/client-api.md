@@ -1,7 +1,19 @@
 # Client API and core
 
-Screenroom's mock boundary supports client development without real accounts, provider connections, library sync, playback, or a database.
-The protocol package is `screenroom.client.v1`; its [protobuf schema](../proto/screenroom/client/v1/client.proto) defines the wire contract.
+Screenroom's client boundary supports a persistent local backend with offline typed provider adapters, local user selectors, and device-local settings.
+It provides no authentication, live provider connections, or playback.
+The wire contract separates catalog and user ownership:
+
+| Package | Schema and ownership |
+| --- | --- |
+| `screenroom.catalog.v1` | [Catalog schema](../proto/screenroom/catalog/v1/catalog.proto): BrowseService, CatalogService, SearchService, and catalog messages. |
+| `screenroom.user.v1` | [User schema](../proto/screenroom/user/v1/user.proto): UserService.GetCurrentUser and local user records. |
+| `screenroom.common.v1` | [Common schema](../proto/screenroom/common/v1/common.proto): shared SearchTypes and SearchMethods. |
+| `screenroom.playback_gateway.v1` | [Empty playback gateway package](../proto/screenroom/playback_gateway/v1/playback_gateway.proto): no messages or RPC services. |
+
+This wire namespace cutover breaks old clients. The server provides no legacy namespace aliases.
+Native UniFFI and WASM transport retain their roles; immutable configuration now uses `user_id`, not a mock profile.
+The intended backend [public deployment contract](components.md#intended-public-deployment) does not add authentication to the local stack.
 
 ## Responsibilities
 
@@ -10,11 +22,11 @@ The protocol package is `screenroom.client.v1`; its [protobuf schema](../proto/s
 | [Rust client core](../crates/screenroom-client-core/src/lib.rs) | Domain records, RPC transport, deadlines, errors, request deduplication, cancellation, read caches, and artwork bytes. |
 | Native shells | Native layout, navigation, focus, view state, and image decode; Swift and Kotlin consume UniFFI, while Rust uses the crate directly. |
 | Web SPA | Browser UI and image decode; consumes the same Rust core through WASM. |
-| [Mock server](../crates/screenroom-mock-server/src/lib.rs) | Fixture catalog, global catalog information, ordered notices, search, mock preferences, and same-origin artwork HTTP routes. |
+| [Backend](backend.md) | Persistent catalog, local users, scoped search, bounded catalog information, paginated artwork credits, and same-origin artwork routes. |
 | [Canonical fixtures](../fixtures/catalog/) | Neutral catalog data, source records, artwork and provider-brand bytes, notices, and rights provenance. |
 
 Native core transport uses Tonic gRPC. WASM uses `tonic-web-wasm-client` through browser fetch.
-The server accepts both protocols on one endpoint; it does not require a separate gRPC-Web proxy.
+The shared Envoy edge routes both protocols and artwork through one public origin.
 Prost wire types stay inside the core. Shells consume the [domain records](../crates/screenroom-client-core/src/models.rs).
 The [WASM adapter](../crates/screenroom-client-core/src/wasm.rs) exposes async methods and [TypeScript models](../crates/screenroom-client-core/src/wasm-models.ts).
 
@@ -32,36 +44,21 @@ Shells use server records for libraries, provider presence and status, search ca
 They render generic records rather than fixture identifiers, title-specific branches, or client-authored provider and legal notices.
 Application icons, system glyphs, themes, protocol-control labels, and generic image placeholders remain UI concerns.
 
-The mock API provides no account workflow. Shells must not simulate authentication through Welcome, Continue, or logout screens.
+The local API provides no account workflow. Shells must not simulate authentication through Welcome, Continue, or logout screens.
 Refresh invalidates core reads and requests fresh data. Shells report actual request outcomes, not synthetic counters or library-sync success.
 
-## Run the mock server
+## Use the local backend
 
-From the repository root, start the development server:
-
-```sh
-bash scripts/mock-server.sh
-```
-
-The [helper](../scripts/mock-server.sh) builds the locked Rust package and runs `target/debug/screenroom-mock-server`.
-It requires Cargo and a compatible Rust toolchain. No database or provider credential is necessary.
-
-In another terminal, check the HTTP health route:
+With explicit local lifecycle approval, start the persistent instance from the repository root:
 
 ```sh
-curl --fail http://127.0.0.1:50051/health
+bash scripts/backend.sh up
+bash scripts/backend.sh wait
 ```
 
-The route returns `screenroom-mock-server` plus a newline. Stop the server with Ctrl-C.
-
-| Environment variable | Default | Meaning |
-| --- | --- | --- |
-| `SCREENROOM_MOCK_LISTEN` | `127.0.0.1:50051` | Socket address for the development server. |
-| `SCREENROOM_MOCK_PUBLIC_BASE` | `http://` plus the listen address | Absolute origin that the server adds to artwork paths. |
-| `SCREENROOM_MOCK_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173,http://localhost:4173,http://127.0.0.1:4173` | Comma-separated browser origin allowlist. |
-
-Public base and CORS values require explicit HTTP(S) origins without credentials, paths, queries, fragments, or a trailing slash.
-Set the public base to the exact origin that clients use for the endpoint; the core rejects artwork from another origin.
+The [backend guide](backend.md#persistent-local-instance) defines dependencies, lifecycle ownership, model configuration, and non-destructive restart behavior.
+Clients default to `http://127.0.0.1:50051`. Public artwork URLs must use that same configured origin.
+Standalone client suites attach to the persistent descriptor; they do not start a substitute API server.
 Loopback addresses refer to the client device itself. Emulator, container, and physical-device routes require their own reachable address.
 The app guides own those routes and platform cleartext exceptions.
 
@@ -96,11 +93,13 @@ Create one core `Client` with an explicit `ClientConfig`:
 | Field | Contract |
 | --- | --- |
 | `endpoint` | HTTP(S) origin without credentials, path, query, fragment, or trailing slash; manual loopback default: `http://127.0.0.1:50051`. |
-| `mock_profile` | Required opaque value: 1–128 ASCII letters, digits, `-`, `_`, or `.`. |
+| `user_id` | Empty for anonymous catalog reads, otherwise a trusted-local UUID selector. |
 | `timeout_ms` | Required deadline from 1 through 120000 milliseconds per network operation. |
 
-The core sends `mock_profile` as `x-screenroom-mock-profile` on every RPC.
-The value selects anonymous mock state; it is not an identity, token, account, or security boundary.
+The core sends a nonempty `user_id` as `x-screenroom-user-id` on RPCs.
+It selects an enabled local user; it is not authentication, a token, or a security boundary.
+Construct another client when endpoint or user changes. Configuration remains immutable.
+Native and WASM bindings expose only public catalog/common/user contracts, not private operator/internal bindings or backend SQLx dependencies.
 
 `Item` carries hierarchy, metadata, tags, colors, artwork, ratings, runtime, provider references, rights, and optional fixture progress.
 `Item.provenance_notes` contains ordered strings for generic display; `metadata_retrieved_at` preserves the metadata snapshot timestamp.
@@ -112,63 +111,84 @@ Unknown rating vote counts remain absent (`null` in WASM), not zero.
 `Runtime` preserves optional exact seconds, minimum/maximum seconds, and version-specific notes and display text.
 The model generator maps wire `Library` to domain `MediaLibrary`.
 
-`CatalogInfo` contains `artwork: Vec<Artwork>`, `notices: Vec<CatalogNotice>`, and `retrieved_at: String` in Rust.
+`CatalogInfo` contains bounded `notices`, bounded `branding`, and `retrieved_at` in Rust.
 `CatalogNotice` contains six string fields: `id`, `section`, `title`, `text`, `link_label`, and `link_url`.
 The server supplies notice order and the `metadata`, `catalog`, `artwork`, and `rights` sections.
 Clients preserve notice text, order, and links. Empty titles and links do not require substitute copy.
-CatalogInfo covers the entire catalog, not Home results, the selected library, or items that a user already visited.
-Its artwork list includes portraits, character stills, and provider logos, even when no visible item references them.
+CatalogInfo returns at most 32 notices and eight branding records, not the complete artwork inventory.
+Its timestamp uses the newest valid eligible persisted provider snapshot in UTC; unknown timestamps remain empty, never the request clock.
+`list_artwork(scope, page)` supplies complete enabled-scope credits, including unvisited portraits, character stills, and logos.
+Clients enumerate those pages on demand; they do not preload all image bytes or infer completeness from visited titles.
 `get_catalog_info()` follows the same read-cache, deduplication, deadline, cancellation, and invalidation rules as other catalog reads.
 
 ## Unary operations
 
-All RPC service names below use the `screenroom.client.v1` package.
+BrowseService, CatalogService, and SearchService use `screenroom.catalog.v1`; UserService uses `screenroom.user.v1`.
+For example, RPC paths include `/screenroom.catalog.v1.BrowseService/GetHome` and `/screenroom.user.v1.UserService/GetCurrentUser`.
+Envoy routes both public packages through the same local endpoint.
 
 | Service / RPC | Core method | Result and behavior |
 | --- | --- | --- |
-| `BrowseService/GetHome` | `get_home(library_id)` | Home rows filtered by library; progress values represent fixtures, not playback state. |
-| `BrowseService/ListLibraries` | `list_libraries()` | Server-defined library identifiers and titles; the fixture supplies `all`, `movies`, and `tv`. |
-| `BrowseService/ListLibraryItems` | `list_library_items(library_id, page)` | Top-level library items. |
-| `CatalogService/GetCatalogInfo` | `get_catalog_info()` | Complete artwork manifest, ordered catalog notices, and snapshot timestamp; response field: `info`. |
-| `CatalogService/GetItem` | `get_item(id)` | One item; unknown identifiers return `NotFound`. |
-| `CatalogService/ListChildren` | `list_children(parent_id, page)` | Direct children of a known item; an empty result is valid. |
-| `CatalogService/ListCredits` | `list_credits(item_id, page)` | Credits for a known item; an empty result is valid. |
-| `SearchService/Search` | `search(request)` | Fixture results filtered by query, library, type, methods, and source. |
+| `BrowseService/GetHome` | `get_home(scope)` | Scoped rows; mapped local users receive typed mock Continue Watching state. |
+| `BrowseService/ListLibraries` | `list_libraries(source_id, page)` | Paginated stable library identifiers and titles. |
+| `BrowseService/ListLibraryItems` | `list_library_items(scope, page)` | Scoped top-level library items. |
+| `CatalogService/GetCatalogInfo` | `get_catalog_info()` | Bounded ordered notices, branding, and persisted snapshot timestamp. |
+| `CatalogService/GetItem` | `get_item(id, scope)` | One scoped item; unknown or ineligible identifiers return `NotFound`. |
+| `CatalogService/ListChildren` | `list_children(parent_id, page, scope)` | Scoped direct children; an empty result is valid. |
+| `CatalogService/ListCredits` | `list_credits(item_id, page, scope)` | Scoped complete role credits; an empty result is valid. |
+| `CatalogService/ListArtwork` | `list_artwork(scope, page)` | Complete paginated artwork credits, independent of visited titles. |
+| `SearchService/Search` | `search(request)` | SearchPage with items, continuation, effective methods, and explicit degradation. |
 | `SearchService/GetSearchCapabilities` | `get_search_capabilities()` | Supported methods, types, sources, semantic limits, and query length. |
-| `PreferencesService/GetPreferences` | `get_preferences()` | Current mock-profile preferences or defaults. |
-| `PreferencesService/UpdatePreferences` | `update_preferences(preferences, update_mask)` | Validated field-mask merge; returns the complete preferences. |
+| `UserService/GetCurrentUser` | `get_current_user()` | Enabled local user selected by explicit UUID metadata. |
 
-`Page.size=0` selects 40 results; the maximum is 100. Start with an empty token.
+`SourceLibraryScope` contains `source_id` and `library_id`; empty fields mean all enabled installation sources and libraries.
+The clients preserve stable `movies` and `tv` library IDs and pass scope through details, children, credits, search, and continuation pages.
+Provider choices `all`, `tmdb`, and `jellyfin` remain separate from installation source keys such as `mock-jellyfin` and `mock-tmdb`.
+Public item kinds remain `Movie`, `Series`, `Season`, and `Episode`; search excludes seasons.
+
+`Page.size=0` selects 50 results; the maximum is 200. Start with an empty token.
 Treat page tokens as opaque values. Reuse each token only with its original query or collection.
-An empty `next_page_token` marks the last page. Invalid libraries and invalid tokens return `InvalidArgument`.
+An empty `next_page_token` marks the last page. Invalid tokens return `InvalidArgument`.
+Tokens bind the operation, target, normalized scope, and query where applicable. They do not establish user ownership.
+Search retains a short-lived ordered result snapshot and rechecks eligibility on continuation.
 
 ### Search limits
 
 Search supports `Movie`, `Series`, and `Episode` types, plus `text`, `fuzzy`, `semantic`, and `title_only` controls.
 At least one type and one of text, fuzzy, or semantic must remain active.
-Title-only restricts text to the title and disables the tag-based semantic branch.
-Text search uses substring comparison; fuzzy search uses bounded edit-distance checks against titles and title words.
-The semantic option approximates relevance through ASCII tag matches. It does not use embeddings or an external model.
-The server normalizes ASCII text and uses at most 160 normalized characters. Raw queries over 1024 bytes return `InvalidArgument`.
-An empty normalized query returns no items.
+Title-only restricts text to titles, disables semantic, and requires text or fuzzy.
+Text uses PostgreSQL full-text search; fuzzy uses `pg_trgm` title similarity.
+Semantic uses exact 1024-dimensional pgvector cosine retrieval across all eligible source documents, not a lexical shortlist or tag approximation.
+Fixed `k=60` reciprocal-rank fusion precedes best-source-document canonical deduplication; display metadata follows separate precedence.
+No approximate nearest-neighbor index or reranker participates.
+The server normalizes whitespace and accepts at most 8000 normalized characters.
+A blank query returns `InvalidArgument`, unlike the retired mock contract. Clients clear blank searches locally.
+Absent types default to movie, series, and episode. An explicit type selection must remain nonempty.
 
 Sources are `all`, `tmdb`, and `jellyfin`.
-`tmdb` filters fixture provider references; it does not call TMDB. `jellyfin` returns no results because no provider connection exists.
-These values describe the mock implementation; clients populate choices from `get_search_capabilities()`, not a duplicate local list.
+Provider filters select eligible persisted documents; queries do not crawl TMDB or Jellyfin.
+Clients populate choices from `get_search_capabilities()`, not a duplicate local list.
 Clients also use its `semantic_description` and `maximum_query_length` instead of client-authored capability claims.
-Search requests use their explicit filters. Absent type/method records use server defaults, not the profile's saved preferences.
-Shells must read saved preferences and pass the desired filters in `SearchRequest`.
+Search requests use explicit filters, not server preferences. Shells pass local settings in `SearchRequest`.
+If semantic lacks availability, compatibility, or complete coverage, a valid lexical fallback returns `effective_methods.semantic=false` and `degradation_reason`.
+The reasons are `embedding_unavailable`, `embedding_incompatible`, and `embedding_coverage_incomplete`.
+A semantic-only request fails when no valid lexical fallback exists. Clients display degradation rather than a false semantic-success claim.
 
-### Mock preferences
+### Local settings
 
-The server holds preferences in process memory per mock profile. Clients that share a profile share that state.
-A server restart discards all preferences; a client restart alone does not discard server state.
-The server accepts at most 256 profiles with saved preferences.
+The backend has no PreferencesService. `ClientSettings`, `default_settings`, and `validate_settings` define the shared local settings contract.
+Version-1 platform stores persist scope, provider, types, methods, and subtitle preference:
 
-Defaults select movies and series, text/fuzzy/semantic methods, library `all`, source `all`, and subtitle preference `off`.
-Episodes and title-only default to false.
-The required, nonempty update mask accepts only `search_types`, `search_methods`, `library_id`, `source`, and `subtitle_preference`.
-Each mask path replaces its whole field; nested mask paths have no support.
+- Apple uses Foundation atomic JSON in Application Support, with errors and a save-retry action.
+- Apple migrates legacy UserDefaults only when no settings file exists.
+- Android validates SharedPreferences JSON and uses synchronous `commit` to detect write failure.
+- Linux validates private XDG JSON and uses atomic file replacement.
+- Web validates localStorage under an origin/endpoint/user/namespace key and retains choices in memory after write failure.
+
+Storage failures produce a warning, not a claim that persistence succeeded. Local settings do not confer backend identity or access rights.
+
+Core defaults select movie, series, and episode, text/fuzzy/semantic methods, all-library scope, provider `all`, and subtitle preference `off`.
+Web controls initially select Movies and Shows. Title-only defaults to false and disables semantic.
 Subtitle values are `off`, `library_tracks`, and `transcription`.
 These values record a preference only; they provide no subtitle retrieval or transcription service.
 
@@ -179,12 +199,12 @@ WASM rejects promises with an `Error` that carries the corresponding snake_case 
 
 | Native error | Meaning |
 | --- | --- |
-| `InvalidArgument` | Invalid configuration, request, filter, profile, page token, or field mask. |
+| `InvalidArgument` | Invalid configuration, request, filter, user selector, or page token. |
 | `NotFound` | Unknown item or artwork HTTP 404. |
 | `Unavailable` | Transport failure or other unsuccessful artwork HTTP status. |
 | `DeadlineExceeded` | The configured operation deadline expires. |
 | `Cancelled` | Core cancellation or a request generation change invalidates the result. |
-| `ResourceExhausted` | Core concurrency/artwork limits or the server's saved-profile limit. |
+| `ResourceExhausted` | Core concurrency/artwork limits or bounded server capacity. |
 | `Rpc` | Other gRPC statuses; preserves the numeric status code and reason. |
 | `InvalidResponse` | Invalid model data, absent required response data, or unsupported artwork MIME type. |
 
@@ -193,36 +213,33 @@ Uncached reads fail when the server is unreachable; the core does not substitute
 Shells own error presentation, empty states, and explicit retry actions.
 
 Each client deduplicates equivalent active reads and permits at most 32 distinct active operations.
-Preference writes use unique operation keys; the core does not deduplicate writes.
 `cancel_all()` aborts active shared operations and rejects stale results. It preserves completed caches.
-Cancellation does not guarantee that the server rolls back a preference write.
 `invalidate_reads()` cancels active operations and clears completed read results; artwork remains cached.
 A refresh calls `invalidate_reads()` before fresh reads. It does not trigger library sync.
 Refresh errors remain errors; a client must not report success from an optimistic local state change.
 
 Completed reads use an insertion-order memory cache with at most 64 entries and 2 MiB of serialized keys and values.
 The cache has no TTL or disk persistence. Failed results do not enter the completed-read cache.
-Preference reads bypass that cache so clients can observe another client's writes to the same profile.
-A successful preference write clears completed reads.
 Artwork has a separate insertion-order memory cache: at most 32 entries and 8 MiB total.
 
 ## Artwork and provenance
 
-The server serves compiled fixture bytes at `/artwork/{file}`.
-It publishes absolute artwork URLs in item records, credit records, and the complete CatalogInfo manifest.
+The backend serves verified private Garage bytes at `/artwork/{uuid}/revisions/{positive_revision}/{native|original}`.
+It publishes absolute same-origin URLs in item records, credit records, branding, and paginated artwork credits.
 The core's `load_artwork(url)` accepts only `/artwork/` URLs on the configured endpoint origin.
 It rejects URL credentials, queries, and fragments.
 It returns raw bytes; each renderer owns image decode and placeholders.
 Absent or failed images use truthful unavailable states, initials, or abstract placeholders, never client-local fixture artwork.
 The core accepts JPEG, PNG, and SVG MIME types and limits each response to 4 MiB.
-Native HTTP disables redirects. Browser fetch retains browser redirect behavior; this mock server serves direct artwork responses.
+Native and browser artwork requests reject redirects. Clients never fetch S3 or provider artwork directly.
+The backend preserves complete published revisions during replacement; unknown or disabled images return 404 and storage failures return 503.
 
 The [normalized fixture](../fixtures/catalog/fixture.json) supplies API items, credits, and home rows.
 [Title records](../fixtures/catalog/titles.json), [artwork records](../fixtures/catalog/artwork.json), and the [TMDB snapshot](../fixtures/catalog/tmdb.json) retain provenance.
 The [notice fixture](../fixtures/catalog/notices.json) owns catalog-wide legal, provider, and fixture-specific attribution copy.
 Clients render those notices through CatalogInfo, not duplicate legal paragraphs or branches for specific titles.
-The artwork manifest owns provider-brand discovery; clients must not fabricate artwork records or logo URLs.
-The mock exposes the approved TMDB logo as `tmdb.png` for native decoders.
+CatalogInfo branding owns provider-brand discovery; clients must not fabricate artwork records or logo URLs.
+The offline adapter supplies the approved TMDB logo from `tmdb.png` for native decoders.
 Canonical fixtures retain both that raster copy and the original SVG with provenance; no bundled-client exception applies.
 Title rights, metadata rights, artwork licenses, and provider references describe distinct concerns.
 A public-domain title does not imply public-domain metadata, artwork, restorations, or scores.
@@ -234,15 +251,15 @@ The server notices carry the required TMDB attribution statement.
 
 The [fixture generator](../scripts/generate-mock-fixture.py) requires Python 3.
 It combines canonical title records, the TMDB snapshot, artwork records, and notices into `fixtures/catalog/fixture.json`.
-The mock server embeds that normalized catalog fixture, not the raw JSON inputs.
+Typed offline adapters consume canonical fixture inputs; runtime clients never read those files.
 After canonical input edits, regenerate the normalized fixture from the repository root:
 
 ```sh
 python3 scripts/generate-mock-fixture.py
 ```
 
-Then stop the current mock server. Rebuild and restart it with `bash scripts/mock-server.sh`; that helper builds the locked server package.
-A server rebuild alone does not incorporate raw input edits into the normalized fixture.
+Fixture regeneration does not update persisted catalog state automatically.
+An approved ingest through the current backend must apply fixture changes; ordinary startup does not reset operator state or reseed volumes.
 
 The root [TMDB importer](../scripts/import-tmdb.mjs) writes only the canonical snapshot at `fixtures/catalog/tmdb.json`.
 It requires `TMDB_READ_ACCESS_TOKEN` and performs external provider requests.
@@ -271,9 +288,9 @@ Platform integration tests and resource audits remain necessary.
 
 ## Development security boundary
 
-The default endpoint uses loopback and cleartext HTTP. The server provides no TLS listener, authentication, or authorization.
-Do not expose this server to an untrusted network.
-Use platform-specific development exceptions only for local mock access; these exceptions do not define a production transport policy.
+The default public endpoint uses loopback and cleartext HTTP. The local stack provides no authentication or per-user catalog ACL.
+Do not expose this stack to an untrusted network.
+Use platform-specific development exceptions only for local backend access; these exceptions do not define a production transport policy.
 Browser CORS permits only the configured origins, GET/POST/OPTIONS, and explicit gRPC-Web headers.
-CORS does not protect native clients or make mock profiles private.
-The mock API has no production compatibility or account-isolation guarantee.
+CORS does not protect native clients or make local UUID selectors private.
+Private RPC network separation is not authentication. The local stack has no production-exposure approval or account-isolation guarantee.

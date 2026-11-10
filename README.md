@@ -2,15 +2,20 @@
 
 Domain: **screenroom.tv**.
 
-Screenroom pairs native client interfaces and a web SPA with a shared Rust client core and a development mock API.
+Screenroom pairs native client interfaces and a web SPA with a shared Rust client core and a persistent local backend.
 
-The core and mock server implement catalog reads, search, artwork transport, and anonymous mock preferences.
-They do not implement authentication, provider connections, library sync, or playback. The website remains separate from the web client.
-The client contract requires all catalog content, media artwork, provider branding, and attribution notices through the mock API and Rust core.
+PostgreSQL stores the shared catalog, local users, durable ingest jobs, search documents, and embeddings. Garage stores private artwork bytes.
+Typed mock adapters supply offline Jellyfin and TMDB inputs; live provider connections, authentication, and playback remain outside the implementation.
+Clients store preferences locally. The website remains separate from the web client.
+The client contract requires all catalog content, media artwork, provider branding, and attribution notices through the backend and Rust core.
 Client shells own presentation, not bundled catalog fixtures or simulated authentication and refresh outcomes.
 
 See the [client API guide](docs/client-api.md) for architecture and local build/run procedures.
 The [component outline](docs/components.md) separates implemented components from intended scope.
+Catalog and user services expose functional public reads; the worker persists typed adapter data and artwork.
+The playback gateway still has no business RPC routes.
+The [backend development guide](docs/backend.md) covers persistent local startup, migrations, search, artwork, and shared telemetry.
+The [public deployment contract](docs/components.md#intended-public-deployment) defines their shared hostname, ingress routing, and independent authentication requirements.
 The [documentation index](docs/README.md) routes to architecture and client guides.
 
 ## Client E2E tests
@@ -33,7 +38,8 @@ bash scripts/e2e.sh --category retry apple web
 bash scripts/e2e.sh --category happy-path
 ```
 
-Apple runs iOS, iPadOS, and tvOS by default; macOS XCUITest is opt-in because it uses the desktop.
+Apple runs iOS, iPadOS, and tvOS by default; macOS XCUITest requires fresh desktop approval and `SCREENROOM_MACOS_GUI_READY=1`.
+After approval, prefix each macOS command below with that readiness variable.
 Use `E2E_MACOS=1 bash scripts/e2e.sh` (or add `apple`) to include all four Apple profiles,
 or `bash apps/apple/scripts/e2e.sh macos` to run only macOS.
 `E2E_MACOS` accepts only `0` (the default when unset) or `1`; other values fail before any suite runs.
@@ -47,16 +53,23 @@ Each family reports completion independently, with its category, exit status, el
 Per-group `.summary` files retain the same category, status, and measured duration.
 GNU timeout bounds each family to 40 minutes, with a 20-second kill grace.
 
-The root runner owns one unique-port loopback mock for Apple, Android, and web.
-Set `SCREENROOM_API_ENDPOINT` to opt into a caller-owned server; the runner never stops that server.
-`SCREENROOM_E2E_API_ENDPOINT` also selects the external server; both variables must match if set together.
-External servers need matching artwork URLs and CORS for `http://127.0.0.1:4173`.
-Android endpoints require an explicit port for ADB reverse. Linux retains its separate network-isolated container mock.
-Android uses a unique run prefix for UI and contract profiles, including with external servers.
+The root runner owns one persistent named Compose instance unless `SCREENROOM_BACKEND_ATTACH=1` selects a caller-owned instance.
+Standalone family runners require that instance; none starts a separate API server.
+Start the backend separately only with approval: `bash scripts/backend.sh up`.
+Use `SCREENROOM_BACKEND_ATTACH=1 bash scripts/e2e.sh` to attach without backend teardown.
+The [backend guide](docs/backend.md#persistent-local-instance) defines lifecycle commands and prerequisites.
+`SCREENROOM_API_ENDPOINT` and `SCREENROOM_E2E_API_ENDPOINT` must match the instance origin and each other.
+The default origin is `http://127.0.0.1:50051`; `SCREENROOM_BACKEND_PORT` selects an explicit alternate port.
+Every family uses the same secret-free descriptor and instance identity.
+`SCREENROOM_USER_ID` selects a local UUID, not authentication; the root defaults to the bootstrap Alice UUID.
+Android uses same-port ADB reverse. Linux uses the Compose client network and a byte-only loopback forwarder.
+Unique local settings namespaces isolate test preferences, not backend identities.
 `SCREENROOM_CORE_PREPARED=1` is an internal verification-only mode, not a build bypass.
+The root owner lock rejects concurrent root runs. Cleanup stops only resources that the invocation owns.
+Ordinary backend teardown preserves named volumes, keys, and the instance UUID.
 
 When `E2E_MACOS=1`, macOS runs exclusively before the concurrent families, while the user is ready for desktop automation.
-For an unattended batch, leave macOS disabled and run its standalone command separately when ready.
+For an unattended batch, leave macOS disabled. Obtain fresh approval before any macOS GUI automation.
 
 To refresh website showcase screenshots after the selected E2E suites pass:
 
@@ -81,9 +94,10 @@ The app guides define each suite's integration coverage; screenshots do not esta
 
 Install each family's prerequisites first; the runner does not install SDKs, packages, or browsers.
 Web requires the root Node version, pnpm `12.18.0`, workspace dependencies, and Playwright Chromium.
+If the global pnpm launcher fails to select that version, use `npx --yes pnpm@12.18.0` instead.
 Native requirements include Xcode/XcodeGen, Android JDK 17 and SDK 37 with an AVD, Docker, GNU timeout, and jq.
 Showcase export also requires the standard `file` utility.
-Root orchestration requires Node.js on `PATH`, including native-only selections, for port allocation and owned-process cleanup.
+Root orchestration requires Node.js on `PATH`, including native-only selections, for descriptor reads and owned-process cleanup.
 Use the Node version range in root `package.json`.
 Each guide lists its exact environment, independent suite command, and screenshot paths:
 

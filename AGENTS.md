@@ -2,11 +2,12 @@
 
 | Path | Info |
 | --- | --- |
-| [README.md](README.md) | Repository purpose and scaffold status. |
+| [README.md](README.md) | Repository purpose, implemented boundaries, and client E2E entry point. |
 | [docs/README.md](docs/README.md) | Documentation index. |
 | [docs/components.md](docs/components.md) | Stated product scope and component boundaries. |
-| [docs/client-api.md](docs/client-api.md) | Rust client core, mock API, artwork, and build contract. |
-| [crates/](crates/) | Rust client core and mock server alongside service scaffolds. |
+| [docs/client-api.md](docs/client-api.md) | Public client core, local settings, scoped reads, artwork, and build contract. |
+| [docs/backend.md](docs/backend.md) | Persistent backend, startup migrations, local lifecycle, search, artwork, and telemetry. |
+| [crates/](crates/) | Client core, persistent backend services, typed mock adapters, and service scaffolds. |
 | [proto/](proto/) | Client API contracts and remaining service scaffolds; Buf configuration lives at the root. |
 | [fixtures/catalog/](fixtures/catalog/) | Canonical mock catalog, artwork, and provenance snapshots. |
 | [apps/apple/](apps/apple/) | SwiftUI shells and XcodeGen project definition. |
@@ -14,13 +15,16 @@
 | [apps/linux/](apps/linux/) | Independent Rust GTK4/libadwaita workspace. |
 | [apps/web/](apps/web/) | Svelte SPA shell. |
 | [website/](website/) | Static Cloudflare Pages website, not an SPA. |
-| [compose.yaml](compose.yaml) | Local PostgreSQL configuration. |
+| [compose.yaml](compose.yaml) | Persistent local PostgreSQL, Garage, Envoy, catalog, user, and worker instance. |
 | [.agents/skills/reviewing-changes/SKILL.md](.agents/skills/reviewing-changes/SKILL.md) | Repository-specific review risks, validation commands, and evidence requirements. |
 
 # Hints
 
 - Be mindful of disk usage from build outputs, caches, and test artifacts. When space is low, clean up obsolete generated outputs within the task's scope; preserve source files, user work, useful build caches, and diagnostics still needed for active work.
 - Treat `docs/components.md` as scope authority, not proof of implemented features.
+- Treat local user UUIDs and private RPC networks as selectors and topology, not authentication.
+- Preserve forward-only applied migrations, persistent instance identity, operator state, and runtime keys.
+- Obtain explicit approval before backend lifecycle changes, provider imports, or macOS GUI automation.
 - Preserve scaffold boundaries unless the user explicitly requests implementation.
 - Use installed `planning-changes` and `making-changes` for behavior changes.
 - Supply `making-changes` with the local `reviewing-changes` skill's repository inputs.

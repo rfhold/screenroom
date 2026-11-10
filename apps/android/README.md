@@ -2,14 +2,17 @@
 
 Native Compose clients for Android mobile and Android TV. Both activities use the shared `ui` library and an isolated neutral dark theme.
 
-The Rust UniFFI client core supplies Browse, Catalog, Search, and Preferences through the local mock API.
+The Rust UniFFI client core supplies Browse, Catalog, Search, User, and artwork through the persistent local backend.
 See [the client API contract](../../docs/client-api.md). No provider credentials are required.
+Catalog RPCs use `screenroom.catalog.v1`; UserService uses `screenroom.user.v1`.
+Immutable ClientConfig holds endpoint, local user UUID selector, and timeout. Each scoped read carries explicit source/library scope.
 Home rows, library IDs/order/titles, children, complete paginated credits, rights, ratings, and provenance come from the server.
 Every artwork record, including provider logos, comes from the server. All bytes pass through the core and decode off the UI thread.
 Failed images show placeholders. APKs contain no catalog JSON, media, portraits, or provider branding; app icons and native glyphs remain local.
 Compose displays licensed posters, portraits, and character stills where available; other cards use abstract placeholders or initials.
 Cast and crew cards preserve snapshot roles. Character stills carry explicit labels.
-The global Data & artwork credits disclosure uses `GetCatalogInfo` for the complete artwork inventory, retrieval timestamp, and ordered notices.
+The global Data & artwork credits disclosure uses bounded `GetCatalogInfo` notices and branding plus complete paginated `ListArtwork` credits.
+The retrieval timestamp comes from eligible persisted provider snapshots, never the request clock.
 Credits include unvisited portraits, each artwork creator/license/source/download, server logos, item provenance notes, and title/metadata rights.
 Compose does not supply fixture-specific identity, legal, or provider notices.
 
@@ -40,12 +43,13 @@ That disclosure includes vote counts, the snapshot date, and the distinction bet
 Search calls the core after the debounce; there is no Kotlin matching algorithm. Title-only mode disables Semantic without automatically restoring it.
 At least one type and one method remain selected.
 Each immutable search history entry retains its query, catalog, types, and methods across details and Android Back.
-Fresh searches reset query, catalog, and methods. Type preferences persist in the mock profile.
+Fresh searches reset query, catalog, and methods. Type preferences persist in local settings.
 
-Subtitles and search types use Get/UpdatePreferences. Refresh invalidates core reads and fetches them again.
+Subtitles and search types use validated version-1 SharedPreferences JSON with synchronous `commit` and explicit failure reporting.
+Refresh invalidates core reads and fetches them again.
 The refresh status reports actual catalog read success or failure, not a local counter.
 There is no Welcome/logout flow, authentication, synchronization, transcription, or playback.
-Navigation history is presentation state; preferences persist for the lifetime of the mock server process.
+Navigation history is presentation state; local preferences survive app restarts independently of backend state.
 Loading, error, and retry states do not block the UI thread. Superseded read jobs are canceled and guarded against stale results.
 Native deep links are not implemented.
 
@@ -73,19 +77,26 @@ Run `bash scripts/test-build-core-cache.sh` to check cache invalidation with moc
 JNA 5.17.0 is packaged as an AAR.
 
 Debug apps default to `http://127.0.0.1:50051`. Launch intent string extras `SCREENROOM_API_ENDPOINT` and
-`SCREENROOM_MOCK_PROFILE` override the endpoint and preference profile.
+`SCREENROOM_USER_ID` override the endpoint and local user UUID selector. The selector is not authentication.
+`SCREENROOM_E2E_SETTINGS_NAMESPACE` selects a local preference namespace, not a backend user.
 Android validates the endpoint before core construction because native sockets bypass Android network security configuration.
 Release builds require HTTPS. Their default HTTP endpoint displays a configuration error and never creates a core client.
 Debug builds permit HTTP only for the exact hosts `127.0.0.1` and `localhost`; IPv6 loopback is not enabled.
 Both build types reject credentials, paths, query strings, fragments, and malformed hosts.
 Refresh restarts active search and artwork reads without a navigation, query, or focus reset.
-For a manually started mock server, use `adb -s <serial> reverse tcp:50051 tcp:50051` so returned artwork URLs share the same origin.
+For an approved backend instance, use `adb -s <serial> reverse tcp:50051 tcp:50051` so artwork shares the API origin.
+For an alternate backend port, use that same port on both sides of ADB reverse.
 
 ## E2E suite
 
 From the repository root:
 
 ```sh
+export SCREENROOM_BACKEND_ATTACH=1
+export SCREENROOM_API_ENDPOINT=http://127.0.0.1:50051
+export SCREENROOM_E2E_API_ENDPOINT="$SCREENROOM_API_ENDPOINT"
+export SCREENROOM_USER_ID=00000000-0000-0000-0000-000000000001
+export SCREENROOM_BACKEND_DESCRIPTOR="$PWD/build/backend-runtime/screenroom-e2e/descriptor.json"
 bash apps/android/scripts/e2e.sh          # both profiles
 bash apps/android/scripts/e2e.sh mobile   # mobile only
 bash apps/android/scripts/e2e.sh tv       # TV only
@@ -105,15 +116,15 @@ The root runner selects its own category defaults; screenshot exports use `happy
 | `happy-path` | Real Home, default Off sidebar, Movies, default All-catalog Bunny search, and Big Buck Bunny details from Movies; TV remote focus, data/artwork readiness, and layout geometry | Five per profile |
 | `retry` | Actual closed-loopback RPC error, real Retry while unavailable, then a real Activity relaunch with the configured healthy endpoint and Home/artwork recovery | None |
 | `regression` | Hierarchy, ratings, source/method/type guards, history, subtitle choices, real refresh, absent fake auth, core pagination/preferences contracts, endpoint rejection, and CatalogInfo/logo PNG decoding | None |
-| `all` | Each category once, with separate preference profiles | Only the happy-path set |
+| `all` | Each category once, with separate local settings namespaces | Only the happy-path set |
 
-Retry does not stop or restart the caller's mock server. It does not prove in-place recovery after a live server restart.
+Retry does not stop or restart the shared backend. It does not prove in-place recovery after a live server restart.
 The test reserves and closes an emulator-local ephemeral port, then launches the real Activity against that unavailable endpoint.
 It verifies honest errors and no fixture/artwork fallback before and after Retry.
 Recovery uses another real Activity launch against the configured endpoint, not injected UI state.
 To extend the suite, add a shared assertion and a JUnit method to both profile test classes.
 Add the category/method pair to the early category map in `scripts/e2e.sh`, including the `all` list.
-Each category receives an isolated run/profile/category preference namespace.
+Each category receives an isolated run/profile/category local settings namespace.
 
 The Bash suite requires `file`, JDK 17, the Android SDK, coreutils `timeout`, and prepared AVDs.
 It never installs SDK packages or creates AVDs.
@@ -129,7 +140,7 @@ It rejects physical devices, incorrect AVD names, and mismatched TV features.
 | `E2E_ANDROID_TV_SERIAL` | `emulator-5556` |
 | `E2E_ANDROID_MOBILE_AVD` | `screenroom_home_mobile` |
 | `E2E_ANDROID_TV_AVD` | `screenroom_home_tv` |
-| `SCREENROOM_API_ENDPOINT` | Owned mock server at `http://127.0.0.1:50062` |
+| `SCREENROOM_API_ENDPOINT` | Required caller-owned backend origin with an explicit loopback port. |
 
 From `apps/android`, prepare ARM64 Android 36 emulators under the ignored `build/` directory:
 
@@ -156,11 +167,12 @@ The build has a 600-second deadline; screenshot export has a 30-second deadline.
 The suite stops its own emulator process if startup or device verification fails.
 After successful startup verification, the emulator stays available even if a test fails.
 Other devices remain unchanged.
-Without an endpoint override, the suite starts the root mock-server helper, waits for `/health`, logs it under `build/e2e/`, and stops only its own process on exit.
-An external endpoint must include an explicit port. Each verified emulator receives a matching `adb reverse` mapping.
+The suite requires the shared backend descriptor, attach flag, endpoint, and explicit local user UUID before instrumentation.
+It verifies semantic/artwork readiness and live instance identity; it never starts a separate API server.
+The endpoint must include an explicit port. Each verified emulator receives a matching `adb reverse` mapping.
 Existing matching mappings are reused; conflicts are rejected. Cleanup removes only mappings created by the suite.
-Instrumentation receives the endpoint and unique run-prefixed mobile/TV profiles before Activity launch.
-Contract clients use separate profiles under the same prefix, including with caller-owned mock servers.
+Instrumentation receives the endpoint, user UUID, and unique run-prefixed local settings namespaces before Activity launch.
+Contract clients use the same persistent backend and explicit scopes.
 `SCREENROOM_E2E_PROFILE_PREFIX` overrides the prefix and accepts 1–90 ASCII letters, digits, underscores, or hyphens.
 
 The suite clears all five selected-profile host screenshots before the build.

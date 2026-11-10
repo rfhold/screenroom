@@ -9,7 +9,7 @@ This skill supplies repository-specific inputs to installed `making-changes`; it
 
 ## Authority and Scope
 
-- Read the [repository overview](../../../README.md), [documentation index](../../../docs/README.md), and [component outline](../../../docs/components.md).
+- Read the [repository overview](../../../README.md), [documentation index](../../../docs/README.md), [component outline](../../../docs/components.md), and [backend guide](../../../docs/backend.md).
 - Treat the component outline as stated scope, not an implementation claim.
 - Preserve bare crates, empty contracts, and client shells unless the user explicitly requests implementation.
 - Screenroom remains standalone; Waltr supplies pattern references, not runtime dependencies. Do not infer Moviee integration.
@@ -22,13 +22,19 @@ This skill supplies repository-specific inputs to installed `making-changes`; it
 | --- | --- |
 | Root Rust workspace | `Cargo.toml` selects `crates/*` and excludes `apps/linux`; preserve separate manifests and lockfiles. |
 | Protobuf | Inspect `proto/`, `buf.yaml`, `buf.gen.yaml`, and `crates/screenroom-proto/src/generated/` together. Empty packages produce comments-only Rust output. |
-| Observability | `crates/screenroom-observability/Cargo.toml` keeps telemetry and profiling dependencies optional, with no default features or runtime initialization. |
-| Client core and mock API | Inspect `proto/screenroom/client/v1/`, `crates/screenroom-client-core/`, `crates/screenroom-mock-server/`, and `fixtures/catalog/` together. The Rust core owns RPC and artwork retrieval; preserve native gRPC and browser WASM/gRPC-web parity, cancellation, bounded caches, fixture provenance, and isolated mock preferences. |
+| Observability | Dependencies remain feature-gated with no default features. Backend binaries enable shared telemetry setup and community `tonic-tracing-opentelemetry` middleware. Verify optional OTLP endpoints, service names, provider shutdown, and documented middleware limits. |
+| Protobuf ownership | Catalog owns BrowseService, CatalogService, and SearchService; user owns UserService.GetCurrentUser; common owns SearchTypes/SearchMethods. Keep public contracts separate from private operator/internal contracts. Preserve the namespace break without preference aliases. Playback gateway stays empty. |
+| Backend transport | Catalog and user expose persistent public reads through Envoy; operator/internal RPCs remain private. Playback gateway serves empty routes. No authentication verifier or live provider connection exists. |
+| Client core and backend | Inspect public catalog/user/common contracts, `crates/screenroom-client-core/`, shared backend, catalog/user/worker, typed adapters, and fixtures together. Preserve native/WASM parity, immutable endpoint/user/timeout configuration, explicit scope, cancellation, bounded caches, and provenance. Public bindings exclude operator/internal RPCs and SQLx. |
+| Local settings | Verify version-1 Foundation atomic JSON, Android validated SharedPreferences commit, Linux private atomic XDG JSON, and context-keyed web localStorage. Write failures must stay explicit; UUID selectors are not authentication. |
+| Search | Require exact 1024-dimensional retrieval across all eligible source documents and single-snapshot coverage. Preserve source-document RRF before best-document canonical deduplication, explicit lexical degradation, query guards, and scope-bound pages. No ANN, lexical shortlist, reranker, or fake semantic success. |
+| Ingest and artwork | Check durable leases/fences/checkpoints, atomic pages/follow-ups, immutable run policy, safe partial traversal, and complete-only removal reconciliation. Publish artwork only after verified required variants; preserve previous complete revisions, bounded streams, same-origin core fetches, and private object keys. |
 | Native clients | SwiftUI, Android Compose, and GTK4/libadwaita remain native shells. Check core bindings, UI-thread isolation, request-generation guards, native focus, and network error states; no playback or real-provider integration. |
 | Web SPA | `apps/web/vite.config.ts` sets the `index.html` fallback; `apps/web/src/routes/+layout.ts` disables SSR. |
 | Static website | `website/vite.config.ts` has no SPA fallback; `website/src/routes/+layout.ts` enables prerender and disables client JavaScript. |
 | Cloudflare Pages | Preserve `website/static/404.html` in `website/build/404.html` to prevent Pages' implicit SPA fallback. |
-| PostgreSQL | `compose.yaml` binds localhost and uses local-only defaults; configuration validation does not authorize service startup. |
+| PostgreSQL | Every database-backed service/init calls `db::connect_service` before listeners/work/readiness. Preserve advisory-lock startup migrations, short-lived DDL pools, restricted runtime pools, forward-only applied files, and runtime SQLx queries. Separate credentials do not isolate process privilege. |
+| Shared local instance | `compose.yaml` publishes only loopback edge. Preserve volumes, Garage keys, instance UUID, create-only bootstrap state, descriptor identity, and caller-owned teardown. All E2E families attach to that instance; no standalone fixture API fallback. Configuration checks grant no lifecycle authority. |
 | Dependencies | Compare manifests, lockfiles, package-manager pin, Gradle wrapper checksum, and XcodeGen targets against the affected source. |
 | Documentation | Check scope claims and links against source; do not add inferred product features or one-off validation results. |
 
@@ -51,6 +57,9 @@ Rust requires an edition-2024-capable toolchain. Buf generation requires `protoc
 For protobuf changes, compare generated output with a pre-generation snapshot or the tracked baseline.
 Run generation twice to check reproducibility. Confirm that neither run introduces unrelated output changes.
 Compose requires Docker Compose; this check does not start containers.
+Database integration tests require explicit disposable targets; never reuse the persistent development database for destructive setup.
+Inspect each test's environment and ignore gate before execution. Live embedding requests require exact endpoint approval.
+Do not reset volumes, reseed operator state, import providers, or rotate keys without separate explicit authority.
 
 ### Web SPA and Static Website
 
@@ -78,6 +87,7 @@ xcodebuild -project Screenroom.xcodeproj -scheme Screenroom-macOS -destination '
 ```
 
 Review `project.yml` as source, not the generated Xcode project.
+macOS GUI automation requires fresh approval and `SCREENROOM_MACOS_GUI_READY=1`; build authority alone does not grant desktop access.
 
 ### Android
 
@@ -106,5 +116,7 @@ cargo check --manifest-path apps/linux/Cargo.toml --locked
 - Before the first commit, inspect untracked files directly; a diff against `HEAD` cannot represent an unborn repository.
 - Inspect staged and unstaged changes when a baseline exists.
 - Audit ignore rules for secrets, local SDK paths, build output, caches, logs, and relative `.worktrees/` directories.
+- Preserve prior dirty work and baseline evidence; `HEAD` alone does not identify delegate-owned changes.
+- Check disk usage before large builds; preserve source, useful caches, and active diagnostics.
 - Confirm that ignore rules retain source, generated protobuf output, lockfiles, and Gradle wrapper files.
 - For new documentation, check whitespace directly because ordinary `git diff --check` excludes untracked files.

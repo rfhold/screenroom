@@ -2,11 +2,13 @@
 
 The iOS, iPadOS, macOS, and tvOS apps share native SwiftUI views and an isolated dark theme.
 `Sources/Home/Catalog.swift` adapts Rust UniFFI domain records for presentation.
-The Rust client core owns Browse, Catalog, Search, Preferences, and artwork requests to the
-[mock API](../../docs/client-api.md). Home rows, library membership, hierarchy, credits,
-rights, search results, and preferences come from that API; all paginated reads follow continuation tokens.
-The Data & artwork credits disclosure reads global `CatalogInfo` notices and artwork through the core.
-It also enumerates every title, descendant, and credit for title and metadata rights, independently of visited Home rows.
+The Rust client core owns Browse, Catalog, Search, User, and artwork requests to the
+[persistent local backend](../../docs/client-api.md). Home rows, library membership, hierarchy, credits,
+rights, and search results come from that API; all paginated reads follow continuation tokens.
+Preferences use version-1 Foundation atomic JSON in Application Support, not a server preference service.
+Legacy UserDefaults migration runs only when no settings file exists; persistence errors retain choices and expose a save-retry action.
+The Data & artwork credits disclosure reads bounded `CatalogInfo` notices and branding through the core.
+It enumerates complete paginated `ListArtwork` credits on demand, independently of visited Home rows, without eager global image downloads.
 Server notices retain their order, sections, text, and links. Server provenance notes appear without title-specific branches.
 All artwork bytes, including provider logos, load through the core with explicit loading and failure states.
 The app contains no bundled catalog JSON, media, portraits, or provider branding. Native app icons and navigation glyphs remain local.
@@ -14,6 +16,9 @@ There is no playback,
 authentication, connected media provider, or synchronization.
 
 ## Core and development endpoint
+
+The [wire contract](../../docs/client-api.md) places catalog RPCs in `screenroom.catalog.v1` and UserService in `screenroom.user.v1`.
+Immutable UniFFI `ClientConfig` contains endpoint, user UUID selector, and timeout. Source/library scope accompanies each scoped read.
 
 Run `xcodegen generate` from `apps/apple/`. Its preparation hook builds missing or stale
 bindings and the eight-architecture XCFramework with `scripts/build-client-core.sh apple`
@@ -23,11 +28,11 @@ do not copy or commit them into the app. The preparation cache hashes source and
 profile and target options, resolved active/nightly toolchains, Xcode/compiler/SDK identities,
 and generated products. Changed inputs or replaced products trigger preparation again.
 
-For manual runs, start `bash scripts/mock-server.sh` from the repository root.
+For manual runs, use an approved persistent instance from the [backend guide](../../docs/backend.md#persistent-local-instance).
 The app defaults to `http://127.0.0.1:50051`. Override it with `SCREENROOM_API_ENDPOINT`
 or the launch arguments `--SCREENROOM_API_ENDPOINT http://127.0.0.1:<port>`.
-`SCREENROOM_MOCK_PROFILE` (or the matching launch argument) identifies mock preference state;
-without it each app process receives a fresh isolated profile. Mock preferences are not durable storage.
+`SCREENROOM_USER_ID` (or the matching launch argument) selects an enabled local UUID; it is not authentication.
+`SCREENROOM_E2E_SETTINGS_NAMESPACE` isolates local settings files, not backend users.
 The core uses a five-second request timeout. Before core construction, Swift validates the endpoint:
 Debug permits HTTP only for localhost, 127.0.0.1, and ::1; Release requires HTTPS.
 Credentials, query strings, fragments, and non-root paths are rejected. Invalid configuration
@@ -38,7 +43,7 @@ without launching the Mac GUI.
 
 ## Interface
 
-Home contains five horizontal poster rows. The persistent sidebar expands in the layout;
+Home presents server-defined horizontal poster rows. The persistent sidebar expands in the layout;
 on narrow windows and phones it becomes an inline top rail and expandable panel.
 Libraries contain movies and series; series open seasons, then episodes.
 Detail pages show server artwork, cast/crew roles and portraits, title rights, provider references, and rating snapshots.
@@ -54,21 +59,22 @@ crop information, and edition/jurisdiction-specific film rights. Sprite Fright k
 2021 year separately from TMDB's 2024 date. Back and breadcrumb buttons
 return to the originating library, home, or search context.
 
-Search uses server library IDs and titles and waits 350 ms after typing. Core Preferences supply selected types.
+Search uses stable server library IDs and titles and waits 350 ms after query edits. Local settings supply selected types.
 Search capabilities supply available sources, types, methods, query length, and the semantic description.
 Protocol label mappings only format those capabilities; they do not add choices.
 All catalog, item-type, Text, Fuzzy, Semantic, and Title only
 controls live inside initially closed Settings. Query, Clear, and Settings remain outside.
-All catalogs and TMDB intersect the library, types, and query; disconnected Jellyfin yields no results.
-Semantic means catalog-tag matching, not an AI service. At least one type and method stays selected.
+Provider choices intersect the installation source, library, types, and query; they do not establish a live provider connection.
+Semantic uses exact backend vector search. The interface displays explicit lexical degradation when semantic coverage or availability fails.
+At least one type and method stays selected.
 Title only disables Semantic; turning it off does not select Semantic again.
 The sidebar's Search titles action starts a fresh search, even from an existing search:
 it clears the query, restores All catalogs and all methods, turns Title only off, and closes Settings.
-Selected item types persist through core Preferences within the selected mock profile. Detail breadcrumbs and Back preserve the active
+Selected item types persist in local settings. Detail breadcrumbs and Back preserve the active
 query, catalog filter, item types, methods, title-only state, and library scope instead.
 Home uses All libraries, so search from Home covers every library. Search from a library retains
 that library's scope, and its Back button restores the prior hierarchy. Other search state remains in memory.
-Subtitles save Off, Library tracks, or Transcription through core Preferences; they do not enable playback.
+Subtitles save Off, Library tracks, or Transcription locally; they do not enable playback.
 Refresh invalidates core reads and reloads active catalog, search, provenance, and artwork tasks.
 The status reports success or failure only after the active catalog/search request completes.
 The app has no Log out, Welcome, or Continue authentication flow.
@@ -82,17 +88,16 @@ remain in a footer while library navigation can scroll. Expansion pushes the con
 Use Xcode with the required simulator runtimes and XcodeGen 2.44.1 or newer.
 Install GNU coreutils and jq with `brew install coreutils jq`.
 The runner requires Node.js, Bash 3.2 or newer, and GNU `timeout` or `gtimeout` on `PATH`.
-By default it starts its own mock server on port 50061, waits for `/health`, and stops and waits
-for that process on exit. `E2E_APPLE_MOCK_PORT` selects another owned port. A healthy occupied
-port is rejected rather than silently reused. Set `SCREENROOM_API_ENDPOINT` explicitly to use
-an already running server; the runner does not stop an external server. Each test injects that
-endpoint and its own isolated mock profile into the launched app. Regression tests request one-item pages
+The runner requires the shared descriptor-backed backend and verifies real readiness and instance identity.
+It never starts or stops an API server. `SCREENROOM_API_ENDPOINT` must match the descriptor origin and endpoint alias.
+Each test injects that endpoint, the explicit local `SCREENROOM_USER_ID`, and an isolated local settings namespace.
+Regression tests request one-item pages
 with `SCREENROOM_API_PAGE_SIZE=1` to exercise continuation handling. Startup, server output,
 readiness, and cleanup logs live in the run directory.
 The regression and all categories also execute headless catalog-state and endpoint-policy regressions before platform tests. They cover delayed/failed
 detail transitions, nullable vote counts, variant provider/scale/palette/capability records, and Library/Search-first provenance with one-item API pages.
 The headless tests also retrieve the server logo through the actual core and verify PNG bytes with native image decode.
-`bash apps/apple/scripts/test-mock-port.sh` checks port configuration without a server or GUI.
+The headless endpoint-policy check requires no server or GUI.
 Run these commands from the repository root:
 
 ```sh
@@ -104,7 +109,8 @@ bash apps/apple/scripts/e2e.sh tvos
 bash apps/apple/scripts/e2e.sh macos
 ```
 
-macOS XCUITest is opt-in because it uses the desktop. The explicit `macos` profile runs only macOS,
+macOS XCUITest requires fresh user approval and `SCREENROOM_MACOS_GUI_READY=1` because it uses the desktop.
+After approval, prefix a macOS command with that readiness variable. The explicit `macos` profile runs only macOS,
 even when `E2E_MACOS` is unset or `0`. For default/all runs, `E2E_MACOS=1` adds macOS;
 unset or `0` leaves it disabled. Other values fail before generation, builds, or tests.
 The root runner uses the same setting: `E2E_MACOS=1 bash scripts/e2e.sh apple` runs all four profiles.
@@ -173,18 +179,18 @@ The happy-path test captures exactly one successful attachment per showcase flow
 The iPhone and iPad tests submit Return to dismiss the keyboard before the search capture and assert its absence.
 These captures alone do not establish a successful suite.
 macOS captures only the app window; simulators capture the app screen.
-Tests use the real app, native Rust core, and mock server, not replacement screens or bundled catalogs.
+Tests use the real app, native Rust core, and persistent backend with offline adapters, not replacement screens or bundled catalogs.
 These smoke checks do not cover every search combination, text size, or device size.
-The iPhone, iPad, and Mac tests cover query search, disconnected Jellyfin filtering, TMDB filtering,
+The iPhone, iPad, and Mac tests cover query search, Jellyfin and TMDB provider filters,
 detail-return context, Clear query, and no-result status. All profiles assert Settings starts closed
 and check the provider information disclosure during the separate Nosferatu detail journey.
 `testFreshSearchAndHomeScope` checks fresh-search resets, retained item types, library hierarchy
 restoration, and All libraries scope after Home on every platform.
 `testHappyPathShowcase` enters the real `Bunny` query through XCUITest on every profile, separate from stateful search regression journeys.
 `testSearchPaginationAndPreferencesRoundTrip` checks a multi-page query and preference retention
-across app relaunches in the same mock profile. `testCoreUnavailableAndRetry` uses a closed
+across app relaunches in the same local settings namespace. `testCoreUnavailableAndRetry` uses a closed
 local endpoint and checks honest error/retry behavior without catalog fallback. It then restores the configured healthy endpoint
-and relaunches the same app/profile to check Home and server artwork. It does not restart a server or prove in-process recovery.
+and relaunches the same app to check Home and server artwork. It never restarts the shared backend or proves in-process recovery.
 The tvOS test uses remote directional focus and Select for navigation and options, plus native text entry for the search capture.
 `testSidebarRemoteControls` additionally checks every subtitle choice and its collapsed current value,
 Refresh, the absence of unsupported authentication controls, and directional focus return without changing the selected destination.
@@ -205,13 +211,16 @@ The runner exports a profile's screenshots only after its entire test suite pass
 Unique run directories prevent stale captures from a previous run.
 Inspect the result bundle and exported PNGs separately; build success alone does not establish E2E success.
 
-The root `bash scripts/e2e.sh --update-showcase apple` command instead supplies a new absolute
-`E2E_APPLE_RUN_DIR` inside its temporary staging directory. The Apple runner requires that directory not already exist.
+The root `bash scripts/e2e.sh --update-showcase apple` command supplies a persistent absolute `E2E_APPLE_RUN_DIR`.
+The default path is `apps/apple/build/e2e/runs/showcase-XXXXXX/run`; the root runner prints the resolved path.
+A caller override requires an absolute, new directory with a parent that exists.
+The Apple runner requires that directory not already exist.
 The root runner reads that exact run's attachment manifests and requires one non-failure PNG per flow and selected profile.
 It preserves the `home-success` attachment contract and also requires `sidebar-success`, `library-success`, `search-success`, and `detail-success`.
 Default showcase updates export iOS, iPadOS, and tvOS. They preserve the current macOS images.
 Use `E2E_MACOS=1 bash scripts/e2e.sh --update-showcase apple` to require all five current-run captures from all four profiles.
-It updates the website only after all selected suites and captures pass. It removes temporary artifacts on exit.
+It updates the website only after all selected suites and captures pass.
+The root runner removes only its separate temporary screenshot-copy stage on exit; Apple logs and result bundles persist.
 
 The runner reuses the XcodeGen cache and per-scheme DerivedData under `build/e2e/cache/`.
 iPhone and iPad tests share `build/e2e/cache/iOS/`; tvOS and macOS use `tvOS/` and `macOS/`.
