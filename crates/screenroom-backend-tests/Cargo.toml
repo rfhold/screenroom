@@ -1,0 +1,9 @@
+[package]
+name = "screenroom-backend-tests"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dev-dependencies]
+screenroom-client-core = { path = "../screenroom-client-core" }
+tokio.workspace = true
