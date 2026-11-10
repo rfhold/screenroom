@@ -19,9 +19,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 e2e = []
 
 [dev-dependencies]
-axum = { version = "0.8", features = ["http2"] }
-screenroom-mock-server = { path = "../../crates/screenroom-mock-server" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 waydriver = "=0.3.10"
 waydriver-compositor-mutter = "=0.3.10"
 waydriver-input-mutter = "=0.3.10"

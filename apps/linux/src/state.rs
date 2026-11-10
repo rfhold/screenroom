@@ -10,7 +10,13 @@ impl Library {
             .iter()
             .find(|l| l.id == self.0)
             .map(|l| l.title.clone())
-            .unwrap_or_default()
+            .unwrap_or_else(|| {
+                if self.0.is_empty() {
+                    "All libraries".into()
+                } else {
+                    self.0.clone()
+                }
+            })
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -38,6 +44,7 @@ pub struct State {
     pub search_origin: bool,
     pub result_ids: Vec<String>,
     pub search_error: Option<String>,
+    pub search_status: String,
 }
 impl Default for State {
     fn default() -> Self {
@@ -60,6 +67,7 @@ impl Default for State {
             search_origin: false,
             result_ids: vec![],
             search_error: None,
+            search_status: String::new(),
         }
     }
 }
@@ -106,10 +114,7 @@ impl State {
     pub fn fresh_search(&mut self, library: Library) {
         self.navigate(Screen::Search, library);
         self.query.clear();
-        self.methods = [true; 3];
-        self.title_only = false;
         self.settings = false;
-        self.source.clear();
         self.result_ids.clear();
     }
     pub fn edit_query(&mut self, query: String) -> u64 {

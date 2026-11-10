@@ -29,7 +29,25 @@ output=${1:-"$root/build/e2e"}
 mkdir -p "$output"
 output=$(cd -- "$output" && pwd)
 image=screenroom-linux-e2e:local
+repo=$(cd "$root/../.." && pwd)
+export SCREENROOM_BACKEND_DESCRIPTOR=${SCREENROOM_BACKEND_DESCRIPTOR:-$repo/build/backend-runtime/screenroom-e2e/descriptor.json}
+export SCREENROOM_BACKEND_ATTACH=1
+bash "$repo/scripts/backend.sh" status
+bash "$repo/scripts/backend.sh" wait
+read -r network upstream instance origin user < <(python3 - "$SCREENROOM_BACKEND_DESCRIPTOR" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1])); assert d['ready']
+print(d['clientNetwork'],d['clientUpstream'],d['instanceID'],d['publicOrigin'],d['userID'])
+PY
+)
+for alias in SCREENROOM_API_ENDPOINT SCREENROOM_ENDPOINT SCREENROOM_E2E_API_ENDPOINT; do
+    if [[ -n ${!alias:-} && ${!alias} != "$origin" ]]; then printf '%s conflicts with shared backend origin\n' "$alias" >&2; exit 2; fi
+done
+SCREENROOM_API_ENDPOINT="$origin" python3 "$root/tests/e2e/origin.py" >/dev/null
+if [[ -n ${SCREENROOM_BACKEND_INSTANCE_ID:-} && $SCREENROOM_BACKEND_INSTANCE_ID != "$instance" ]]; then printf 'Backend instance mismatch\n' >&2; exit 2; fi
 container=
+namespace=${SCREENROOM_E2E_SETTINGS_NAMESPACE:-${E2E_PROFILE_PREFIX:-linux-$(date +%s)-$$}}
+if [[ ! $namespace =~ ^[a-zA-Z0-9_-]+$ ]]; then printf 'Invalid local settings namespace\n' >&2; exit 2; fi
 screenshots=()
 cleanup() {
     local status=$?
@@ -56,7 +74,10 @@ for scenario in "${scenarios[@]}"; do
         destination="$output/$scenario"
         mkdir -p "$destination"
     fi
-    container=$(docker create --network none --cap-drop ALL --security-opt no-new-privileges \
+    container=$(docker create --network "$network" --cap-drop ALL --security-opt no-new-privileges \
+        -e SCREENROOM_API_ENDPOINT="$origin" -e SCREENROOM_USER_ID="${SCREENROOM_USER_ID:-$user}" \
+        -e SCREENROOM_BACKEND_INSTANCE_ID="$instance" -e SCREENROOM_BACKEND_UPSTREAM="$upstream" \
+        -e SCREENROOM_E2E_SETTINGS_NAMESPACE="$namespace-$scenario" \
         -e E2E_REQUIRED_LABEL -e E2E_RESOLUTION -e E2E_APP -e E2E_SCENARIO="$scenario" \
         --pids-limit 128 --memory 2g "$image")
     docker start -a "$container" >"$output/current-scenario.log" 2>&1 || status=$?

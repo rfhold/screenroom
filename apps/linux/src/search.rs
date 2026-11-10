@@ -1,7 +1,7 @@
 use crate::home::{App, accessible_label, clear, column, label};
 use crate::state::Screen;
 use adw::prelude::*;
-use std::{rc::Rc, time::Duration};
+use std::{rc::Rc, sync::Arc, time::Duration};
 
 impl App {
     pub fn search(self: &Rc<Self>) -> gtk::Box {
@@ -136,6 +136,7 @@ impl App {
                 if button.is_active() {
                     if let Some(app) = weak.upgrade() {
                         app.state.borrow_mut().source = source.clone();
+                        app.save_preferences(false);
                         // Source changes share the query revision and pending path.
                         let query = app.state.borrow().query.clone();
                         app.cancel_search();
@@ -331,11 +332,15 @@ impl App {
             )
         };
         output.append(&label(&status, "muted"));
+        if !state.search_status.is_empty() {
+            output.append(&label(&state.search_status, "muted"));
+        }
         if !state.query.trim().is_empty() {
             output.append(&self.grid(&results));
         }
     }
     fn options_changed(self: &Rc<Self>) {
+        self.save_preferences(false);
         if !self.state.borrow().query_debouncing {
             self.request_search();
         }
@@ -375,6 +380,13 @@ impl App {
                         title_only: state.title_only,
                     }),
                     source: state.source.clone(),
+                    source_id: self
+                        .preferences
+                        .borrow()
+                        .scope
+                        .as_ref()
+                        .map(|s| s.source_id.clone())
+                        .unwrap_or_default(),
                     page: Some(Page {
                         size: 100,
                         token: String::new(),
@@ -386,13 +398,24 @@ impl App {
         if let Some(output) = self.search_results.borrow().upgrade() {
             self.update_results(&output);
         }
-        let task = crate::backend::runtime().spawn(async move {
-            crate::backend::paginate(|page| {
+        let task = crate::backend::runtime().spawn(crate::backend::operation(async move {
+            let status = Arc::new(std::sync::Mutex::new(String::new()));
+            let items = crate::backend::paginate(|page| {
                 let client = client.clone();
+                let status = status.clone();
                 let mut request = request.clone();
                 request.page = Some(page);
                 async move {
                     let response = client.search(request.clone()).await?;
+                    *status.lock().unwrap() = format!(
+                        "Effective methods: {:?}{}",
+                        response.effective_methods,
+                        if response.degradation_reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", response.degradation_reason)
+                        }
+                    );
                     eprintln!(
                         "core Search({:?}, {}, {}): {} results",
                         request.query,
@@ -400,14 +423,14 @@ impl App {
                         request.source,
                         response.items.len()
                     );
-                    Ok((
-                        response.items.into_iter().map(|i| i.id).collect(),
-                        response.next_page_token,
-                    ))
+                    Ok((response.items, response.next_page_token))
                 }
             })
-            .await
-        });
+            .await?;
+            let status = status.lock().unwrap().clone();
+            let artwork = crate::backend::search_artwork(client, &items).await?;
+            Ok::<_, screenroom_client_core::ClientError>((items, status, artwork))
+        }));
         let weak = Rc::downgrade(self);
         self.search_task.replace(Some(task.abort_handle()));
         gtk::glib::MainContext::default().spawn_local(async move {
@@ -422,7 +445,12 @@ impl App {
                 }
                 state.search_pending = false;
                 match result {
-                    Ok(Ok(ids)) => state.result_ids = ids,
+                    Ok(Ok((items, status, artwork))) => {
+                        state.result_ids = items.iter().map(|i| i.id.clone()).collect();
+                        state.search_status = status;
+                        crate::catalog::merge_items(items);
+                        crate::assets::merge(artwork);
+                    }
                     Ok(Err(error)) => state.search_error = Some(error.to_string()),
                     Err(error) => state.search_error = Some(error.to_string()),
                 }

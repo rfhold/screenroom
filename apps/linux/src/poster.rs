@@ -133,6 +133,9 @@ pub fn view(item: &Item, width: i32, progress: Option<u8>) -> gtk::Widget {
         )));
         if let Some(value) = progress {
             let bar = gtk::ProgressBar::new();
+            bar.update_property(&[gtk::accessible::Property::Label(&format!(
+                "Watch progress {value}%"
+            ))]);
             bar.set_fraction(f64::from(value) / 100.0);
             bar.set_valign(gtk::Align::End);
             overlay.add_overlay(&bar);

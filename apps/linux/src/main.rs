@@ -6,6 +6,7 @@ mod catalog;
 mod home;
 mod poster;
 mod search;
+mod settings;
 mod state;
 
 fn main() -> gtk::glib::ExitCode {

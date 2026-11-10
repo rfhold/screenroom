@@ -49,6 +49,18 @@ thread_local! { static DATA: RefCell<Catalog> = RefCell::default(); }
 pub fn install(data: Catalog) {
     DATA.with(|d| d.replace(data));
 }
+pub fn merge_items(items: Vec<core::Item>) {
+    DATA.with(|data| {
+        let mut data = data.borrow_mut();
+        for item in items {
+            if let Some(existing) = data.items.iter_mut().find(|i| i.id == item.id) {
+                *existing = map_item(item, vec![]);
+            } else {
+                data.items.push(map_item(item, vec![]));
+            }
+        }
+    });
+}
 pub fn catalog() -> Vec<Item> {
     DATA.with(|d| d.borrow().items.clone())
 }
@@ -240,7 +252,7 @@ mod tests {
     #[test]
     fn global_artwork_and_ordered_notices_are_not_limited_to_visited_items() {
         let info = core::CatalogInfo {
-            artwork: vec![
+            branding: vec![
                 core::Artwork {
                     id: "unvisited".into(),
                     kind: "portrait".into(),
@@ -262,7 +274,7 @@ mod tests {
             retrieved_at: "catalog-date".into(),
         };
         install(Catalog {
-            art: info.artwork.iter().map(art_record).collect(),
+            art: info.branding.iter().map(art_record).collect(),
             info: info.clone(),
             ..Default::default()
         });
@@ -271,7 +283,7 @@ mod tests {
         assert_eq!(super::info(), info);
         assert_eq!(
             super::info()
-                .artwork
+                .branding
                 .iter()
                 .find(|a| a.kind == "logo")
                 .unwrap()

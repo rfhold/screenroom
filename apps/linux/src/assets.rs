@@ -13,3 +13,6 @@ pub fn install(art: HashMap<String, Pixels>) {
 pub fn pixels(url: &str) -> Option<Pixels> {
     ART.with(|a| a.borrow().get(url).cloned())
 }
+pub fn merge(art: HashMap<String, Pixels>) {
+    ART.with(|a| a.borrow_mut().extend(art));
+}
