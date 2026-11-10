@@ -21,7 +21,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             ScreenroomTheme {
                 BackHandler { if (!navigateBack()) finish() }
-                HomeScreen(endpoint = intent.getStringExtra("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051", profile = intent.getStringExtra("SCREENROOM_MOCK_PROFILE") ?: "android-mobile", debug = BuildConfig.DEBUG, registerBack = { navigateBack = it })
+                HomeScreen(endpoint = intent.getStringExtra("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051", userId = intent.getStringExtra("SCREENROOM_USER_ID") ?: "", settingsNamespace = intent.getStringExtra("SCREENROOM_E2E_SETTINGS_NAMESPACE") ?: "default", debug = BuildConfig.DEBUG, registerBack = { navigateBack = it })
             }
         }
     }

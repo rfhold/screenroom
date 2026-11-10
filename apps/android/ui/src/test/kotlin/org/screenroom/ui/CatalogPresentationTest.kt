@@ -69,10 +69,11 @@ class CatalogPresentationTest {
         val logo = Artwork("brand", "https://mock.example/art/brand.png", "Server brand", "Creator", "License", "https://source.example", "https://license.example", "logo")
         val unvisited = logo.copy(id = "unvisited", kind = "portrait")
         val notices = listOf(CatalogNotice("z", "legal", "Last alphabetically", "First on server", "", ""), CatalogNotice("a", "art", "Second", "Second on server", "Source", "https://source.example"))
-        val info = CatalogInfo(listOf(logo, unvisited), notices, "catalog-date")
-        assertEquals(listOf("brand", "unvisited"), info.artwork.map { it.id })
+        val info = CatalogInfo(notices, "catalog-date", listOf(logo))
+        val page = org.screenroom.core.ArtworkPage(listOf(logo, unvisited), "")
+        assertEquals(listOf("brand", "unvisited"), page.artwork.map { it.id })
         assertEquals(listOf("z", "a"), info.notices.map { it.id })
-        assertEquals("brand", info.artwork.single { it.kind == "logo" }.id)
+        assertEquals("brand", info.branding.single { it.kind == "logo" }.id)
         assertEquals("catalog-date", info.retrievedAt)
     }
 }

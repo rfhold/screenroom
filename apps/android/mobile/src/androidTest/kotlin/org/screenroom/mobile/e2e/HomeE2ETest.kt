@@ -7,6 +7,8 @@ import org.junit.runner.RunWith
 import org.screenroom.e2e.assertHappyPathAndCapture
 import org.screenroom.e2e.assertRegression
 import org.screenroom.e2e.assertRetry
+import org.screenroom.e2e.assertSettingsPersistence
+import org.screenroom.e2e.assertCorrectionEdges
 import org.screenroom.e2e.coreComposeRule
 import org.screenroom.mobile.MainActivity
 
@@ -16,4 +18,6 @@ class HomeE2ETest {
     @Test fun happyPath() = compose.assertHappyPathAndCapture(compose.activity)
     @Test fun regression() = compose.assertRegression(compose.activity)
     @Test fun retry() = compose.assertRetry(compose.activity)
+    @Test fun settingsPersistence() = compose.assertSettingsPersistence(compose.activity)
+    @Test fun correctionEdges() = compose.assertCorrectionEdges(compose.activity)
 }

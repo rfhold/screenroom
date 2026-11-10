@@ -20,7 +20,7 @@ esac
 [ "$#" -le 1 ] || { echo 'Expected at most one profile' >&2; exit 2; }
 
 OUT="$ROOT/build/e2e"
-profile_prefix=${SCREENROOM_E2E_PROFILE_PREFIX:-android-$(uuidgen | tr '[:upper:]' '[:lower:]')}
+profile_prefix=${SCREENROOM_E2E_SETTINGS_NAMESPACE:-${SCREENROOM_E2E_PROFILE_PREFIX:-android-$(uuidgen | tr '[:upper:]' '[:lower:]')}}
 [[ "$profile_prefix" =~ ^[a-zA-Z0-9_-]{1,90}$ ]] || { echo 'Invalid E2E profile prefix' >&2; exit 2; }
 flows=(home sidebar library search detail)
 mkdir -p "$OUT"
@@ -50,14 +50,14 @@ command -v file >/dev/null || fail 'file is required to validate screenshots'
 "$JAVA_HOME/bin/java" -version 2>&1 | grep -q 'version "17\.' || fail 'JAVA_HOME must select JDK 17'
 
 owned_pid=
-server_pid=
 owned_reverses=()
 verified_serials=()
 verified_packages=()
+source "$ROOT/scripts/instrumentation.sh"
 cleanup() {
   status=$?
+  stop_owned_instrumentation
   for reverse_serial in "${owned_reverses[@]}"; do "$ADB" -s "$reverse_serial" reverse --remove "tcp:$api_port" >/dev/null 2>&1 || true; done
-  if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; fi
   for profile in "${profiles[@]}"; do
     for flow in "${flows[@]}"; do
       rm -f "$OUT/$profile-$flow.png.tmp"
@@ -86,21 +86,26 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [ -z "${SCREENROOM_API_ENDPOINT:-}" ]; then
-  if (exec 3<>/dev/tcp/127.0.0.1/50062) 2>/dev/null; then fail 'Mock port 50062 is occupied; set SCREENROOM_API_ENDPOINT to use an external server'; fi
-  export SCREENROOM_API_ENDPOINT=http://127.0.0.1:50062
-  SCREENROOM_MOCK_LISTEN=127.0.0.1:50062 SCREENROOM_MOCK_PUBLIC_BASE="$SCREENROOM_API_ENDPOINT" bash "$ROOT/../../scripts/mock-server.sh" > "$OUT/mock-server.log" 2>&1 &
-  server_pid=$!
-fi
+: "${SCREENROOM_API_ENDPOINT:?Set the caller-owned backend endpoint}"
+: "${SCREENROOM_USER_ID:?Set the explicit local user UUID}"
+: "${SCREENROOM_BACKEND_DESCRIPTOR:?Set the caller-owned backend descriptor}"
+[ "${SCREENROOM_BACKEND_ATTACH:-}" = 1 ] || fail 'SCREENROOM_BACKEND_ATTACH=1 is required'
+[ "${SCREENROOM_E2E_API_ENDPOINT:-$SCREENROOM_API_ENDPOINT}" = "$SCREENROOM_API_ENDPOINT" ] || fail 'Endpoint aliases differ'
+[[ "$SCREENROOM_API_ENDPOINT" =~ ^http://(127\.0\.0\.1|localhost):[0-9]+$ ]] || fail 'Use an explicit loopback HTTP origin with ADB reverse'
+bash "$ROOT/../../scripts/backend.sh" wait
+bash "$ROOT/../../scripts/backend.sh" status | tee "$OUT/backend-status.json"
+instance=$(curl --connect-timeout 5 --max-time 15 --silent --show-error --fail "$SCREENROOM_API_ENDPOINT/__screenroom_instance")
+printf '%s\n' "$instance" > "$OUT/backend-instance.json"
+python3 - "$SCREENROOM_BACKEND_DESCRIPTOR" "$OUT/backend-instance.json" <<'PY'
+import json, os, sys
+descriptor, actual = (json.load(open(path)) for path in sys.argv[1:])
+assert descriptor['instanceID'] == actual['instanceID']
+assert descriptor['publicOrigin'] == actual['publicOrigin'] == os.environ['SCREENROOM_API_ENDPOINT']
+assert not os.environ.get('SCREENROOM_BACKEND_INSTANCE_ID') or os.environ['SCREENROOM_BACKEND_INSTANCE_ID'] == actual['instanceID']
+print('Android E2E backend instance=' + actual['instanceID'])
+PY
 api_port=${SCREENROOM_API_ENDPOINT##*:}
 [[ "$api_port" =~ ^[0-9]+$ ]] || fail 'Endpoint must specify an explicit port'
-deadline=$((SECONDS + 120))
-until curl --silent --fail --connect-timeout 2 --max-time 3 "$SCREENROOM_API_ENDPOINT/health" >/dev/null; do
-  if [ -n "$server_pid" ]; then kill -0 "$server_pid" 2>/dev/null || fail 'Mock server exited'; fi
-  (( SECONDS < deadline )) || fail 'Mock server readiness timed out'
-  sleep 1
-done
-if [ -n "$server_pid" ]; then kill -0 "$server_pid" 2>/dev/null || fail 'Owned mock server exited'; fi
 
 tasks=()
 for profile in "${profiles[@]}"; do
@@ -158,7 +163,7 @@ for profile in "${profiles[@]}"; do
   verified_serials+=("$serial")
   verified_packages+=("$package")
   reverse=$(adb reverse --list)
-  if ! echo "$reverse" | grep -q "tcp:$api_port tcp:$api_port"; then
+   if ! echo "$reverse" | grep -Eq "tcp:$api_port tcp:$api_port$"; then
     echo "$reverse" | grep -q "tcp:$api_port " && fail 'Existing reverse maps endpoint port elsewhere'
     adb reverse "tcp:$api_port" "tcp:$api_port"
     owned_reverses+=("$serial")
@@ -189,11 +194,24 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
     method=${methods[$category_index]}
     log="$OUT/$profile-$category-instrumentation.txt"
     echo "Android E2E: $profile category=$category method=$method"
-    timeout 300 "$ADB" -s "$serial" shell am instrument -w -r -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_MOCK_PROFILE "$profile_prefix-$profile-$category" -e class \
-      "$package.e2e.HomeE2ETest#$method" \
-      "$package.test/androidx.test.runner.AndroidJUnitRunner" \
-      | tee "$log" | tee -a "$OUT/$profile-instrumentation.txt"
+    run_owned_instrumentation 300 "$serial" "$package" "$log" -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-$category" -e class \
+      "$package.e2e.HomeE2ETest#$method"
+    cat "$log" >> "$OUT/$profile-instrumentation.txt"
     grep -Eq '^OK \(1 test\)' "$log" || fail "$profile $category E2E failed; no screenshot exported"
+    if [ "$category" = regression ]; then
+      run_owned_instrumentation 180 "$serial" "$package" "$OUT/$profile-correction-edges-instrumentation.txt" \
+        -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" \
+        -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-edges" -e class "$package.e2e.HomeE2ETest#correctionEdges"
+      for phase in write read; do
+        timeout 15 "$ADB" -s "$serial" shell am force-stop "$package"
+        persistence_log="$OUT/$profile-settings-$phase-instrumentation.txt"
+        run_owned_instrumentation 120 "$serial" "$package" "$persistence_log" \
+          -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" \
+          -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-persistence" -e SCREENROOM_SETTINGS_PHASE "$phase" \
+          -e class "$package.e2e.HomeE2ETest#settingsPersistence"
+        grep -Eq '^OK \(1 test\)' "$persistence_log" || fail "$profile process-persistence $phase failed"
+      done
+    fi
   done
   [ "$capture" = true ] || continue
   for flow in "${flows[@]}"; do

@@ -46,31 +46,36 @@ internal fun ProviderReference.presentation(rating: Rating?, score: String): Pro
     if (rating?.provider?.equals(provider, ignoreCase = true) == true) "$provider · $score" else "$provider: $status",
     url.takeIf(::validLink))
 
-internal class CoreStore(endpoint: String, profile: String) {
-    val client = Client(ClientConfig(endpoint, profile, 3000u))
+internal class CoreStore(endpoint: String, userId: String, private val settingsStore: SettingsStore) {
+    val client = Client(ClientConfig(endpoint, userId, 3000u))
     var catalog by mutableStateOf(emptyList<Title>())
     var homeRows by mutableStateOf(emptyList<Pair<String, List<Title>>>())
-    var preferences by mutableStateOf<Preferences?>(null)
+    var homeScope by mutableStateOf<SourceLibraryScope?>(null)
+    val localSettings = settingsStore.session
+    val preferences get() = localSettings.value
     var capabilities by mutableStateOf<SearchCapabilities?>(null)
     var libraries by mutableStateOf(emptyList<MediaLibrary>())
     var catalogInfo by mutableStateOf<CatalogInfo?>(null)
     var saving by mutableStateOf(false)
     private val preferenceLock = Mutex()
     val readRefresh = ReadRefresh()
+    private val bootstrapRequests = RequestGeneration()
+    private val detailRequests = RequestGeneration()
     fun refreshReads() { client.invalidateReads(); readRefresh.advance() }
-    fun libraryId(selection: String) = libraries.resolveLibrary(selection)?.id ?: error("No library supplied")
+    fun libraryId(selection: String) = selection.takeUnless { it == "all" }.orEmpty()
+    fun requestScope(selection: String) = SourceLibraryScope(preferences.scope?.sourceId.orEmpty(), libraryId(selection))
     fun libraryTitle(selection: String) = libraries.resolveLibrary(selection)?.title.orEmpty()
-    suspend fun bootstrap() {
-        val prefs = coreRequest { client.getPreferences() }
-        val caps = coreRequest { client.getSearchCapabilities() }
-        val libraries = coreRequest { client.listLibraries() }
+    suspend fun bootstrap(scope: SourceLibraryScope) = readOperation {
+        val request = bootstrapRequests.next()
+        val caps = coreRequest { client.getSearchCapabilities() }.let { it.copy(types = it.types.map { type -> type.replaceFirstChar(Char::uppercase) }) }
+        val libraries = collectPages { token -> coreRequest { client.listLibraries(scope.sourceId, org.screenroom.core.Page(100u, token)) }.let { it.libraries to it.nextPageToken } }
         val info = coreRequest { client.getCatalogInfo() }
-        val records = mutableListOf<Title>()
-        for (library in libraries) records += items { client.listLibraryItems(library.id, it) }
-        val rows = libraries.firstOrNull()?.let { library -> coreRequest { client.getHome(library.id) }.map { it.title to it.items.map(Item::ui) } }.orEmpty()
+        val rows = coreRequest { client.getHome(scope) }.map { it.title to it.items.map(Item::ui) }
         currentCoroutineContext().ensureActive()
-        preferences = prefs; capabilities = caps; catalog = records.distinctBy { it.id }; homeRows = rows
-        this.libraries = libraries; catalogInfo = info
+        if (!bootstrapRequests.current(request)) throw kotlinx.coroutines.CancellationException("Superseded bootstrap")
+        capabilities = caps; catalog = (rows.flatMap { it.second } + catalog).distinctBy { it.id }; homeRows = rows
+        homeScope = scope
+        this.libraries = listOf(MediaLibrary("all", "All libraries")) + libraries; catalogInfo = info
     }
     suspend fun items(read: suspend (org.screenroom.core.Page) -> ItemPage): List<Title> {
         return collectPages { token ->
@@ -78,27 +83,38 @@ internal class CoreStore(endpoint: String, profile: String) {
             result.items.map(Item::ui) to result.nextPageToken
         }
     }
-    suspend fun detail(id: String): Pair<Title, List<Title>> {
-        val item = coreRequest { client.getItem(id) }.ui()
+    suspend fun detail(id: String, library: String): Pair<Title, List<Title>> = readOperation {
+        val request = detailRequests.next()
+        val scope = requestScope(library)
+        val item = coreRequest { client.getItem(id, scope) }.ui()
+        val ancestors = loadParentChain(item, { it.id }, { it.parent }) { coreRequest { client.getItem(it, scope) }.ui() }
         val credits = collectPages { token ->
-            val result = coreRequest { client.listCredits(id, org.screenroom.core.Page(100u, token)) }
+            val result = coreRequest { client.listCredits(id, org.screenroom.core.Page(100u, token), scope) }
             result.credits to result.nextPageToken
         }
         val full = item.copy(cast = credits.filter { it.department.equals("cast", true) }.map { Person(it.name, it.role, it.artwork) },
             crew = credits.filterNot { it.department.equals("cast", true) }.map { Person(it.name, it.role, it.artwork) })
-        val children = if (item.kind in listOf("Series", "Season")) items { client.listChildren(id, it) } else emptyList()
+        val children = if (item.kind in listOf("Series", "Season")) items { client.listChildren(id, it, scope) } else emptyList()
         currentCoroutineContext().ensureActive()
-        catalog = (catalog.filterNot { it.id == id } + full + children).distinctBy { it.id }
-        return full to children
+        if (!detailRequests.current(request)) throw kotlinx.coroutines.CancellationException("Superseded detail")
+        catalog = (listOf(full) + ancestors + children + catalog).distinctBy { it.id }
+        full to children
     }
-    suspend fun update(subtitle: String? = null, types: Set<String>? = null) = preferenceLock.withLock {
+    suspend fun update(subtitle: String? = null, types: Set<String>? = null, methods: Methods? = null, source: String? = null, library: String? = null) = preferenceLock.withLock {
         saving = true
         try {
-        val current = preferences ?: coreRequest { client.getPreferences() }
+        val current = preferences
         val next = current.copy(subtitlePreference = subtitle ?: current.subtitlePreference,
-            searchTypes = types?.let { SearchTypes("Movie" in it, "Series" in it, "Episode" in it) } ?: current.searchTypes)
-        preferences = coreRequest { client.updatePreferences(next, if (subtitle != null) listOf("subtitle_preference") else listOf("search_types")) }
+            types = types?.let { SearchTypes("Movie" in it, "Series" in it, "Episode" in it) } ?: current.types,
+            methods = methods?.let { SearchMethods(it.titleOnly, it.text, it.fuzzy, it.semantic) } ?: current.methods,
+            source = source ?: current.source,
+            scope = library?.let { requestScope(it) } ?: current.scope)
+        localSettings.update(next)
         } finally { saving = false }
+    }
+    suspend fun retrySettings() = preferenceLock.withLock {
+        saving = true
+        try { localSettings.retry() } finally { saving = false }
     }
 }
 internal val LocalCore = staticCompositionLocalOf<CoreStore> { error("Core not provided") }

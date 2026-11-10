@@ -76,7 +76,7 @@ private object NearestVisibleFocus : BringIntoViewSpec {
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun HomeScreen(television: Boolean = false, endpoint: String = "http://127.0.0.1:50051", profile: String = "android", debug: Boolean = false, registerBack: (() -> Boolean) -> Unit = {}) {
+fun HomeScreen(television: Boolean = false, endpoint: String = "http://127.0.0.1:50051", userId: String = "", settingsNamespace: String = "default", debug: Boolean = false, settings: SettingsStore? = null, registerBack: (() -> Boolean) -> Unit = {}) {
     val configurationError = remember(endpoint, debug) { endpointError(endpoint, debug) }
     if (configurationError != null) {
         Column(Modifier.fillMaxSize().background(LocalScreenroomColors.current.background).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -85,9 +85,11 @@ fun HomeScreen(television: Boolean = false, endpoint: String = "http://127.0.0.1
         }
         return
     }
-    val store = remember(endpoint, profile) { CoreStore(endpoint, profile) }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val settingsStore = remember(context, settingsNamespace, settings) { settings ?: SettingsStore(context, settingsNamespace) }
+    val store = remember(endpoint, userId, settingsStore) { CoreStore(endpoint, userId, settingsStore) }
     DisposableEffect(store) { onDispose { store.client.cancelAll(); store.client.close() } }
-    CompositionLocalProvider(LocalCore provides store) { CoreHomeScreen(television, registerBack) }
+    key(store) { CompositionLocalProvider(LocalCore provides store) { CoreHomeScreen(television, registerBack) } }
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -100,27 +102,28 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
     var status by rememberSaveable { mutableStateOf("") }
-    LaunchedEffect(reload) {
-        loading = store.catalog.isEmpty(); error = null
-        try { store.bootstrap(); if (reload > 0) status = "Catalog refreshed." } catch (e: CancellationException) { throw e } catch (e: Exception) { error = e.message ?: "Core request failed"; status = "Catalog read failed: $error" } finally { loading = false }
+    var page by remember { mutableStateOf(Page(library = store.preferences.scope?.libraryId.orEmpty())) }
+    var homeScope by remember { mutableStateOf(store.requestScope(page.library)) }
+    LaunchedEffect(reload, homeScope) {
+        loading = store.catalog.isEmpty() || store.homeScope != homeScope; error = null
+        try { store.bootstrap(homeScope); if (reload > 0) status = "Catalog refreshed." } catch (e: CancellationException) { throw e } catch (e: Exception) { error = e.message ?: "Core request failed"; status = "Catalog read failed: $error" } finally { loading = false }
     }
-    var page by remember { mutableStateOf(Page()) }
     val history = remember { mutableStateListOf<Page>() }
     var expanded by rememberSaveable { mutableStateOf(false) }
     val subtitle = when (store.preferences?.subtitlePreference) { "library_tracks" -> "Library tracks"; "transcription" -> "Transcription"; else -> "Off" }
-    val preferredTypes = store.capabilities?.allowedTypes(store.preferences?.searchTypes).orEmpty()
+    val preferredTypes = store.capabilities?.allowedTypes(store.preferences.types).orEmpty()
     val chooseSubtitle: (String) -> Unit = { choice -> scope.launch { try { store.update(subtitle = when (choice) { "Library tracks" -> "library_tracks"; "Transcription" -> "transcription"; else -> "off" }) } catch (e: CancellationException) { throw e } catch (e: Exception) { status = "Preferences update failed: ${e.message}" } } }
     val refresh: () -> Unit = { store.refreshReads(); reload++; status = "Reading catalog…" }
     var detail by remember { mutableStateOf<Pair<Title, List<Title>>?>(null) }
     var detailLoading by remember { mutableStateOf(false) }
     var detailError by remember { mutableStateOf<String?>(null) }
     val detailRequests = remember { RequestGeneration() }
-    LaunchedEffect(page.screen, page.id, reload) {
+    LaunchedEffect(page.screen, page.library, page.id, reload) {
         val request = detailRequests.next()
         detail = null; detailError = null
         if (page.screen == "detail" && page.id != null) {
             detailLoading = true
-            try { val response = store.detail(page.id!!); if (detailRequests.current(request)) detail = response }
+            try { val response = store.detail(page.id!!, page.library); if (detailRequests.current(request)) detail = response }
             catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (detailRequests.current(request)) detailError = e.message ?: "Details failed" }
             finally { if (detailRequests.current(request)) detailLoading = false }
@@ -129,12 +132,18 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
     val contentFocus = remember { FocusRequester() }
     val sidebarFocus = remember { FocusRequester() }
     var lastContentFocus by remember(page.screen, page.library, page.id) { mutableStateOf<FocusRequester?>(null) }
-    fun navigate(next: Page) { history.add(page); page = next }
+    fun persist(change: suspend () -> Unit) { scope.launch { try { change() } catch (e: CancellationException) { throw e } catch (e: Exception) { status = "Settings save failed: ${e.message}" } } }
+    fun changePage(next: Page) {
+        page = next
+        persist { store.update(library = next.library) }
+        if (next.screen == "home") homeScope = store.requestScope(next.library)
+    }
+    fun navigate(next: Page) { history.add(page); changePage(next) }
     val back: () -> Boolean = {
         when { page.search.settings && page.screen == "search" -> { page = page.copy(search = page.search.copy(settings = false)); true }
             expanded -> { expanded = false; true }
-            history.isNotEmpty() -> { page = history.removeAt(history.lastIndex); true }
-            page.screen != "home" -> { page = Page(); true }
+            history.isNotEmpty() -> { changePage(history.removeAt(history.lastIndex)); true }
+            page.screen != "home" -> { changePage(Page()); true }
             else -> false }
     }
     SideEffect { registerBack(back) }
@@ -142,8 +151,8 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
         val navigateMenu: (String) -> Unit = { target ->
             expanded = false
             when (target) {
-                "Home" -> { history.clear(); page = Page(); status = "" }
-                "Search titles" -> navigate(Page("search", page.library, page.id, SearchState(types = preferredTypes, methods = store.capabilities?.defaultMethods() ?: Methods(false, false, false), source = store.capabilities?.sources?.firstOrNull().orEmpty())))
+                "Home" -> { history.clear(); changePage(Page()); status = "" }
+                "Search titles" -> navigate(Page("search", page.library, page.id, SearchState(types = preferredTypes, methods = store.preferences.methods?.let { Methods(it.text, it.fuzzy, it.semantic, it.titleOnly) } ?: Methods(), source = store.preferences.source)))
                 else -> navigate(Page("browse", target))
             }
         }
@@ -156,15 +165,15 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
     val content: @Composable () -> Unit = {
         key(page.screen, page.library, page.id) { Column(Modifier.fillMaxSize().testTag("content").verticalScroll(rememberScrollState()).padding(if (television) 28.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
             if (page.screen != "home") Breadcrumbs(page,
-                if (page.screen == "detail" && history.lastOrNull()?.screen == "search") ({ page = history.removeAt(history.lastIndex) }) else null) { navigate(it) }
+                if (page.screen == "detail" && history.lastOrNull()?.screen == "search") ({ changePage(history.removeAt(history.lastIndex)) }) else null) { navigate(it) }
             if (loading) Label("Loading catalog…", Modifier.testTag("data-loading"))
-            else if (error != null) { Label("Unable to load catalog: $error"); Action("Retry") { reload++ } }
+            else if (error != null) { PageReadError("Unable to load catalog: $error", "Retry") { reload++ } }
             else when (page.screen) {
                 "home" -> {
                     val entryFocus = remember { FocusRequester() }
                     LaunchedEffect(Unit) { if (television) entryFocus.requestFocus() }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                        Heading("Home")
+                        Heading("Home", modifier = Modifier.testTag("home-scope").semantics { stateDescription = store.homeScope?.let { "${it.sourceId}|${it.libraryId}" }.orEmpty() })
                         Action("Browse libraries", Modifier.focusRequester(entryFocus).then(if (television) Modifier.focusProperties { left = sidebarFocus } else Modifier)) { navigate(Page("browse")) }
                     }
                     store.homeRows.forEach { (name, items) ->
@@ -179,8 +188,8 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
                 "search" -> {
                     Heading("Search")
                     SearchPanel(page.library, page.search.query, { page = page.copy(search = page.search.copy(query = it)) }, page.search.types, { types -> page = page.copy(search = page.search.copy(types = types)); scope.launch { try { store.update(types = types) } catch (e: CancellationException) { throw e } catch (e: Exception) { status = "Preferences update failed: ${e.message}" } } },
-                        page.search.methods, { page = page.copy(search = page.search.copy(methods = it)) }, page.search.settings,
-                        { page = page.copy(search = page.search.copy(settings = !page.search.settings)) }, page.search.source, { page = page.copy(search = page.search.copy(source = it)) }, television) { navigate(Page("detail", page.library, it.id)) }
+                        page.search.methods, { value -> page = page.copy(search = page.search.copy(methods = value)); persist { store.update(methods = value) } }, page.search.settings,
+                        { page = page.copy(search = page.search.copy(settings = !page.search.settings)) }, page.search.source, { value -> page = page.copy(search = page.search.copy(source = value)); persist { store.update(source = value) } }, television) { navigate(Page("detail", page.library, it.id)) }
                 }
                 "browse", "detail" -> {
                     val item = detail?.first
@@ -198,6 +207,9 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
             }
             Credits()
             if (store.saving) Label("Saving preferences…")
+            store.localSettings.warning?.let { warning ->
+                PageReadError(warning, "Retry saving settings") { scope.launch { store.retrySettings() } }
+            }
             Spacer(Modifier.height(12.dp))
         } }
     }
@@ -286,8 +298,8 @@ private fun Label(text: String, modifier: Modifier = Modifier, muted: Boolean = 
 }
 
 @Composable
-private fun Heading(text: String, small: Boolean = false) {
-    BasicText(text, Modifier.semantics { heading() }, style = BodyStyle.copy(color = LocalScreenroomColors.current.text, fontSize = if (small) 21.sp else 28.sp, lineHeight = if (small) 28.sp else 36.sp, fontWeight = FontWeight.SemiBold))
+private fun Heading(text: String, small: Boolean = false, modifier: Modifier = Modifier) {
+    BasicText(text, modifier.semantics { heading() }, style = BodyStyle.copy(color = LocalScreenroomColors.current.text, fontSize = if (small) 21.sp else 28.sp, lineHeight = if (small) 28.sp else 36.sp, fontWeight = FontWeight.SemiBold))
 }
 
 @Composable
@@ -440,6 +452,7 @@ private fun SearchPanel(library: String, query: String, update: (String) -> Unit
     var results by remember { mutableStateOf(emptyList<Title>()) }
     var searching by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
+    var searchStatus by remember { mutableStateOf("") }
     var retry by remember { mutableIntStateOf(0) }
     val requests = remember { RequestGeneration() }
     LaunchedEffect(query, library, types, methods, source, retry) {
@@ -449,7 +462,14 @@ private fun SearchPanel(library: String, query: String, update: (String) -> Unit
             if (query.isBlank()) { settled = query; return@repeatOnRefresh }
             try {
                 delay(350)
-                val response = store.items { page -> store.client.search(SearchRequest(query, store.libraryId(library), SearchTypes("Movie" in types, "Series" in types, "Episode" in types), SearchMethods(methods.titleOnly, methods.text, methods.fuzzy, methods.semantic), source, page)) }
+                var effective = ""
+                val response = collectPages { token ->
+                    val result = coreRequest { store.client.search(SearchRequest(query, store.libraryId(library), SearchTypes("Movie" in types, "Series" in types, "Episode" in types), SearchMethods(methods.titleOnly, methods.text, methods.fuzzy, methods.semantic), source, org.screenroom.core.Page(100u, token), store.requestScope(library).sourceId)) }
+                    val actual = result.effectiveMethods
+                    effective = "Effective search: " + listOfNotNull("Text".takeIf { actual?.text == true }, "Fuzzy".takeIf { actual?.fuzzy == true }, "Semantic".takeIf { actual?.semantic == true }).joinToString(", ") + result.degradationReason.takeIf { it.isNotBlank() }?.let { " · Fallback: $it" }.orEmpty()
+                    result.items.map { it.ui() } to result.nextPageToken
+                }
+                searchStatus = effective
                 if (requests.current(request)) { results = response; settled = query }
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { if (requests.current(request)) failure = e.message ?: "Search failed" }
@@ -491,6 +511,7 @@ private fun SearchPanel(library: String, query: String, update: (String) -> Unit
         }
         Label(when { query.isBlank() -> "Enter a title to search $libraryName."; failure != null -> "Search failed: $failure"; searching -> "Searching titles…"; results.isEmpty() -> "No matches in $libraryName. Try another search."; else -> "${results.size} ${if (results.size == 1) "result" else "results"} in $libraryName" }, muted = true)
         if (failure != null) Action("Retry search") { retry++ }
+        if (query.isNotBlank() && !searching && failure == null) Label(searchStatus, Modifier.testTag("search-effective-methods"), muted = true, size = 12)
         if (query.isNotBlank() && !searching && failure == null && query == settled) PosterGrid(results, tv, entryFocus = false, open = open)
     }
 }
@@ -583,28 +604,36 @@ private fun RightsInfo(rights: Rights?) {
 @Composable
 private fun LibraryGrid(library: String, tv: Boolean, reload: Int, open: (Title) -> Unit) {
     val store = LocalCore.current
-    var records by remember(library) { mutableStateOf<List<Title>?>(null) }
-    var failure by remember(library) { mutableStateOf<String?>(null) }
+    val state = remember(library) { PageReadState<Title>() }
     var retry by remember { mutableIntStateOf(0) }
-    val requests = remember { RequestGeneration() }
     LaunchedEffect(library, reload, retry) {
-        val request = requests.next()
-        records = null; failure = null
-        try { val response = store.items { store.client.listLibraryItems(store.libraryId(library), it) }; if (requests.current(request)) records = response }
-        catch (e: CancellationException) { throw e } catch (e: Exception) { if (requests.current(request)) failure = e.message ?: "Library failed" }
+        state.load { store.items { store.client.listLibraryItems(store.requestScope(library), it) }.sortedBy { it.record.releaseDate } }
     }
-    when { failure != null -> { Label("Unable to load library: $failure"); Action("Retry library") { retry++ } }; records == null -> Label("Loading library…"); else -> PosterGrid(records!!, tv, open = open) }
+    when { state.failure != null -> PageReadError("Unable to load library: ${state.failure}", "Retry library") { retry++ }; state.records == null -> Label("Loading library…"); else -> PosterGrid(state.records!!, tv, open = open) }
+}
+
+@Composable
+fun PageReadError(message: String, retryLabel: String, retry: () -> Unit) {
+    Label(message); Action(retryLabel, click = retry)
 }
 
 @Composable
 private fun Credits() {
-    val catalog = LocalCore.current.catalog
-    val info = LocalCore.current.catalogInfo
+    val store = LocalCore.current
+    val catalog = store.catalog
+    val info = store.catalogInfo
     var expanded by remember { mutableStateOf(false) }
+    val state = remember { PageReadState<Art>() }
+    var retry by remember { mutableIntStateOf(0) }
+    LaunchedEffect(expanded, retry) {
+        if (expanded && state.records == null) state.load {
+            collectPages { token -> coreRequest { store.client.listArtwork(org.screenroom.core.SourceLibraryScope("", ""), org.screenroom.core.Page(100u, token)) }.let { it.artwork to it.nextPageToken } }
+        }
+    }
     Action("Data & artwork credits", selected = expanded) { expanded = !expanded }
     if (expanded) Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Heading("Data & artwork credits", small = true)
-        info?.artwork?.filter { it.kind == "logo" }?.forEach { ArtImage(it, Modifier.width(120.dp).height(16.dp)) }
+        info?.branding?.forEach { ArtImage(it, Modifier.width(120.dp).height(16.dp)) }
         info?.notices?.forEach { notice ->
             if (notice.section.isNotBlank()) Label(notice.section, muted = true, size = 12)
             if (notice.title.isNotBlank()) Heading(notice.title, small = true)
@@ -612,10 +641,12 @@ private fun Credits() {
             Link(notice.linkLabel, notice.linkUrl)
         }
         Heading("Artwork", small = true)
-        info?.let { Label("Retrieved · ${it.retrievedAt}", muted = true, size = 12) }
-        info?.artwork?.forEach { art ->
-            Label(art.label); Label(art.creator, muted = true, size = 12)
-            Link(art.license, art.licenseUrl); Link("Source & provenance", art.source); Link("Mock-served artwork download", art.url)
+        info?.let { Label("Retrieved · ${it.retrievedAt.ifBlank { "Not supplied" }}", muted = true, size = 12) }
+        if (state.failure != null) PageReadError("Unable to load artwork credits: ${state.failure}", "Retry artwork credits") { retry++ }
+        else if (state.records == null) Label("Loading artwork credits…")
+        state.records?.forEach { art ->
+            Label(art.label, Modifier.testTag("artwork-credit-${art.id}")); Label(art.creator, muted = true, size = 12)
+            Link(art.license, art.licenseUrl); Link("Source & provenance", art.source); Link("Server artwork download", art.url)
         }
         Heading("Film & episode rights", small = true)
         catalog.forEach { item ->

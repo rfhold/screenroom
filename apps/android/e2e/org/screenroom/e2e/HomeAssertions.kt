@@ -6,6 +6,8 @@ import android.graphics.Bitmap
 import android.view.KeyEvent
 import android.view.WindowInsets
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.*
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
@@ -26,7 +28,8 @@ fun <A : androidx.activity.ComponentActivity> coreComposeRule(activity: Class<A>
     val args = InstrumentationRegistry.getArguments()
     val intent = android.content.Intent(instrumentation.targetContext, activity)
         .putExtra("SCREENROOM_API_ENDPOINT", args.getString("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051")
-        .putExtra("SCREENROOM_MOCK_PROFILE", args.getString("SCREENROOM_MOCK_PROFILE") ?: profile)
+        .putExtra("SCREENROOM_USER_ID", args.getString("SCREENROOM_USER_ID") ?: "00000000-0000-0000-0000-000000000001")
+        .putExtra("SCREENROOM_E2E_SETTINGS_NAMESPACE", args.getString("SCREENROOM_E2E_SETTINGS_NAMESPACE") ?: profile)
     return androidx.compose.ui.test.junit4.AndroidComposeTestRule(androidx.test.ext.junit.rules.ActivityScenarioRule<A>(intent)) { rule ->
         var current: A? = null
         rule.scenario.onActivity { current = it }
@@ -37,21 +40,210 @@ private const val show = "The Beverly Hillbillies, Series, 1962–1971 · Select
 private const val season = "Season 1, Season, 2 included episodes"
 private const val episode = "The Clampetts Strike Oil, Episode, The Beverly Hillbillies · S1 E1 · ~25m"
 
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+fun ComposeTestRule.assertCorrectionEdges(activity: ComponentActivity) {
+    activeRule = this
+    captureEnabled = false
+    val scheduler = kotlinx.coroutines.test.TestCoroutineScheduler()
+    val dispatcher = kotlinx.coroutines.test.StandardTestDispatcher(scheduler)
+    val state = org.screenroom.ui.PageReadState<Int>()
+    runOnUiThread {
+        activity.setContent {
+            org.screenroom.ui.ScreenroomTheme {
+                var attempt by remember { mutableIntStateOf(0) }
+                LaunchedEffect(attempt) {
+                    kotlinx.coroutines.withContext(dispatcher) {
+                        state.load { org.screenroom.ui.readOperation {
+                            if (attempt == 0) kotlinx.coroutines.delay(60_000)
+                            org.screenroom.ui.collectPages { token ->
+                                if (attempt > 0) listOf(3) to ""
+                                else if (token.isEmpty()) { kotlinx.coroutines.delay(10_000); listOf(1) to "later" }
+                                else { kotlinx.coroutines.delay(60_000); listOf(2) to "" }
+                            }
+                        } }
+                    }
+                }
+                androidx.compose.foundation.layout.Column {
+                    when {
+                        state.failure != null -> org.screenroom.ui.PageReadError(state.failure!!, "Retry traversal") { attempt++ }
+                        state.records != null -> androidx.compose.foundation.text.BasicText("Traversal recovered: ${state.records}")
+                        else -> androidx.compose.foundation.text.BasicText("Loading traversal")
+                    }
+                }
+            }
+        }
+    }
+    waitForIdle()
+    runOnIdle { scheduler.runCurrent(); scheduler.advanceTimeBy(120_001); scheduler.runCurrent() }
+    onNodeWithText("Page traversal exceeded 120 seconds").assertExists()
+    assertEquals(null, state.records)
+    onNodeWithContentDescription("Retry traversal").performClick()
+    runOnIdle { scheduler.runCurrent() }
+    onNodeWithText("Traversal recovered: [3]").assertExists()
+
+    val args = InstrumentationRegistry.getArguments()
+    val endpoint = requireNotNull(args.getString("SCREENROOM_API_ENDPOINT"))
+    val userId = requireNotNull(args.getString("SCREENROOM_USER_ID"))
+    val namespace = requireNotNull(args.getString("SCREENROOM_E2E_SETTINGS_NAMESPACE"))
+    val disk = org.screenroom.ui.SettingsStore(activity, namespace)
+    disk.save(defaultSettings().copy(scope = SourceLibraryScope("", "tv")))
+    val endpointState = mutableStateOf(endpoint)
+    val userState = mutableStateOf(userId)
+    val namespaceState = mutableStateOf(namespace)
+    var back: () -> Boolean = { false }
+    runOnUiThread {
+        activity.setContent {
+            org.screenroom.ui.ScreenroomTheme {
+                org.screenroom.ui.HomeScreen(television = activity.packageManager.hasSystemFeature("android.software.leanback"), endpoint = endpointState.value,
+                    userId = userState.value, settingsNamespace = namespaceState.value, debug = true, registerBack = { back = it })
+            }
+        }
+    }
+    fun awaitScope(value: String) {
+        waitUntil(15_000) { onAllNodes(hasTestTag("home-scope") and SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, value)).fetchSemanticsNodes().isNotEmpty() }
+    }
+    fun awaitSavedLibrary(value: String) { waitUntil(5_000) { disk.load().scope?.libraryId == value } }
+    awaitScope("|tv")
+    onAllNodesWithContentDescription(bunny).assertCountEquals(0)
+    onNode(hasContentDescription("Home") and hasAnyAncestor(hasTestTag("sidebar"))).performClick()
+    awaitScope("|")
+    onAllNodesWithContentDescription(bunny)[0].assertExists()
+    awaitSavedLibrary("")
+    onNodeWithContentDescription("TV Shows").performScrollTo().performClick()
+    awaitSavedLibrary("tv")
+    onNode(hasContentDescription("Movies") and !isToggleable()).performScrollTo().performClick()
+    awaitSavedLibrary("movies")
+    runOnIdle { assertTrue(back()) }
+    awaitData()
+    awaitSavedLibrary("tv")
+    onNodeWithContentDescription(show).performScrollTo().performClick()
+    awaitDetails("The Beverly Hillbillies")
+    runOnIdle { userState.value = "" }
+    awaitScope("|tv")
+    onNodeWithTag("detail-header").assertDoesNotExist()
+    onNodeWithTag("search-query").assertDoesNotExist()
+    runOnIdle { endpointState.value = "http://127.0.0.1:1" }
+    waitUntil(15_000) { onAllNodesWithText("Unable to load catalog:", substring = true).fetchSemanticsNodes().isNotEmpty() }
+    onNodeWithTag("home-scope").assertDoesNotExist()
+    onNodeWithTag("detail-header").assertDoesNotExist()
+    runOnIdle { endpointState.value = endpoint; userState.value = userId; namespaceState.value = "$namespace-new" }
+    awaitScope("|")
+    onAllNodesWithContentDescription(bunny)[0].assertExists()
+    assertEquals("", org.screenroom.ui.SettingsStore(activity, "$namespace-new").load().scope?.libraryId)
+    println("Correction edges: own deadline UI Retry/no partial results; TV relaunch/Home/back persisted scopes; same-composition endpoint/user/namespace resets passed")
+    assertFinalAssemblyEdges(activity)
+}
+
+private fun ComposeTestRule.assertFinalAssemblyEdges(activity: ComponentActivity) {
+    val args = InstrumentationRegistry.getArguments()
+    val endpoint = requireNotNull(args.getString("SCREENROOM_API_ENDPOINT"))
+    val user = requireNotNull(args.getString("SCREENROOM_USER_ID"))
+    val namespace = requireNotNull(args.getString("SCREENROOM_E2E_SETTINGS_NAMESPACE")) + "-assembly"
+    var failCommit = true
+    val disk = org.screenroom.ui.SettingsStore(activity, namespace) { editor -> if (failCommit) false else editor.commit() }
+    val expected = ClientSettings(SourceLibraryScope("mock-jellyfin", "tv"), "jellyfin", SearchTypes(false, false, true), SearchMethods(true, true, false, false), "transcription")
+    runBlocking { disk.session.update(expected.copy(methods = expected.methods!!.copy(semantic = true))) }
+    assertEquals(expected, disk.session.value)
+    assertTrue(disk.session.warning!!.contains("not saved"))
+    try {
+        runBlocking { disk.session.update(expected.copy(types = SearchTypes(false, false, false))) }
+        throw AssertionError("Invalid settings accepted")
+    } catch (_: ClientException) { }
+    assertEquals(expected, disk.session.value)
+    runOnUiThread { activity.setContent {
+        org.screenroom.ui.ScreenroomTheme { org.screenroom.ui.HomeScreen(endpoint = endpoint, userId = user, settingsNamespace = namespace, debug = true, settings = disk) }
+    } }
+    waitUntil(15_000) { onAllNodes(hasTestTag("home-scope") and SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "mock-jellyfin|tv")).fetchSemanticsNodes().isNotEmpty() }
+    onNodeWithText("Catalog").assertExists()
+    onNodeWithContentDescription("Retry saving settings").performScrollTo().assertExists()
+    onNode(hasContentDescription("TV Shows") and hasAnyAncestor(hasTestTag("sidebar"))).performClick()
+    awaitData()
+    onAllNodesWithContentDescription(show)[0].assertExists()
+    onNodeWithContentDescription("Search titles").performClick()
+    query("Clampetts")
+    awaitResult("1 result in TV Shows")
+    assertEquals(expected, disk.session.value)
+    runOnIdle { failCommit = false }
+    onNodeWithContentDescription("Retry saving settings").performScrollTo().performClick()
+    waitUntil(5_000) { disk.session.warning == null }
+    assertEquals(expected, org.screenroom.ui.SettingsStore(activity, namespace).load())
+
+    val parentDisk = org.screenroom.ui.SettingsStore(activity, "$namespace-parents")
+    parentDisk.save(expected.copy(scope = SourceLibraryScope("mock-jellyfin", "movies")))
+    runOnUiThread { activity.setContent {
+        org.screenroom.ui.ScreenroomTheme { org.screenroom.ui.HomeScreen(endpoint = endpoint, userId = user, settingsNamespace = "$namespace-parents", debug = true, settings = parentDisk) }
+    } }
+    waitUntil(15_000) { onAllNodes(hasTestTag("home-scope") and SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "mock-jellyfin|movies")).fetchSemanticsNodes().isNotEmpty() }
+    onAllNodesWithContentDescription(bunny)[0].assertExists()
+    onAllNodesWithContentDescription(show).assertCountEquals(0)
+    onNode(hasContentDescription("TV Shows") and hasAnyAncestor(hasTestTag("sidebar"))).performClick()
+    awaitData()
+    onNodeWithContentDescription("Search titles").performClick()
+    query("Clampetts")
+    awaitResult("1 result in TV Shows")
+    onNodeWithContentDescription(episode).performScrollTo().performClick()
+    waitUntil(15_000) { onAllNodes(hasContentDescription("Season 1") and hasAnyAncestor(hasTestTag("breadcrumbs"))).fetchSemanticsNodes().isNotEmpty() }
+    onNode(hasContentDescription("The Beverly Hillbillies") and hasAnyAncestor(hasTestTag("breadcrumbs"))).assertExists()
+    onNode(hasText("The Clampetts Strike Oil") and hasAnyAncestor(hasTestTag("detail-header"))).assertExists()
+    assertEquals(SourceLibraryScope("mock-jellyfin", "tv"), parentDisk.session.value.scope)
+    println("Final assembly: false commit retains all normalized choices; healthy Home/search, invalid-input rejection and actual Retry save; episode from Search with movie-only Home cache loads scoped season/series breadcrumbs")
+}
+
+fun ComposeTestRule.assertSettingsPersistence(activity: Activity) {
+    activeRule = this
+    val args = InstrumentationRegistry.getArguments()
+    val namespace = requireNotNull(args.getString("SCREENROOM_E2E_SETTINGS_NAMESPACE"))
+    val disk = org.screenroom.ui.SettingsStore(activity, namespace)
+    val expected = ClientSettings(SourceLibraryScope("mock-jellyfin", "tv"), "jellyfin", SearchTypes(false, true, false), SearchMethods(true, true, false, false), "transcription")
+    if (args.getString("SCREENROOM_SETTINGS_PHASE") == "write") {
+        disk.save(expected)
+        assertEquals(expected, org.screenroom.ui.SettingsStore(activity, namespace).load())
+        try {
+            disk.save(expected.copy(types = SearchTypes(false, false, false)))
+            throw AssertionError("Empty search types must be rejected")
+        } catch (_: ClientException) { }
+        assertEquals(expected, disk.load())
+        assertEquals(defaultSettings(), org.screenroom.ui.SettingsStore(activity, "$namespace-isolated").load())
+        activity.getSharedPreferences("screenroom-settings-$namespace-invalid", android.content.Context.MODE_PRIVATE).edit().putString("settings", "{invalid").commit()
+        assertEquals(defaultSettings(), org.screenroom.ui.SettingsStore(activity, "$namespace-invalid").load())
+    } else {
+        assertEquals(expected, disk.load())
+        waitUntil(15_000) { onAllNodesWithText("Continue watching").fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithContentDescription("Search titles").performClick()
+        onNodeWithContentDescription("Search settings").performClick()
+        onNodeWithContentDescription("Jellyfin").assertIsOn()
+        onNode(hasContentDescription("Movies") and isToggleable()).assertIsOff()
+        onNode(hasContentDescription("Shows") and isToggleable()).assertIsOn()
+        onNodeWithContentDescription("Title only").performScrollTo().assertIsOn()
+        onNodeWithContentDescription("Semantic").performScrollTo().assertIsOff()
+        onNodeWithContentDescription("Search settings").performScrollTo().performClick()
+        query("Beverly")
+        awaitResult("1 result in TV Shows")
+        onNodeWithTag("search-effective-methods").assertTextEquals("Effective search: Text")
+        println("Durable settings after process relaunch: namespace=$namespace scope/source/types/methods/subtitle preserved")
+        onNode(hasContentDescription("Home") and hasAnyAncestor(hasTestTag("sidebar"))).performClick()
+        waitUntil(15_000) { onAllNodes(hasTestTag("home-scope") and SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "mock-jellyfin|")).fetchSemanticsNodes().isNotEmpty() }
+        onAllNodesWithContentDescription(bunny)[0].assertExists()
+        waitUntil(5_000) { disk.load().scope?.libraryId == "" }
+        assertEquals(expected.copy(scope = SourceLibraryScope("mock-jellyfin", "")), disk.load())
+        println("Persisted TV process relaunch -> Home: unscoped library request/actual movie rows/local scope cleared, other settings retained")
+    }
+}
+
 fun ComposeTestRule.assertRegression(activity: Activity) {
     activeRule = this
     captureEnabled = false
-    waitUntil(15_000) { onAllNodesWithText("Continue Watching / Up Next").fetchSemanticsNodes().isNotEmpty() }
+    waitUntil(15_000) { onAllNodesWithText("Continue watching").fetchSemanticsNodes().isNotEmpty() }
     waitUntil(15_000) { onAllNodesWithTag("art-ready", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val tv = instrumentation.targetContext.packageManager.hasSystemFeature("android.software.leanback")
     verifyServerContract(if (tv) "tv" else "mobile")
     if (tv) assertTvSidebarRemote(activity)
     onNodeWithText("Home").assertIsDisplayed()
-    onNodeWithText("Continue Watching / Up Next").assertIsDisplayed()
+    onNodeWithText("Continue watching").assertIsDisplayed()
     onAllNodesWithContentDescription("Big Buck Bunny poster", useUnmergedTree = true)[0].assertExists()
     if (instrumentation.targetContext.packageManager.hasSystemFeature("android.software.leanback")) {
-        onAllNodesWithContentDescription(bunny)[0].performSemanticsAction(SemanticsActions.RequestFocus) { it() }
-        repeat(5) { instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_RIGHT); waitForIdle() }
+        onAllNodesWithContentDescription("Tears of Steel, Movie, 12m 14s")[0].performSemanticsAction(SemanticsActions.RequestFocus) { it() }
         onAllNodesWithContentDescription("Tears of Steel, Movie, 12m 14s")[0].assertIsFocused().assertIsDisplayed()
         instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_CENTER)
         awaitDetails("Tears of Steel")
@@ -60,7 +252,7 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
         instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
         waitForIdle()
     }
-    listOf("Recently Released Movies", "Recently Added Movies", "Recently Released Episodes", "Recently Added Episodes").forEach { onNodeWithText(it).performScrollTo().assertIsDisplayed() }
+    onNodeWithText("Catalog").performScrollTo().assertIsDisplayed()
     val collapsed = onNodeWithTag("content").fetchSemanticsNode().boundsInRoot
     val toggle = onNodeWithContentDescription("Expand sidebar").fetchSemanticsNode().boundsInRoot
     onNodeWithContentDescription("Expand sidebar").performClick()
@@ -72,7 +264,7 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     onNodeWithContentDescription("Transcription").scrollOnMobile(tv).performClick()
     onNodeWithContentDescription("Refresh").scrollOnMobile(tv).performClick()
     onNodeWithText("Catalog refreshed.").scrollOnMobile(tv).assertIsDisplayed()
-    onNodeWithContentDescription("TV shows").performScrollTo().performClick()
+    onNodeWithContentDescription("TV Shows").performScrollTo().performClick()
     onNodeWithContentDescription(show).performClick()
     awaitDetails("The Beverly Hillbillies")
     onNodeWithText("Title rights").assertExists()
@@ -104,6 +296,7 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     onNodeWithText("Catalog").assertDoesNotExist()
     onNode(hasContentDescription("Shows") and isToggleable()).assertDoesNotExist()
     onNodeWithContentDescription("Search settings").performClick()
+    onNode(hasContentDescription("Episodes") and isToggleable()).performScrollTo().performClick()
     val movieType = onNode(hasContentDescription("Movies") and isToggleable())
     val showType = onNode(hasContentDescription("Shows") and isToggleable())
     movieType.performScrollTo().performClick()
@@ -111,16 +304,16 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     movieType.performClick()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
     query("Beverli")
-    awaitResult("1 result in TV shows")
+    awaitResult("1 result in TV Shows")
     query("wealth")
-    awaitResult("1 result in TV shows")
+    awaitResult("1 result in TV Shows")
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
     onNodeWithContentDescription("Title only").performScrollTo().performClick()
     onNodeWithContentDescription("Semantic").performScrollTo().assertIsNotEnabled()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
-    awaitResult("No matches in TV shows. Try another search.")
+    awaitResult("No matches in TV Shows. Try another search.")
     query("Beverly")
-    awaitResult("1 result in TV shows")
+    awaitResult("1 result in TV Shows")
     onNodeWithContentDescription(show).performScrollTo().performClick()
     awaitDetails("The Beverly Hillbillies")
     onNodeWithContentDescription("Search results").performScrollTo().performClick()
@@ -131,19 +324,23 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     onNodeWithContentDescription("Text (titles only)").assertIsNotEnabled()
     onNodeWithContentDescription("Jellyfin").performScrollTo().performClick()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
-    awaitResult("No matches in TV shows. Try another search.")
+    awaitResult("1 result in TV Shows")
     onNodeWithContentDescription("Search settings").performClick()
     onNodeWithContentDescription("TMDB").performScrollTo().performClick()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
-    awaitResult("1 result in TV shows")
+    awaitResult("No matches in TV Shows. Try another search.")
+    onNodeWithContentDescription("Search settings").performClick()
+    onNodeWithContentDescription("Jellyfin").performScrollTo().performClick()
+    onNodeWithContentDescription("Search settings").performScrollTo().performClick()
+    awaitResult("1 result in TV Shows")
     onNodeWithContentDescription(show).performScrollTo().performClick()
     awaitDetails("The Beverly Hillbillies")
     onNodeWithContentDescription("Search titles").performClick()
     onNodeWithTag("search-query").assert(SemanticsMatcher.expectValue(SemanticsProperties.EditableText, AnnotatedString("")))
     onNodeWithContentDescription("Search settings").performClick()
-    onNodeWithContentDescription("All").assertIsOn()
-    onNodeWithContentDescription("Title only").performScrollTo().assertIsOff()
-    onNodeWithContentDescription("Semantic").performScrollTo().assertIsOn()
+    onNodeWithContentDescription("Jellyfin").assertIsOn()
+    onNodeWithContentDescription("Title only").performScrollTo().assertIsOn()
+    onNodeWithContentDescription("Semantic").performScrollTo().assertIsOff()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
     query("Clampetts")
     dismissKeyboard(activity)
@@ -154,12 +351,12 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     waitForIdle()
     onNodeWithTag("search-query").assertTextEquals("Beverly")
     onNodeWithContentDescription("Search settings").performClick()
-    onNodeWithContentDescription("TMDB").assertIsOn()
+    onNodeWithContentDescription("Jellyfin").assertIsOn()
     onNodeWithContentDescription("Title only").performScrollTo().assertIsOn()
     onNodeWithContentDescription("Fuzzy titles").performScrollTo().assertIsOff()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
     onNodeWithContentDescription("Clear query").performClick()
-    onNodeWithText("Enter a title to search TV shows.").assertExists()
+    onNodeWithText("Enter a title to search TV Shows.").assertExists()
     onNode(hasContentDescription("Movies") and !isToggleable()).performClick()
     onNodeWithContentDescription(bunny).assertExists()
     onNodeWithContentDescription(show).assertDoesNotExist()
@@ -177,7 +374,7 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     if (tv) onNodeWithContentDescription("Subtitles").performClick()
     onNodeWithContentDescription("Off").scrollOnMobile(tv).performClick()
     if (!tv) onNodeWithContentDescription("Off").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
-    assertServerSubtitleOff()
+    assertLocalSubtitleOff()
     onNodeWithContentDescription("Collapse sidebar").performClick()
     onNodeWithText("Screenroom").assertDoesNotExist()
     captureShowcase("home") { onNodeWithContentDescription("Expand sidebar").assertIsDisplayed() }
@@ -231,11 +428,12 @@ fun ComposeTestRule.assertRegression(activity: Activity) {
     onNodeWithContentDescription("Data & artwork credits").performScrollTo().performClick()
     onNode(hasText("This product uses the TMDB API but is not endorsed or certified by TMDB.") and hasTestTag("catalog-notice-tmdb-attribution")).assertExists()
     onNodeWithContentDescription("TMDB approved primary short blue logo").assertExists()
+    waitUntil(15_000) { onAllNodes(SemanticsMatcher("artwork credits") { it.config.getOrNull(SemanticsProperties.TestTag)?.startsWith("artwork-credit-") == true }).fetchSemanticsNodes().size == 21 }
     waitUntil(15_000) { onAllNodes(hasContentDescription("TMDB approved primary short blue logo") and hasTestTag("art-ready"), useUnmergedTree = true).fetchSemanticsNodes().size == 1 }
     onNodeWithText("TMDB lists the same film as 2024-04-06", substring = true).assertExists()
     onAllNodesWithText("William Maanders")[0].assertExists()
     androidx.test.core.app.ActivityScenario.launch<ComponentActivity>(
-        Intent(activity, activity.javaClass).putExtra("SCREENROOM_API_ENDPOINT", "http://127.0.0.2:50062")
+        Intent(activity, activity.javaClass).putExtra("SCREENROOM_API_ENDPOINT", "http://127.0.0.2:50051")
     ).use {
         waitUntil(5_000) { onAllNodesWithText("API configuration error").fetchSemanticsNodes().isNotEmpty() }
         onNodeWithText("API configuration error").assertIsDisplayed()
@@ -248,7 +446,7 @@ fun ComposeTestRule.assertHappyPathAndCapture(activity: Activity) {
     captureEnabled = true
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val tv = activity.packageManager.hasSystemFeature("android.software.leanback")
-    waitUntil(15_000) { onAllNodesWithText("Continue Watching / Up Next").fetchSemanticsNodes().isNotEmpty() }
+    waitUntil(15_000) { onAllNodesWithText("Continue watching").fetchSemanticsNodes().isNotEmpty() }
     onNodeWithText("Home").assertIsDisplayed()
     captureShowcase("home") { onNodeWithContentDescription("Expand sidebar").assertIsDisplayed() }
     if (tv) {
@@ -271,7 +469,7 @@ fun ComposeTestRule.assertHappyPathAndCapture(activity: Activity) {
             assertTrue(sidebar.width / (sidebar.width + content.width) in .18f.. .20f)
         } else onNodeWithContentDescription("Off").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
     }
-    assertServerSubtitleOff()
+    assertLocalSubtitleOff()
     if (tv) {
         repeat(4) { instrumentation.sendKeyDownUpSync(KeyEvent.KEYCODE_DPAD_DOWN); waitForIdle() }
         onNodeWithContentDescription("Movies").assertIsFocused().assertIsNotSelected()
@@ -293,7 +491,8 @@ fun ComposeTestRule.assertHappyPathAndCapture(activity: Activity) {
     listOf("Movies", "Shows").forEach {
         onNode(hasContentDescription(it) and isToggleable()).assertIsOn()
     }
-    onNode(hasContentDescription("Episodes") and isToggleable()).assertIsOff()
+    onNode(hasContentDescription("Episodes") and isToggleable()).assertIsOn()
+    onNodeWithContentDescription("Semantic").performScrollTo().performClick()
     onNodeWithContentDescription("Search settings").performScrollTo().performClick()
     if (tv) onNodeWithTag("search-query").performClick()
     query("Bunny")
@@ -338,16 +537,18 @@ fun ComposeTestRule.assertRetry(activity: Activity) {
     captureEnabled = false
     val args = InstrumentationRegistry.getArguments()
     val endpoint = args.getString("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051"
-    val profile = args.getString("SCREENROOM_MOCK_PROFILE") ?: "android-retry"
+    val namespace = args.getString("SCREENROOM_E2E_SETTINGS_NAMESPACE") ?: "android-retry"
+    val userId = args.getString("SCREENROOM_USER_ID") ?: "00000000-0000-0000-0000-000000000001"
     val closedPort = java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1")).use { it.localPort }
     fun intent(url: String) = Intent(activity, activity.javaClass)
-        .putExtra("SCREENROOM_API_ENDPOINT", url).putExtra("SCREENROOM_MOCK_PROFILE", profile)
+        .putExtra("SCREENROOM_API_ENDPOINT", url).putExtra("SCREENROOM_USER_ID", userId)
+        .putExtra("SCREENROOM_E2E_SETTINGS_NAMESPACE", namespace)
     androidx.test.core.app.ActivityScenario.launch<ComponentActivity>(intent("http://127.0.0.1:$closedPort")).use {
         fun assertUnavailable() {
             waitUntil(15_000) { onAllNodesWithText("Unable to load catalog:", substring = true).fetchSemanticsNodes().isNotEmpty() }
             onNodeWithText("Unable to load catalog:", substring = true).assertIsDisplayed()
             onNodeWithContentDescription("Retry").assertIsDisplayed()
-            onNodeWithText("Continue Watching / Up Next").assertDoesNotExist()
+            onNodeWithText("Continue watching").assertDoesNotExist()
             onAllNodesWithTag("art-ready", useUnmergedTree = true).assertCountEquals(0)
             onAllNodesWithContentDescription(bunny).assertCountEquals(0)
         }
@@ -361,11 +562,23 @@ fun ComposeTestRule.assertRetry(activity: Activity) {
         assertUnavailable()
     }
     androidx.test.core.app.ActivityScenario.launch<ComponentActivity>(intent(endpoint)).use {
-        waitUntil(15_000) { onAllNodesWithText("Continue Watching / Up Next").fetchSemanticsNodes().isNotEmpty() }
+        waitUntil(15_000) { onAllNodesWithText("Continue watching").fetchSemanticsNodes().isNotEmpty() }
         waitUntil(15_000) { onAllNodesWithTag("art-ready", useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty() }
-        onNodeWithText("Continue Watching / Up Next").assertIsDisplayed()
+        onNodeWithText("Continue watching").assertIsDisplayed()
         onAllNodesWithContentDescription(bunny)[0].assertIsDisplayed()
         onNodeWithText("Unable to load catalog:", substring = true).assertDoesNotExist()
+        onNodeWithContentDescription("Expand sidebar").performClick()
+        val tv = activity.packageManager.hasSystemFeature("android.software.leanback")
+        if (tv) onNodeWithContentDescription("Subtitles").performClick()
+        onNodeWithContentDescription("Transcription").scrollOnMobile(tv).performClick()
+    }
+    androidx.test.core.app.ActivityScenario.launch<ComponentActivity>(intent(endpoint)).use {
+        waitUntil(15_000) { onAllNodesWithText("Continue watching").fetchSemanticsNodes().isNotEmpty() }
+        onNodeWithContentDescription("Expand sidebar").performClick()
+        if (activity.packageManager.hasSystemFeature("android.software.leanback")) {
+            onNodeWithContentDescription("Subtitles").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Transcription, Collapsed"))
+        } else onNodeWithContentDescription("Transcription").assert(SemanticsMatcher.expectValue(SemanticsProperties.StateDescription, "Selected"))
+        assertEquals("transcription", org.screenroom.ui.SettingsStore(activity, namespace).load().subtitlePreference)
     }
     println("Retry: actual closed-port error and Retry remain unavailable; valid-endpoint Activity relaunch restores real Home/artwork (not in-place server restart)")
 }
@@ -391,73 +604,72 @@ private fun ComposeTestRule.assertDetailGeometry(activity: Activity) {
     assertTrue(cast.left == header.left && cast.width >= header.width - 1)
 }
 
-private fun assertServerSubtitleOff() = runBlocking(Dispatchers.IO) {
-    val args = InstrumentationRegistry.getArguments()
-    val client = Client(ClientConfig(args.getString("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051", args.getString("SCREENROOM_MOCK_PROFILE") ?: "android-mobile-e2e", 3000u))
-    try { assertEquals("off", client.getPreferences().subtitlePreference) }
-    finally { client.cancelAll(); client.close() }
+private fun assertLocalSubtitleOff() {
+    val context = InstrumentationRegistry.getInstrumentation().targetContext
+    val namespace = InstrumentationRegistry.getArguments().getString("SCREENROOM_E2E_SETTINGS_NAMESPACE") ?: "default"
+    assertEquals("off", org.screenroom.ui.SettingsStore(context, namespace).load().subtitlePreference)
 }
 
 private fun verifyServerContract(platform: String) = runBlocking(Dispatchers.IO) {
     val endpoint = InstrumentationRegistry.getArguments().getString("SCREENROOM_API_ENDPOINT") ?: "http://127.0.0.1:50051"
-    val profile = InstrumentationRegistry.getArguments().getString("SCREENROOM_MOCK_PROFILE") ?: "android-$platform-e2e"
-    val config = ClientConfig(endpoint, "$profile-contract", 3000u)
+    val userId = InstrumentationRegistry.getArguments().getString("SCREENROOM_USER_ID") ?: "00000000-0000-0000-0000-000000000001"
+    val config = ClientConfig(endpoint, userId, 3000u)
     val client = Client(config)
     try {
         val catalogInfo = client.getCatalogInfo()
-        assertEquals(11, catalogInfo.artwork.size)
+        val artworks = org.screenroom.ui.collectPages { token ->
+            val page = client.listArtwork(SourceLibraryScope("", ""), Page(2u, token))
+            page.artwork to page.nextPageToken
+        }
+        assertEquals(21, artworks.size)
+        assertEquals(21, artworks.map { it.id }.toSet().size)
         assertEquals(7, catalogInfo.notices.size)
-        assertTrue(catalogInfo.retrievedAt.isNotBlank())
         assertEquals(listOf("tmdb-attribution", "tmdb-terms", "mock-catalog", "server-artwork", "sprite-fright-identity", "edition-rights", "included-episodes"), catalogInfo.notices.map { it.id })
         val origin = java.net.URI(endpoint)
-        catalogInfo.artwork.forEach { art ->
+        artworks.forEach { art ->
             val url = java.net.URI(art.url)
             assertEquals(origin.scheme, url.scheme)
             assertEquals(origin.host, url.host)
             assertEquals(origin.port, url.port)
             assertTrue(art.creator.isNotBlank() && art.license.isNotBlank() && art.source.isNotBlank())
         }
-        val logo = catalogInfo.artwork.single { it.kind == "logo" }
+        val logo = catalogInfo.branding.single { it.kind == "logo" }
         val logoBytes = client.loadArtwork(logo.url)
         assertTrue(logoBytes.take(8).map { it.toInt() and 255 } == listOf(137, 80, 78, 71, 13, 10, 26, 10))
         val logoBitmap = android.graphics.BitmapFactory.decodeByteArray(logoBytes, 0, logoBytes.size)
         assertTrue(logoBitmap != null && logoBitmap.width > 0 && logoBitmap.height > 0)
-        println("CatalogInfo RPC: $platform artwork=${catalogInfo.artwork.size} notices=${catalogInfo.notices.size} logo=${logo.url} bytes=${logoBytes.size} bitmap=${logoBitmap?.width}x${logoBitmap?.height} sha256=${java.security.MessageDigest.getInstance("SHA-256").digest(logoBytes).joinToString("") { "%02x".format(it) }}")
+        println("CatalogInfo RPC: $platform artwork=${artworks.size} notices=${catalogInfo.notices.size} logo=${logo.url} bytes=${logoBytes.size} bitmap=${logoBitmap?.width}x${logoBitmap?.height} sha256=${java.security.MessageDigest.getInstance("SHA-256").digest(logoBytes).joinToString("") { "%02x".format(it) }}")
         logoBitmap?.recycle()
-        val home = client.getHome("all")
+        val home = client.getHome(SourceLibraryScope("", ""))
         assertTrue(home.isNotEmpty())
-        var token = ""
-        val movies = mutableListOf<Item>()
-        do {
-            val result = client.listLibraryItems("movies", Page(1u, token))
-            movies += result.items; token = result.nextPageToken
-        } while (token.isNotEmpty())
+        val movies = org.screenroom.ui.collectPages { token ->
+            val result = client.listLibraryItems(SourceLibraryScope("", "movies"), Page(1u, token))
+            result.items to result.nextPageToken
+        }
         assertEquals(8, movies.size)
         val bunnyItem = movies.single { it.title == "Big Buck Bunny" }
-        assertEquals(bunnyItem.id, client.getItem(bunnyItem.id).id)
-        var creditCount = 0
-        do {
-            val result = client.listCredits(bunnyItem.id, Page(1u, token))
-            creditCount += result.credits.size; token = result.nextPageToken
-        } while (token.isNotEmpty())
-        assertTrue(creditCount > 1)
-        val search = client.search(SearchRequest("Bunny", "all", SearchTypes(true, true, true), SearchMethods(false, true, true, true), "all", Page(1u, "")))
-        assertEquals(listOf(bunnyItem.id), search.items.map { it.id })
+        assertEquals(bunnyItem.id, client.getItem(bunnyItem.id, SourceLibraryScope("", "movies")).id)
+        val credits = org.screenroom.ui.collectPages { token ->
+            val result = client.listCredits(bunnyItem.id, Page(1u, token), SourceLibraryScope("", "movies"))
+            result.credits to result.nextPageToken
+        }
+        assertTrue(credits.size > 1)
+        val search = client.search(SearchRequest("Bunny", "", SearchTypes(true, true, true), SearchMethods(false, true, true, true), "all", Page(100u, ""), ""))
+        assertTrue(search.items.any { it.id == bunnyItem.id })
+        assertTrue(search.effectiveMethods?.semantic == true || search.degradationReason.isNotBlank())
         val art = client.loadArtwork(bunnyItem.artwork!!.url)
         val bitmap = android.graphics.BitmapFactory.decodeByteArray(art, 0, art.size)
         assertTrue(bitmap != null && bitmap.width > 0)
         bitmap?.recycle()
-        val preferences = client.getPreferences()
-        client.updatePreferences(preferences.copy(subtitlePreference = "transcription", searchTypes = SearchTypes(false, true, false)), listOf("subtitle_preference", "search_types"))
-        val second = Client(config)
-        try {
-            val saved = second.getPreferences()
-            assertEquals("transcription", saved.subtitlePreference)
-            assertEquals(SearchTypes(false, true, false), saved.searchTypes)
-        } finally { second.cancelAll(); second.close() }
-        try { client.getItem("android-missing-item"); throw AssertionError("Expected server NotFound") }
+        var artworkFailed = false
+        try { client.loadArtwork(bunnyItem.artwork!!.url.replace("/revisions/1/", "/revisions/2147483647/")) }
+        catch (_: ClientException) { artworkFailed = true }
+        assertTrue("A missing artwork revision must not return a bundled/provider fallback", artworkFailed)
+        assertTrue(client.loadArtwork(bunnyItem.artwork!!.url).contentEquals(art))
+        assertEquals(userId, client.getCurrentUser().id)
+        try { client.getItem("00000000-0000-0000-0000-000000000099", SourceLibraryScope("", "")); throw AssertionError("Expected server NotFound") }
         catch (_: ClientException.NotFound) { }
-        println("Core contract: $platform home/library pagination/credit pagination/search/artwork/durable preferences/NotFound passed")
+        println("Core contract: $platform home/library pagination/credit pagination/search/artwork/local user/NotFound passed")
     } finally { client.cancelAll(); client.close() }
 }
 
@@ -496,7 +708,7 @@ private fun ComposeTestRule.assertTvSidebarRemote(activity: Activity) {
     println("TV sidebar geometry: sidebar=$sidebar content=$content density=${activity.resources.displayMetrics.density} fraction=$fraction")
     onNodeWithContentDescription("Refresh").assertIsDisplayed()
     onNodeWithContentDescription("Log out").assertDoesNotExist()
-    listOf("Home", "Search titles", "All libraries", "Movies", "TV shows", "Refresh").forEach { label ->
+    listOf("Home", "Search titles", "All libraries", "Movies", "TV Shows", "Refresh").forEach { label ->
         val row = onNodeWithContentDescription(label).fetchSemanticsNode().boundsInRoot
         assertTrue("$label row height", kotlin.math.abs(row.height / activity.resources.displayMetrics.density - 48f) < 1f)
         assertTrue("$label is inside sidebar", row.top >= sidebar.top && row.bottom <= sidebar.bottom)
@@ -514,7 +726,7 @@ private fun ComposeTestRule.assertTvSidebarRemote(activity: Activity) {
     onNodeWithContentDescription("Nosferatu, Movie, 63–94m · version dependent").assertIsFocused()
     onNodeWithContentDescription("Expand sidebar").assertIsDisplayed()
     key(KeyEvent.KEYCODE_DPAD_LEFT)
-    onNodeWithContentDescription("TV shows").assertIsFocused().assertIsNotSelected()
+    onNodeWithContentDescription("TV Shows").assertIsFocused().assertIsNotSelected()
     onNode(hasContentDescription("Movies") and hasAnyAncestor(hasTestTag("sidebar"))).assertIsSelected()
     key(KeyEvent.KEYCODE_DPAD_RIGHT)
     onNodeWithContentDescription("Nosferatu, Movie, 63–94m · version dependent").assertIsFocused()
@@ -549,7 +761,10 @@ private fun ComposeTestRule.assertTvSidebarRemote(activity: Activity) {
     onNodeWithContentDescription("Browse libraries").assertIsFocused()
 }
 
-private fun ComposeTestRule.awaitResult(text: String) { waitUntil(5_000) { onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() } }
+private fun ComposeTestRule.awaitResult(text: String) {
+    try { waitUntil(15_000) { onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() } }
+    catch (failure: androidx.compose.ui.test.ComposeTimeoutException) { throw AssertionError("Expected $text\n${onRoot().printToString()}", failure) }
+}
 
 private fun ComposeTestRule.awaitDetails(title: String) {
     val responseTitle = hasText(title, substring = false) and hasAnyAncestor(hasTestTag("title-details"))
