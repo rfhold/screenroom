@@ -1,0 +1,973 @@
+{
+  "retrievedAt": "2026-11-07T20:23:53.449Z",
+  "items": {
+    "nosferatu": {
+      "id": 653,
+      "title": "Nosferatu",
+      "date": "1922-02-16",
+      "overview": "The mysterious Count Orlok summons a happily married real estate agent to his castle, located up in the Transylvanian mountains, to finalise a terrifying deal.",
+      "runtime": 94,
+      "rating": 7.646,
+      "votes": 2580,
+      "url": "https://www.themoviedb.org/movie/653",
+      "cast": [
+        {
+          "id": 9839,
+          "name": "Max Schreck",
+          "role": "Count Orlok"
+        },
+        {
+          "id": 9840,
+          "name": "Gustav von Wangenheim",
+          "role": "Hutter"
+        },
+        {
+          "id": 9841,
+          "name": "Greta Schröder",
+          "role": "Ellen"
+        },
+        {
+          "id": 9843,
+          "name": "Georg H. Schnell",
+          "role": "Harding"
+        },
+        {
+          "id": 9844,
+          "name": "Ruth Landshoff",
+          "role": "Ruth"
+        },
+        {
+          "id": 9846,
+          "name": "Gustav Botz",
+          "role": "Professor Sievers"
+        },
+        {
+          "id": 9842,
+          "name": "Alexander Granach",
+          "role": "Knock"
+        },
+        {
+          "id": 9845,
+          "name": "John Gottowt",
+          "role": "Professor Bulwer"
+        },
+        {
+          "id": 9847,
+          "name": "Max Nemetz",
+          "role": "A Ship Captain"
+        },
+        {
+          "id": 9848,
+          "name": "Wolfgang Heinz",
+          "role": "Sailor 1"
+        },
+        {
+          "id": 9849,
+          "name": "Albert Venohr",
+          "role": "Sailor 2"
+        },
+        {
+          "id": 46739,
+          "name": "Eric van Viele",
+          "role": "Sailor (uncredited)"
+        }
+      ],
+      "crew": [
+        {
+          "id": 9076,
+          "name": "F. W. Murnau",
+          "role": "Director"
+        },
+        {
+          "id": 9833,
+          "name": "Henrik Galeen",
+          "role": "Screenplay"
+        },
+        {
+          "id": 9834,
+          "name": "Albin Grau",
+          "role": "Producer"
+        },
+        {
+          "id": 9835,
+          "name": "Enrico Dieckmann",
+          "role": "Producer"
+        },
+        {
+          "id": 9834,
+          "name": "Albin Grau",
+          "role": "Art Direction"
+        },
+        {
+          "id": 9838,
+          "name": "Hans Erdmann",
+          "role": "Original Music Composer"
+        },
+        {
+          "id": 9836,
+          "name": "Fritz Arno Wagner",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 9837,
+          "name": "Günther Krampf",
+          "role": "Director of Photography"
+        }
+      ]
+    },
+    "the-general": {
+      "id": 961,
+      "title": "The General",
+      "date": "1926-12-25",
+      "overview": "During America’s Civil War, Union spies steal engineer Johnnie Gray's beloved locomotive, 'The General'—with Johnnie's lady love aboard an attached boxcar—and he single-handedly must do all in his power to both get The General back and to rescue Annabelle.",
+      "runtime": 79,
+      "rating": 7.9,
+      "votes": 1490,
+      "url": "https://www.themoviedb.org/movie/961",
+      "cast": [
+        {
+          "id": 8635,
+          "name": "Buster Keaton",
+          "role": "Johnnie Gray"
+        },
+        {
+          "id": 14417,
+          "name": "Marion Mack",
+          "role": "Annabelle Lee"
+        },
+        {
+          "id": 14419,
+          "name": "Glen Cavender",
+          "role": "Captain Anderson"
+        },
+        {
+          "id": 14420,
+          "name": "Jim Farley",
+          "role": "General Thatcher"
+        },
+        {
+          "id": 14421,
+          "name": "Frederick Vroom",
+          "role": "A Southern General"
+        },
+        {
+          "id": 14424,
+          "name": "Frank Barnes",
+          "role": "Annabelle's Brother"
+        },
+        {
+          "id": 14422,
+          "name": "Charles Henry Smith",
+          "role": "Annabelle's Father"
+        },
+        {
+          "id": 10530,
+          "name": "Joe Keaton",
+          "role": "Union General"
+        },
+        {
+          "id": 14425,
+          "name": "Mike Donlin",
+          "role": "Union General"
+        },
+        {
+          "id": 14426,
+          "name": "Tom Nawn",
+          "role": "Union General"
+        },
+        {
+          "id": 4711806,
+          "name": "Henry Baird",
+          "role": "Soldier (uncredited)"
+        },
+        {
+          "id": 4711807,
+          "name": "Joe Bricher",
+          "role": "Soldier (uncredited)"
+        }
+      ],
+      "crew": [
+        {
+          "id": 10517,
+          "name": "Clyde Bruckman",
+          "role": "Director"
+        },
+        {
+          "id": 8635,
+          "name": "Buster Keaton",
+          "role": "Director"
+        },
+        {
+          "id": 10517,
+          "name": "Clyde Bruckman",
+          "role": "Screenplay"
+        },
+        {
+          "id": 8635,
+          "name": "Buster Keaton",
+          "role": "Screenplay"
+        },
+        {
+          "id": 8635,
+          "name": "Buster Keaton",
+          "role": "Producer"
+        },
+        {
+          "id": 10520,
+          "name": "Joseph M. Schenck",
+          "role": "Producer"
+        },
+        {
+          "id": 14410,
+          "name": "Bert Haines",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 14411,
+          "name": "Devereaux Jennings",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 8635,
+          "name": "Buster Keaton",
+          "role": "Editor"
+        },
+        {
+          "id": 14412,
+          "name": "Sherman Kell",
+          "role": "Editor"
+        },
+        {
+          "id": 10523,
+          "name": "Fred Gabourie",
+          "role": "Art Direction"
+        }
+      ]
+    },
+    "his-girl-friday": {
+      "id": 3085,
+      "title": "His Girl Friday",
+      "date": "1940-01-18",
+      "overview": "Walter Burns is an irresistibly conniving newspaper publisher desperate to woo back his paper’s star reporter, who also happens to be his estranged wife. She’s threatening to quit and settle down with a new beau, but, as Walter knows, she has a weakness: she can’t resist a juicy scoop.",
+      "runtime": 92,
+      "rating": 7.393,
+      "votes": 993,
+      "url": "https://www.themoviedb.org/movie/3085",
+      "cast": [
+        {
+          "id": 2638,
+          "name": "Cary Grant",
+          "role": "Walter Burns"
+        },
+        {
+          "id": 30233,
+          "name": "Rosalind Russell",
+          "role": "Hildy Johnson"
+        },
+        {
+          "id": 1208,
+          "name": "Ralph Bellamy",
+          "role": "Bruce Baldwin"
+        },
+        {
+          "id": 30234,
+          "name": "Gene Lockhart",
+          "role": "Sheriff Hartwell"
+        },
+        {
+          "id": 14975,
+          "name": "Porter Hall",
+          "role": "Murphy"
+        },
+        {
+          "id": 34419,
+          "name": "Ernest Truex",
+          "role": "Bensinger"
+        },
+        {
+          "id": 30236,
+          "name": "Cliff Edwards",
+          "role": "Endicott"
+        },
+        {
+          "id": 30237,
+          "name": "Clarence Kolb",
+          "role": "Mayor"
+        },
+        {
+          "id": 30157,
+          "name": "Roscoe Karns",
+          "role": "McCue"
+        },
+        {
+          "id": 30238,
+          "name": "Frank Jenks",
+          "role": "Wilson"
+        },
+        {
+          "id": 22093,
+          "name": "Regis Toomey",
+          "role": "Sanders"
+        },
+        {
+          "id": 30239,
+          "name": "Abner Biberman",
+          "role": "Louie"
+        }
+      ],
+      "crew": [
+        {
+          "id": 11435,
+          "name": "Howard Hawks",
+          "role": "Director"
+        },
+        {
+          "id": 4358,
+          "name": "Charles Lederer",
+          "role": "Screenplay"
+        },
+        {
+          "id": 11435,
+          "name": "Howard Hawks",
+          "role": "Producer"
+        },
+        {
+          "id": 17761,
+          "name": "Joseph Walker",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 30154,
+          "name": "Gene Havlick",
+          "role": "Editor"
+        },
+        {
+          "id": 4341,
+          "name": "Ben Hecht",
+          "role": "Screenplay"
+        },
+        {
+          "id": 31969,
+          "name": "Lionel Banks",
+          "role": "Art Direction"
+        },
+        {
+          "id": 29275,
+          "name": "Sidney Cutner",
+          "role": "Original Music Composer"
+        },
+        {
+          "id": 30232,
+          "name": "Felix Mills",
+          "role": "Original Music Composer"
+        },
+        {
+          "id": 11435,
+          "name": "Howard Hawks",
+          "role": "Screenplay"
+        }
+      ]
+    },
+    "night-of-the-living-dead": {
+      "id": 10331,
+      "title": "Night of the Living Dead",
+      "date": "1968-10-04",
+      "overview": "A ragtag group barricade themselves in an old Pennsylvania farmhouse to remain safe from a horde of flesh-eating ghouls ravaging the Northeast.",
+      "runtime": 96,
+      "rating": 7.602,
+      "votes": 2887,
+      "url": "https://www.themoviedb.org/movie/10331",
+      "cast": [
+        {
+          "id": 97913,
+          "name": "Judith O'Dea",
+          "role": "Barbra"
+        },
+        {
+          "id": 97912,
+          "name": "Duane Jones",
+          "role": "Ben"
+        },
+        {
+          "id": 97915,
+          "name": "Marilyn Eastman",
+          "role": "Helen Cooper"
+        },
+        {
+          "id": 97914,
+          "name": "Karl Hardman",
+          "role": "Harry Cooper"
+        },
+        {
+          "id": 97917,
+          "name": "Judith Ridley",
+          "role": "Judy"
+        },
+        {
+          "id": 97916,
+          "name": "Keith Wayne",
+          "role": "Tom"
+        },
+        {
+          "id": 97918,
+          "name": "Kyra Schon",
+          "role": "Karen Cooper / Corpse in House"
+        },
+        {
+          "id": 97919,
+          "name": "Charles Craig",
+          "role": "TV Newscaster / Zombie"
+        },
+        {
+          "id": 97920,
+          "name": "S. William Hinzman",
+          "role": "Zombie"
+        },
+        {
+          "id": 97921,
+          "name": "Bill Cardille",
+          "role": "Field Reporter"
+        },
+        {
+          "id": 1288949,
+          "name": "John Simpson",
+          "role": "Zombie"
+        },
+        {
+          "id": 1772607,
+          "name": "George Kosana",
+          "role": "Sheriff McClelland"
+        }
+      ],
+      "crew": [
+        {
+          "id": 14999,
+          "name": "George A. Romero",
+          "role": "Screenplay"
+        },
+        {
+          "id": 64831,
+          "name": "John A. Russo",
+          "role": "Screenplay"
+        },
+        {
+          "id": 64833,
+          "name": "Russell Streiner",
+          "role": "Producer"
+        },
+        {
+          "id": 14999,
+          "name": "George A. Romero",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 14999,
+          "name": "George A. Romero",
+          "role": "Editor"
+        },
+        {
+          "id": 14999,
+          "name": "George A. Romero",
+          "role": "Director"
+        },
+        {
+          "id": 97914,
+          "name": "Karl Hardman",
+          "role": "Producer"
+        },
+        {
+          "id": 2381814,
+          "name": "Hugh C. Daly",
+          "role": "Editor"
+        },
+        {
+          "id": 2026805,
+          "name": "Marshall Booth",
+          "role": "Sound Designer"
+        },
+        {
+          "id": 1477209,
+          "name": "Gary Streiner",
+          "role": "Sound Designer"
+        }
+      ]
+    },
+    "big-buck-bunny": {
+      "id": 10378,
+      "title": "Big Buck Bunny",
+      "date": "2008-04-10",
+      "overview": "Follow a day of the life of Big Buck Bunny when he meets three bullying rodents: Frank, Rinky, and Gamera. The rodents amuse themselves by harassing helpless creatures by throwing fruits, nuts and rocks at them. After the deaths of two of Bunny's favorite butterflies, and an offensive attack on Bunny himself, Bunny sets aside his gentle nature and orchestrates a complex plan for revenge.",
+      "runtime": 8,
+      "rating": 6.5,
+      "votes": 201,
+      "url": "https://www.themoviedb.org/movie/10378",
+      "cast": [],
+      "crew": [
+        {
+          "id": 64937,
+          "name": "Enrico Valenza",
+          "role": "Art Direction"
+        },
+        {
+          "id": 64936,
+          "name": "Sacha Goedegebure",
+          "role": "Director"
+        },
+        {
+          "id": 133632,
+          "name": "Ton Roosendaal",
+          "role": "Producer"
+        },
+        {
+          "id": 58958,
+          "name": "Andreas Goralczyk",
+          "role": "Art Direction"
+        },
+        {
+          "id": 133634,
+          "name": "Jan Morgenstern",
+          "role": "Original Music Composer"
+        },
+        {
+          "id": 64936,
+          "name": "Sacha Goedegebure",
+          "role": "Screenplay"
+        }
+      ]
+    },
+    "sintel": {
+      "id": 45745,
+      "title": "Sintel",
+      "date": "2010-09-30",
+      "overview": "A wandering warrior finds an unlikely friend in the form of a young dragon. The two develop a close bond, until one day the dragon is snatched away. She then sets out on a relentless quest to reclaim her friend, finding in the end that her quest exacts a far greater price than she had ever imagined.",
+      "runtime": 14,
+      "rating": 7.3,
+      "votes": 180,
+      "url": "https://www.themoviedb.org/movie/45745",
+      "cast": [
+        {
+          "id": 39847,
+          "name": "Halina Reijn",
+          "role": "Sintel (voice)"
+        },
+        {
+          "id": 7572,
+          "name": "Thom Hoffman",
+          "role": "Shaman (voice)"
+        }
+      ],
+      "crew": [
+        {
+          "id": 133632,
+          "name": "Ton Roosendaal",
+          "role": "Producer"
+        },
+        {
+          "id": 133631,
+          "name": "Colin Levy",
+          "role": "Director"
+        },
+        {
+          "id": 133633,
+          "name": "Esther Wouda",
+          "role": "Writer"
+        },
+        {
+          "id": 1097826,
+          "name": "David Revoy",
+          "role": "Art Direction"
+        }
+      ]
+    },
+    "tears-of-steel": {
+      "id": 133701,
+      "title": "Tears of Steel",
+      "date": "2012-09-25",
+      "overview": "The film’s premise is about a group of warriors and scientists, who gathered at the “Oude Kerk” in Amsterdam to stage a crucial event from the past, in a desperate attempt to rescue the world from destructive robots.",
+      "runtime": 12,
+      "rating": 5.715,
+      "votes": 65,
+      "url": "https://www.themoviedb.org/movie/133701",
+      "cast": [
+        {
+          "id": 9128,
+          "name": "Derek de Lint",
+          "role": "Old Thom"
+        },
+        {
+          "id": 237150,
+          "name": "Sergio Hasselbaink",
+          "role": "Barly"
+        },
+        {
+          "id": 1097815,
+          "name": "Vanja Rukavina",
+          "role": "Thom"
+        },
+        {
+          "id": 1097816,
+          "name": "Denise Rebergen",
+          "role": "Celia"
+        },
+        {
+          "id": 217240,
+          "name": "Rogier Schippers",
+          "role": "Kapitän"
+        },
+        {
+          "id": 1097817,
+          "name": "Chris Haley",
+          "role": "Tech head"
+        },
+        {
+          "id": 1097818,
+          "name": "Jody Bhe",
+          "role": "Djenghis"
+        }
+      ],
+      "crew": [
+        {
+          "id": 137897,
+          "name": "Ian Hubert",
+          "role": "Writer"
+        },
+        {
+          "id": 137897,
+          "name": "Ian Hubert",
+          "role": "Director"
+        },
+        {
+          "id": 133632,
+          "name": "Ton Roosendaal",
+          "role": "Producer"
+        },
+        {
+          "id": 1097824,
+          "name": "Joris Kerbosch",
+          "role": "Director of Photography"
+        },
+        {
+          "id": 1097839,
+          "name": "Joram Letwory",
+          "role": "Sound Designer"
+        }
+      ]
+    },
+    "sprite-fright": {
+      "id": 891761,
+      "title": "Sprite Fright",
+      "date": "2024-04-06",
+      "overview": "Set in 80’s-Britain, when a group of rowdy teenagers trek into an isolated forest, they discover peaceful mushroom creatures that turn out to be an unexpected force of nature.",
+      "runtime": 11,
+      "rating": 7.7,
+      "votes": 7,
+      "url": "https://www.themoviedb.org/movie/891761",
+      "cast": [
+        {
+          "id": 225978,
+          "name": "Valerie LaPointe",
+          "role": "Ellie (voice)"
+        },
+        {
+          "id": 2182343,
+          "name": "Gabriel Bisset-Smith",
+          "role": "Rex (voice)"
+        },
+        {
+          "id": 3290207,
+          "name": "Nicole Davis",
+          "role": "Victoria (voice)"
+        },
+        {
+          "id": 1656815,
+          "name": "Homer Todiwala",
+          "role": "Jay (voice)"
+        },
+        {
+          "id": 1364950,
+          "name": "Ed Kear",
+          "role": "Phil (voice)"
+        },
+        {
+          "id": 53376,
+          "name": "Eric Peterson",
+          "role": "Elder Sprite (voice)"
+        }
+      ],
+      "crew": [
+        {
+          "id": 1993493,
+          "name": "Matthew Luhn",
+          "role": "Director"
+        },
+        {
+          "id": 1993493,
+          "name": "Matthew Luhn",
+          "role": "Writer"
+        },
+        {
+          "id": 58958,
+          "name": "Andreas Goralczyk",
+          "role": "Art Direction"
+        },
+        {
+          "id": 1289551,
+          "name": "Francesco Siddi",
+          "role": "Producer"
+        },
+        {
+          "id": 133632,
+          "name": "Ton Roosendaal",
+          "role": "Executive Producer"
+        },
+        {
+          "id": 1652303,
+          "name": "Sander Houtman",
+          "role": "Sound Designer"
+        }
+      ],
+      "dateNote": "Original Blender release: 2021. TMDB records 2024-04-06; its provider date is retained, not used to redefine the original release year."
+    },
+    "beverly-hillbillies": {
+      "id": 1930,
+      "title": "The Beverly Hillbillies",
+      "date": "1962-09-26",
+      "overview": "Jed Clampett's swamp is loaded with oil. When a wildcatter discovers the huge pool, Jed sells his land to the O.K. Oil Company and at the urging of cousin Pearl, moves his family to a 35-room mansion in Beverly Hills, California.",
+      "rating": 6.9,
+      "votes": 140,
+      "url": "https://www.themoviedb.org/tv/1930",
+      "cast": [
+        {
+          "id": 1935,
+          "name": "Buddy Ebsen",
+          "role": "Jed \"JD\" Clampett"
+        },
+        {
+          "id": 116660,
+          "name": "Irene Ryan",
+          "role": "Granny"
+        },
+        {
+          "id": 83457,
+          "name": "Donna Douglas",
+          "role": "Elly May Clampett"
+        },
+        {
+          "id": 40242,
+          "name": "Max Baer Jr.",
+          "role": "Jethro Bodine"
+        },
+        {
+          "id": 5737,
+          "name": "Raymond Bailey",
+          "role": "Milburn Drysdale"
+        },
+        {
+          "id": 30519,
+          "name": "Nancy Kulp",
+          "role": "Jane Hathaway"
+        }
+      ],
+      "crew": [
+        {
+          "id": 63963,
+          "name": "Paul Henning",
+          "role": "Producer"
+        },
+        {
+          "id": 1228165,
+          "name": "Joseph Depew",
+          "role": "Producer"
+        }
+      ],
+      "creators": [
+        {
+          "id": 63963,
+          "name": "Paul Henning",
+          "role": "Creator"
+        }
+      ]
+    },
+    "beverly-hillbillies-s1": {
+      "id": 5593,
+      "title": "Season 1",
+      "date": "1962-09-26",
+      "overview": "",
+      "rating": 6.1,
+      "votes": null,
+      "url": "https://www.themoviedb.org/tv/1930/season/1",
+      "cast": [
+        {
+          "id": 1935,
+          "name": "Buddy Ebsen",
+          "role": "Jed \"JD\" Clampett"
+        },
+        {
+          "id": 116660,
+          "name": "Irene Ryan",
+          "role": "Granny"
+        },
+        {
+          "id": 83457,
+          "name": "Donna Douglas",
+          "role": "Elly May Clampett"
+        },
+        {
+          "id": 40242,
+          "name": "Max Baer Jr.",
+          "role": "Jethro Bodine"
+        },
+        {
+          "id": 5737,
+          "name": "Raymond Bailey",
+          "role": "Milburn Drysdale"
+        },
+        {
+          "id": 30519,
+          "name": "Nancy Kulp",
+          "role": "Jane Hathaway"
+        }
+      ],
+      "crew": [
+        {
+          "id": 1228165,
+          "name": "Joseph Depew",
+          "role": "Producer"
+        },
+        {
+          "id": 63963,
+          "name": "Paul Henning",
+          "role": "Producer"
+        }
+      ]
+    },
+    "beverly-hillbillies-s1-e1": {
+      "id": 130427,
+      "title": "The Clampetts Strike Oil",
+      "date": "1962-09-26",
+      "overview": "The pilot starts after the theme song when Jed struck oil in his Lake. A rural Ozark family relocates to Beverly Hills after oil is discovered on their property worth $25 million. After finding oil on the land, the family is surprised when Mr. Brewster of the OK Oil Company offers to buy it. After much coaxing by Cousin Pearl, Jed sells the swamp and moves the family to a mansion in Beverly Hills. Upon their arrival, they are arrested because of a case of mistaken identity but are later returned to the mansion safely.",
+      "runtime": 25,
+      "rating": 7,
+      "votes": 1,
+      "url": "https://www.themoviedb.org/tv/1930/season/1/episode/1",
+      "cast": [
+        {
+          "id": 1935,
+          "name": "Buddy Ebsen",
+          "role": "Jed \"JD\" Clampett"
+        },
+        {
+          "id": 116660,
+          "name": "Irene Ryan",
+          "role": "Granny"
+        },
+        {
+          "id": 83457,
+          "name": "Donna Douglas",
+          "role": "Elly May Clampett"
+        },
+        {
+          "id": 40242,
+          "name": "Max Baer Jr.",
+          "role": "Jethro Bodine"
+        },
+        {
+          "id": 5737,
+          "name": "Raymond Bailey",
+          "role": "Milburn Drysdale"
+        },
+        {
+          "id": 30519,
+          "name": "Nancy Kulp",
+          "role": "Jane Hathaway"
+        },
+        {
+          "id": 153265,
+          "name": "Bea Benaderet",
+          "role": "Pearl Bodine"
+        },
+        {
+          "id": 111593,
+          "name": "Ron Hagerthy",
+          "role": "Geologist"
+        },
+        {
+          "id": 938901,
+          "name": "Robert Osborne",
+          "role": "Jeff Taylor"
+        },
+        {
+          "id": 34625,
+          "name": "Frank Wilcox",
+          "role": "John Brewster"
+        }
+      ],
+      "crew": [
+        {
+          "id": 63963,
+          "name": "Paul Henning",
+          "role": "Writer"
+        },
+        {
+          "id": 161229,
+          "name": "Ralph Levy",
+          "role": "Director"
+        }
+      ]
+    },
+    "beverly-hillbillies-s1-e2": {
+      "id": 130423,
+      "title": "Getting Settled",
+      "date": "1962-10-03",
+      "overview": "The Clampetts begin to settle in their new home in Beverly Hills. They are having to adjust to things such as refrigerators, ovens and the \"cement pond\" (swimming pool). Jethro also encounters a flamingo that he thinks is a chicken (which causes Jed to suspect Jethro has been sneaking drinks of moonshine). Meanwhile, Miss Hathaway, executive secretary to banker Milburn Drysdale, mistakes the Clampetts for \"domestic\" help. She thinks Granny is a cook and Elly a maid.",
+      "runtime": 25,
+      "rating": 5.5,
+      "votes": 1,
+      "url": "https://www.themoviedb.org/tv/1930/season/1/episode/2",
+      "cast": [
+        {
+          "id": 1935,
+          "name": "Buddy Ebsen",
+          "role": "Jed \"JD\" Clampett"
+        },
+        {
+          "id": 116660,
+          "name": "Irene Ryan",
+          "role": "Granny"
+        },
+        {
+          "id": 83457,
+          "name": "Donna Douglas",
+          "role": "Elly May Clampett"
+        },
+        {
+          "id": 40242,
+          "name": "Max Baer Jr.",
+          "role": "Jethro Bodine"
+        },
+        {
+          "id": 5737,
+          "name": "Raymond Bailey",
+          "role": "Milburn Drysdale"
+        },
+        {
+          "id": 30519,
+          "name": "Nancy Kulp",
+          "role": "Jane Hathaway"
+        }
+      ],
+      "crew": [
+        {
+          "id": 63963,
+          "name": "Paul Henning",
+          "role": "Writer"
+        },
+        {
+          "id": 30270,
+          "name": "Richard Whorf",
+          "role": "Director"
+        }
+      ]
+    }
+  }
+}
