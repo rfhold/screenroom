@@ -1,14 +1,96 @@
+x-backend: &backend
+  image: screenroom-backend:local
+  build: {context: ., dockerfile: docker/backend/Dockerfile}
+  networks: [private]
+  volumes:
+    - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/installation.json:/runtime/installation.json:ro
+    - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/users.json:/runtime/users.json:ro
+  depends_on:
+    postgres: {condition: service_healthy}
+    garage: {condition: service_started}
+  environment: &common
+    SCREENROOM_MIGRATION_DATABASE_URL: postgres://screenroom:screenroom-local-only@postgres/screenroom
+    SCREENROOM_FIXTURE_ROOT: /app/fixtures/catalog
+    SCREENROOM_EMBEDDING_BASE_URL: https://agent-gateway.holdenitdown.net/v1
+    SCREENROOM_EMBEDDING_MODEL: local-embedding
+    SCREENROOM_EMBEDDING_DIMENSIONS: "1024"
+    SCREENROOM_EMBEDDING_REVISION: qwen3-embedding-0.6b-local-v1
+    SCREENROOM_S3_ENDPOINT: http://garage:3900
+    SCREENROOM_S3_REGION: garage
+    SCREENROOM_S3_BUCKET: screenroom-artwork
 services:
   postgres:
-    image: postgres:18
+    image: pgvector/pgvector:0.8.2-pg18-trixie@sha256:b7337db8fe39d12fe8ecb0003c72680f24479813a744b43154eee6f2eab5a5f3
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-screenroom}
-      POSTGRES_USER: ${POSTGRES_USER:-screenroom}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-screenroom-local-only}
-    ports:
-      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+      POSTGRES_DB: screenroom
+      POSTGRES_USER: screenroom
+      POSTGRES_PASSWORD: screenroom-local-only
+    networks: [private]
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U screenroom -d screenroom]
+      interval: 2s
+      timeout: 2s
+      retries: 60
     volumes:
-      - postgres-data:/var/lib/postgresql
+      - backend-postgres-data:/var/lib/postgresql
+      - ./docker/backend/postgres.sql:/docker-entrypoint-initdb.d/10-runtime.sql:ro
+  garage:
+    image: dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+    command: [/garage, server]
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET:-}
+    networks: [private]
+    volumes:
+      - ./docker/backend/garage.toml:/etc/garage.toml:ro
+      - backend-garage-meta:/var/lib/garage/meta
+      - backend-garage-data:/var/lib/garage/data
+  catalog:
+    <<: *backend
+    command: [screenroom-catalog]
+    environment:
+      <<: *common
+      DATABASE_URL: postgres://catalog_runtime:catalog-local-only@postgres/screenroom
+      SCREENROOM_CATALOG_LISTEN: 0.0.0.0:50052
+      SCREENROOM_CATALOG_PRIVATE_LISTEN: 0.0.0.0:50062
+      SCREENROOM_CATALOG_PUBLIC_ORIGIN: ${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
+      SCREENROOM_USER_PRIVATE_URI: http://user:50063
+      SCREENROOM_CATALOG_CORS_ORIGINS: http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4176,http://localhost:4176,http://127.0.0.1:5173,http://localhost:5173
+      SCREENROOM_S3_ACCESS_KEY_ID: ${CATALOG_S3_KEY:-}
+      SCREENROOM_S3_SECRET_ACCESS_KEY: ${CATALOG_S3_SECRET:-}
+      SCREENROOM_EMBEDDING_API_KEY: ${SCREENROOM_EMBEDDING_API_KEY:-}
+  user:
+    <<: *backend
+    command: [screenroom-user]
+    environment:
+      <<: *common
+      DATABASE_URL: postgres://user_runtime:user-local-only@postgres/screenroom
+      SCREENROOM_USER_LISTEN: 0.0.0.0:50053
+      SCREENROOM_USER_PRIVATE_LISTEN: 0.0.0.0:50063
+      SCREENROOM_USER_CORS_ORIGINS: http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4176,http://localhost:4176,http://127.0.0.1:5173,http://localhost:5173
+  worker:
+    <<: *backend
+    command: [screenroom-index-worker, serve]
+    environment:
+      <<: *common
+      DATABASE_URL: postgres://worker_runtime:worker-local-only@postgres/screenroom
+      SCREENROOM_S3_ACCESS_KEY_ID: ${WORKER_S3_KEY:-}
+      SCREENROOM_S3_SECRET_ACCESS_KEY: ${WORKER_S3_SECRET:-}
+      SCREENROOM_EMBEDDING_API_KEY: ${SCREENROOM_EMBEDDING_API_KEY:-}
+  edge:
+    image: envoyproxy/envoy:v1.37-latest@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4
+    command: [envoy, -c, /etc/envoy/envoy.yaml, --concurrency, "2"]
+    networks: [private, client]
+    ports: ["127.0.0.1:${SCREENROOM_BACKEND_PORT:-50051}:50051"]
+    volumes:
+      - ./docker/backend/envoy.yaml:/etc/envoy/envoy.yaml:ro
+      - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/identity.json:/runtime/identity.json:ro
+
+networks:
+  private: {}
+  client: {}
 
 volumes:
   postgres-data:
+  backend-postgres-data:
+  backend-garage-meta:
+  backend-garage-data:
