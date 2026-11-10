@@ -19,7 +19,7 @@ final class HomeE2ETests: XCTestCase {
         configure(app, pageSize: captures ? "100" : "1")
         app.launch()
 
-        let content = [("page.title", "Home"), ("home.row.0", "Continue Watching / Up Next")]
+        let content = [("page.title", "Home"), ("home.row.0", "Continue watching")]
         for (identifier, label) in content {
             let element = app.staticTexts[identifier]
             XCTAssertTrue(element.waitForExistence(timeout: 10), identifier)
@@ -121,7 +121,7 @@ final class HomeE2ETests: XCTestCase {
         #if os(tvOS)
         activate(app.buttons["sidebar.toggle"])
         #endif
-        activate(app.buttons["menu.TV shows"])
+        activate(app.buttons["menu.TV Shows"])
         activate(app.buttons["card.beverly-hillbillies"])
         activate(app.buttons["card.beverly-hillbillies-s1"])
         activate(app.buttons["metadata.info"])
@@ -142,7 +142,7 @@ final class HomeE2ETests: XCTestCase {
         activate(app.buttons["sidebar.toggle"])
         #endif
         XCTAssertTrue(app.textFields["search.query"].waitForExistence(timeout: 5))
-        assertStatus(app, "Enter a title to search TV shows.")
+        assertStatus(app, "Enter a title to search TV Shows.")
         XCTAssertFalse(app.buttons["search.type.Movie"].exists)
         XCTAssertFalse(app.buttons["search.source.TMDB"].exists)
         activate(app.buttons["search.options"])
@@ -152,7 +152,7 @@ final class HomeE2ETests: XCTestCase {
             XCTAssertEqual(app.buttons["search.method.\(method)"].value as? String, "Selected")
         }
         activate(app.buttons["search.source.Jellyfin"])
-        assertStatus(app, "Enter a title to search TV shows.")
+        assertStatus(app, "Enter a title to search TV Shows.")
         XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
         activate(app.buttons["search.source.TMDB"])
         #endif
@@ -164,7 +164,7 @@ final class HomeE2ETests: XCTestCase {
         app.textFields["search.query"].typeText("beverly\n")
         XCTAssertTrue(app.buttons["card.beverly-hillbillies"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["card.beverly-hillbillies"].isHittable)
-        assertStatus(app, "1 result in TV shows")
+        assertStatus(app, "1 result in TV Shows")
         #if os(iOS)
         XCTAssertFalse(app.keyboards.firstMatch.exists)
         #endif
@@ -173,8 +173,11 @@ final class HomeE2ETests: XCTestCase {
         XCTAssertEqual(app.textFields["search.query"].value as? String, "beverly")
         activate(app.buttons["search.options"])
         activate(app.buttons["search.source.Jellyfin"])
-        assertStatus(app, "No matches in TV shows. Try another search.")
-        XCTAssertFalse(app.buttons["card.beverly-hillbillies"].exists)
+        XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
+        assertStatus(app, "1 result in TV Shows")
+        activate(app.buttons["search.options"])
+        XCTAssertTrue(app.buttons["card.beverly-hillbillies"].waitForExistence(timeout: 10))
+        activate(app.buttons["search.options"])
         activate(app.buttons["search.source.TMDB"])
         XCTAssertEqual(app.buttons["Title only"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.method.Text"].value as? String, "Selected")
@@ -242,7 +245,9 @@ final class HomeE2ETests: XCTestCase {
         XCTAssertEqual(app.buttons["search.source.All catalogs"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
+        activate(app.buttons["Title only"])
+        XCTAssertEqual(app.buttons["search.method.Semantic"].value as? String, "Not selected")
         activate(app.buttons["search.options"])
         activate(app.textFields["search.query"])
         app.textFields["search.query"].typeText("Bunny\n")
@@ -267,13 +272,12 @@ final class HomeE2ETests: XCTestCase {
         let app = XCUIApplication()
         configure(app)
         app.launch()
-        activate(app.buttons["menu.TV shows"])
+        activate(app.buttons["menu.TV Shows"])
         activate(app.buttons["card.beverly-hillbillies"])
         activate(app.buttons["card.beverly-hillbillies-s1"])
         activate(app.buttons["menu.Search titles"])
-        assertStatus(app, "Enter a title to search TV shows.")
+        assertStatus(app, "Enter a title to search TV Shows.")
         activate(app.buttons["search.options"])
-        activate(app.buttons["search.type.Episode"])
         activate(app.buttons["search.type.Movie"])
         activate(app.buttons["search.method.Text"])
         activate(app.buttons["Title only"])
@@ -283,11 +287,11 @@ final class HomeE2ETests: XCTestCase {
         app.textFields["search.query"].typeText("zzzzzzz")
         #endif
         activate(app.buttons["menu.Search titles"])
-        assertFreshSearch(app, scope: "TV shows")
+        assertFreshSearch(app, scope: "TV Shows", titleOnly: true, methods: ["Fuzzy"])
         activate(app.buttons["search.method.Text"])
         activate(app.buttons["Title only"])
         activate(app.buttons["menu.Search titles"])
-        assertFreshSearch(app, scope: "TV shows")
+        assertFreshSearch(app, scope: "TV Shows", titleOnly: false, methods: ["Text", "Fuzzy"])
         activate(app.buttons["search.options"])
         activate(app.buttons["search.back"])
         XCTAssertTrue(app.buttons["card.beverly-hillbillies-s1-e1"].waitForExistence(timeout: 5))
@@ -296,10 +300,11 @@ final class HomeE2ETests: XCTestCase {
         activate(app.buttons["menu.Search titles"])
         assertStatus(app, "Enter a title to search All libraries.")
         activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.source.All catalogs"].value as? String, "Selected")
+        XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
         #if !os(tvOS)
+        activate(app.buttons["search.source.All catalogs"])
         activate(app.buttons["search.type.Movie"])
         activate(app.buttons["search.options"])
         activate(app.textFields["search.query"])
@@ -311,8 +316,9 @@ final class HomeE2ETests: XCTestCase {
 
     @MainActor
     private func configure(_ app: XCUIApplication, pageSize: String = "1") {
-        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = ProcessInfo.processInfo.environment["SCREENROOM_API_ENDPOINT"] ?? "http://127.0.0.1:50061"
-        app.launchEnvironment["SCREENROOM_MOCK_PROFILE"] = "apple-e2e-\(UUID().uuidString)"
+        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = ProcessInfo.processInfo.environment["SCREENROOM_API_ENDPOINT"] ?? "http://127.0.0.1:50051"
+        app.launchEnvironment["SCREENROOM_USER_ID"] = ProcessInfo.processInfo.environment["SCREENROOM_USER_ID"] ?? "00000000-0000-0000-0000-000000000001"
+        app.launchEnvironment["SCREENROOM_E2E_SETTINGS_NAMESPACE"] = "apple-e2e-\(UUID().uuidString)"
         app.launchEnvironment["SCREENROOM_API_PAGE_SIZE"] = pageSize
     }
 
@@ -350,28 +356,40 @@ final class HomeE2ETests: XCTestCase {
         configure(app)
         app.launch()
         activate(app.buttons["menu.Search titles"])
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.type.Episode"])
-        activate(app.buttons["Title only"])
-        activate(app.buttons["search.options"])
         activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("a\n")
+        app.textFields["search.query"].typeText("Bunny\n")
         #if os(tvOS)
         if app.keyboards.firstMatch.exists { XCUIRemote.shared.press(.menu) }
         #endif
-        let complete = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "6 results in All libraries", "6 results in All libraries"), object: app.staticTexts["search.status"])
+        let complete = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "11 results in All libraries", "11 results in All libraries"), object: app.staticTexts["search.status"])
         XCTAssertEqual(XCTWaiter.wait(for: [complete], timeout: 10), .completed)
         activate(app.buttons["sidebar.toggle"])
         activate(app.buttons["Refresh"])
         XCTAssertTrue(app.staticTexts["Catalog refreshed from core."].waitForExistence(timeout: 10))
-        let refreshed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "6 results in All libraries", "6 results in All libraries"), object: app.staticTexts["search.status"])
+        let refreshed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "11 results in All libraries", "11 results in All libraries"), object: app.staticTexts["search.status"])
         XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed)
-        XCTAssertEqual(app.textFields["search.query"].value as? String, "a")
+        XCTAssertEqual(app.textFields["search.query"].value as? String, "Bunny")
+        activate(app.buttons["search.options"])
+        activate(app.buttons["search.type.Movie"])
+        activate(app.buttons["search.type.Episode"])
+        activate(app.buttons["search.source.TMDB"])
+        activate(app.buttons["Title only"])
+        activate(app.buttons["search.method.Text"])
+        activate(app.buttons["menu.TV Shows"])
+        assertHeading(app, "TV Shows")
         app.terminate()
         app.launch()
+        assertHeading(app, "TV Shows")
         activate(app.buttons["menu.Search titles"])
         activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
+        XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
+        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["Title only"].value as? String, "Selected")
+        XCTAssertEqual(app.buttons["search.method.Semantic"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["search.method.Text"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["search.method.Fuzzy"].value as? String, "Selected")
+        XCTAssertEqual(app.buttons["search.source.TMDB"].value as? String, "Selected")
         activate(app.buttons["sidebar.toggle"])
         #if os(tvOS)
         activate(app.buttons["sidebar.subtitles"])
@@ -442,7 +460,7 @@ final class HomeE2ETests: XCTestCase {
     #endif
 
     @MainActor
-    private func assertFreshSearch(_ app: XCUIApplication, scope: String) {
+    private func assertFreshSearch(_ app: XCUIApplication, scope: String, titleOnly: Bool, methods: Set<String>) {
         assertStatus(app, "Enter a title to search \(scope).")
         XCTAssertFalse(app.buttons["Clear query"].exists)
         XCTAssertFalse(app.buttons["card.beverly-hillbillies"].exists)
@@ -452,10 +470,9 @@ final class HomeE2ETests: XCTestCase {
         XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
         XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
         XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["Title only"].value as? String, "Not selected")
+        XCTAssertEqual(app.buttons["Title only"].value as? String, titleOnly ? "Selected" : "Not selected")
         for method in ["Text", "Fuzzy", "Semantic"] {
-            XCTAssertEqual(app.buttons["search.method.\(method)"].value as? String, "Selected")
-            XCTAssertTrue(app.buttons["search.method.\(method)"].isEnabled)
+            XCTAssertEqual(app.buttons["search.method.\(method)"].value as? String, methods.contains(method) ? "Selected" : "Not selected")
         }
     }
 
@@ -463,6 +480,8 @@ final class HomeE2ETests: XCTestCase {
     private func assertStatus(_ app: XCUIApplication, _ expected: String) {
         let status = app.staticTexts["search.status"]
         XCTAssertTrue(status.waitForExistence(timeout: 5))
+        let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", expected, expected), object: status)
+        XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
         #if os(macOS)
         XCTAssertEqual(status.label.isEmpty ? status.value as? String : status.label, expected)
         #else

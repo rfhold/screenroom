@@ -4,8 +4,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/test-category.sh
 configure_apple_test_category
-source scripts/mock-port.sh
-configure_apple_mock_port
 case "${E2E_MACOS-0}" in
     0|1) ;;
     *) echo 'E2E_MACOS must be 0 or 1 (or unset)' >&2; exit 2 ;;
@@ -22,6 +20,12 @@ case "${1:-all}" in
     ios|ipad|tvos|macos) profiles=("$1") ;;
     *) echo "Unknown Apple E2E profile: $1" >&2; exit 2 ;;
 esac
+for profile in "${profiles[@]}"; do
+    if [ "$profile" = macos ] && [ "${SCREENROOM_MACOS_GUI_READY:-0}" != 1 ]; then
+        echo 'macOS GUI testing requires fresh user permission/readiness; set SCREENROOM_MACOS_GUI_READY=1 only after that approval.' >&2
+        exit 2
+    fi
+done
 
 timeout=$(command -v timeout || command -v gtimeout || true)
 if [ -z "$timeout" ] || ! command -v jq >/dev/null; then
@@ -40,37 +44,30 @@ else
 fi
 echo "Apple E2E artifacts: $run"
 trap 'echo "Apple E2E failed; see $run" >&2' ERR
-mock_pid=
-cleanup() {
-    if [ -n "$mock_pid" ]; then
-        kill "$mock_pid" 2>/dev/null || true
-        wait "$mock_pid" 2>/dev/null || true
-        echo "Stopped owned Apple mock PID $mock_pid" >>"$run/mock-lifecycle.log"
-    fi
-}
-trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-if [ -z "${SCREENROOM_API_ENDPOINT:-}" ]; then
-    export SCREENROOM_API_ENDPOINT="$apple_mock_endpoint"
-    if curl -fsS --max-time 1 "$SCREENROOM_API_ENDPOINT/health" >/dev/null 2>&1; then
-        echo "Port $apple_mock_port is already in use; set SCREENROOM_API_ENDPOINT to opt into an external server." >&2
-        exit 2
-    fi
-    SCREENROOM_MOCK_LISTEN="$apple_mock_listen" SCREENROOM_MOCK_PUBLIC_BASE="$SCREENROOM_API_ENDPOINT" \
-        bash ../../scripts/mock-server.sh >"$run/mock-server.log" 2>&1 &
-    mock_pid=$!
-    echo "Started owned Apple mock PID $mock_pid at $SCREENROOM_API_ENDPOINT" >"$run/mock-lifecycle.log"
+root=$(cd ../.. && pwd)
+export SCREENROOM_BACKEND_DESCRIPTOR=${SCREENROOM_BACKEND_DESCRIPTOR:-"$root/build/backend-runtime/screenroom-e2e/descriptor.json"}
+export SCREENROOM_BACKEND_ATTACH=1
+export SCREENROOM_API_ENDPOINT=${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
+if [ -n "${SCREENROOM_E2E_API_ENDPOINT:-}" ] && [ "$SCREENROOM_E2E_API_ENDPOINT" != "$SCREENROOM_API_ENDPOINT" ]; then
+    echo 'SCREENROOM_E2E_API_ENDPOINT must match SCREENROOM_API_ENDPOINT' >&2; exit 2
 fi
-ready=0
-for ((attempt=0; attempt<180; attempt++)); do
-    if curl -fsS --max-time 1 "$SCREENROOM_API_ENDPOINT/health" >"$run/mock-health.json" 2>/dev/null; then ready=1; break; fi
-    if [ -n "$mock_pid" ] && ! kill -0 "$mock_pid" 2>/dev/null; then break; fi
-    sleep 1
-done
-if [ "$ready" != 1 ]; then echo "Mock API did not become ready; see $run/mock-server.log" >&2; exit 1; fi
-echo "Ready $SCREENROOM_API_ENDPOINT" >>"$run/mock-lifecycle.log"
+bash "$root/scripts/backend.sh" wait >"$run/backend-wait.log" 2>&1
+curl -fsS --max-time 10 "$SCREENROOM_API_ENDPOINT/__screenroom_instance" >"$run/backend-instance.json"
+instance=$(jq -er '.instanceID' "$run/backend-instance.json")
+descriptor_instance=$(jq -er '.instanceID' "$SCREENROOM_BACKEND_DESCRIPTOR")
+descriptor_origin=$(jq -er '.publicOrigin' "$SCREENROOM_BACKEND_DESCRIPTOR")
+if [ "$instance" != "$descriptor_instance" ] || [ "$SCREENROOM_API_ENDPOINT" != "$descriptor_origin" ] ||
+    { [ -n "${SCREENROOM_BACKEND_INSTANCE_ID:-}" ] && [ "$instance" != "$SCREENROOM_BACKEND_INSTANCE_ID" ]; }; then
+    echo 'Apple runner requires the existing descriptor-backed shared backend instance' >&2; exit 2
+fi
+export SCREENROOM_BACKEND_INSTANCE_ID="$instance"
+export SCREENROOM_USER_ID=${SCREENROOM_USER_ID:-$(jq -er '.userID' "$SCREENROOM_BACKEND_DESCRIPTOR")}
+echo "Attached shared backend $instance at $SCREENROOM_API_ENDPOINT" | tee "$run/backend-lifecycle.log"
 export TEST_RUNNER_SCREENROOM_API_ENDPOINT="$SCREENROOM_API_ENDPOINT"
+export TEST_RUNNER_SCREENROOM_USER_ID="$SCREENROOM_USER_ID"
+export TEST_RUNNER_SCREENROOM_BACKEND_INSTANCE_ID="$instance"
 "$timeout" --foreground -k 10s 1200s bash scripts/prepare-core.sh >"$run/core-build.log" 2>&1
 if [ "$apple_test_category" = regression ] || [ "$apple_test_category" = all ]; then
     "$timeout" --foreground -k 10s 120s bash scripts/test-catalog-state.sh >"$run/catalog-state.log" 2>&1

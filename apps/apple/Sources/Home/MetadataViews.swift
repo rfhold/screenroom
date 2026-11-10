@@ -135,7 +135,7 @@ struct CreditsView: View {
                     }
                 }
                 if let info = catalog.catalogInfo, !catalog.provenanceLoading && catalog.provenanceError.isEmpty {
-                ForEach(info.artwork.filter { $0.kind == "logo" }, id: \.id) { art in
+                ForEach(info.branding.filter { $0.kind == "logo" }, id: \.id) { art in
                     CoreImage(url: art.url).scaledToFit().frame(width: 88, height: 40).accessibilityLabel(art.label).accessibilityIdentifier("credits.logo.\(art.id)")
                 }
                 ForEach(Array(info.notices.enumerated()), id: \.element.id) { index, notice in
@@ -146,7 +146,7 @@ struct CreditsView: View {
                         if let link = externalURL(notice.linkUrl) { Link(notice.linkLabel, destination: link) }
                     }.accessibilityIdentifier("credits.notice.\(notice.id)")
                 }
-                Text("Snapshot · \(info.retrievedAt)")
+                if !info.retrievedAt.isEmpty { Text("Snapshot · \(info.retrievedAt)") }
                 ForEach(catalog.provenanceArtwork, id: \.id) { art in
                     VStack(alignment: .leading, spacing: 4) {
                         Text(art.label).bold()
@@ -156,7 +156,7 @@ struct CreditsView: View {
                         if let source = externalURL(art.source) { Link("Source & provenance", destination: source) }
                     }.accessibilityIdentifier("credits.artwork.\(art.id)")
                 }
-                Text("Film & episode rights").font(.headline)
+                if !catalog.provenanceItems.isEmpty { Text("Film & episode rights").font(.headline) }
                 ForEach(catalog.provenanceItems) { item in
                     Text(item.title).bold()
                     Text(item.rights)

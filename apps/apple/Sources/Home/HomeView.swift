@@ -23,10 +23,11 @@ private struct CompactNavigationStyle: ButtonStyle {
 }
 
 struct HomeView: View {
-    @State private var catalog = CatalogStore()
+    @State private var catalog: CatalogStore
     @State private var refresh = 0
     @State private var completedRefresh = 0
     @State private var navigationTask: Task<Void, Never>?
+    @State private var failedOpen: CatalogItem?
     @State private var navigationGeneration = 0
     @State private var expanded = false
     @State private var screen = "Home"
@@ -45,8 +46,22 @@ struct HomeView: View {
     @State private var searchOriginPath: [CatalogItem] = []
     @FocusState private var navigationFocus: String?
     @FocusState private var sidebarToggleFocused: Bool
-    private var persistedSubtitle: String {
-        catalog.preferences?.subtitlePreference == "library_tracks" ? "Library tracks" : catalog.preferences?.subtitlePreference == "transcription" ? "Transcription" : "Off"
+
+    init() {
+        let store = CatalogStore()
+        _catalog = State(initialValue: store)
+        let saved = store.preferences ?? defaultSettings()
+        let types = saved.types ?? SearchTypes(movie: true, series: true, episode: false)
+        let methods = saved.methods ?? SearchMethods(titleOnly: false, text: true, fuzzy: true, semantic: true)
+        _options = State(initialValue: SearchOptions(source: saved.source, types: Set([(types.movie, "Movie"), (types.series, "Series"), (types.episode, "Episode")].filter { $0.0 }.map { $0.1 }), methods: Set([(methods.text, "text"), (methods.fuzzy, "fuzzy"), (methods.semantic, "semantic")].filter { $0.0 }.map { $0.1 }), titleOnly: methods.titleOnly))
+        let savedLibrary = saved.scope?.libraryId ?? ""
+        _library = State(initialValue: savedLibrary.isEmpty ? "all" : savedLibrary)
+        _screen = State(initialValue: savedLibrary.isEmpty ? "Home" : "Library")
+        _subtitle = State(initialValue: saved.subtitlePreference == "library_tracks" ? "Library tracks" : saved.subtitlePreference == "transcription" ? "Transcription" : "Off")
+    }
+
+    private func saveSettings() {
+        catalog.save(options: options, library: library, subtitle: subtitle == "Library tracks" ? "library_tracks" : subtitle == "Transcription" ? "transcription" : "off")
     }
 
     var body: some View {
@@ -86,18 +101,8 @@ struct HomeView: View {
         .onChange(of: catalog.capabilities) { _, capabilities in
             if let capabilities { options.reconcile(capabilities, preferences: catalog.preferences) }
         }
-        .onChange(of: catalog.preferences) { _, prefs in
-            if let types = prefs?.searchTypes {
-                options.types = Set([(types.movie, "Movie"), (types.series, "Series"), (types.episode, "Episode")].filter { $0.0 }.map { $0.1 })
-                if let caps = catalog.capabilities { options.reconcile(caps, preferences: prefs) }
-            }
-            subtitle = prefs?.subtitlePreference == "library_tracks" ? "Library tracks" : prefs?.subtitlePreference == "transcription" ? "Transcription" : "Off"
-        }
-        .task(id: "\(options.types.sorted())|\(subtitle)|\(catalog.preferences != nil)") {
-            if catalog.preferences != nil {
-                await catalog.save(types: options.coreTypes, subtitle: subtitle == "Library tracks" ? "library_tracks" : subtitle == "Transcription" ? "transcription" : "off")
-            }
-        }
+        .onChange(of: subtitle) { _, _ in saveSettings() }
+        .onChange(of: library) { _, _ in saveSettings() }
         .onDisappear { navigationGeneration += 1; navigationTask?.cancel() }
         #if os(tvOS)
         .onExitCommand {
@@ -110,12 +115,14 @@ struct HomeView: View {
     }
 
     private func setPath(_ value: [CatalogItem]) {
+        failedOpen = nil
         navigationGeneration += 1
         navigationTask?.cancel()
         path = value
     }
 
     private func reload() {
+        failedOpen = nil
         navigationGeneration += 1
         navigationTask?.cancel()
         catalog.invalidate()
@@ -123,6 +130,7 @@ struct HomeView: View {
     }
 
     private func go(_ destination: String) {
+        failedOpen = nil
         navigationGeneration += 1
         navigationTask?.cancel()
         if destination == "Home" { library = "all" }
@@ -132,28 +140,22 @@ struct HomeView: View {
     }
 
     private func open(_ item: CatalogItem) {
+        failedOpen = nil
+        catalog.error = ""
         navigationGeneration += 1
         let current = navigationGeneration
         navigationTask?.cancel()
         navigationTask = Task {
-            guard let client = catalog.client else { return }
             do {
-                var value = try await client.getItem(id: item.id)
-                try Task.checkCancellation()
-                var ancestors = [CatalogItem(value: value)]
-                var seen: Set<String> = [value.id]
-                while let parent = value.parentId {
-                    try Task.checkCancellation()
-                    guard seen.insert(parent).inserted else { throw CancellationError() }
-                    value = try await client.getItem(id: parent)
-                    try Task.checkCancellation()
-                    ancestors.insert(CatalogItem(value: value), at: 0)
-                }
+                let ancestors = try await catalog.ancestors(for: item.id)
                 try Task.checkCancellation()
                 guard current == navigationGeneration else { return }
                 setPath(ancestors)
             } catch {
-                if !Task.isCancelled && current == navigationGeneration { catalog.error = "Unable to open title: \(error.localizedDescription)" }
+                if !Task.isCancelled && current == navigationGeneration {
+                    failedOpen = item
+                    catalog.error = "Unable to open title: \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -165,9 +167,6 @@ struct HomeView: View {
         }
         query = ""
         settled = ""
-        options.methods = Set(catalog.capabilities?.methods.filter { $0 != "title_only" } ?? [])
-        options.titleOnly = false
-        options.source = catalog.capabilities?.sources.first ?? ""
         settings = false
         go("Search")
     }
@@ -227,7 +226,7 @@ struct HomeView: View {
                                         .frame(maxWidth: .infinity, minHeight: ScreenroomTheme.controlSize, alignment: .leading)
                                  }.buttonStyle(.borderless)
                                      .accessibilityIdentifier("subtitle.\(choice)")
-                                     .accessibilityValue(subtitle == choice ? persistedSubtitle == choice ? "Selected" : "Saving" : "Not selected")
+                                      .accessibilityValue(subtitle == choice ? "Selected" : "Not selected")
                             }
                              Button("Refresh") { reload() }.frame(minHeight: ScreenroomTheme.controlSize)
                         }
@@ -289,7 +288,7 @@ struct HomeView: View {
                     Divider().padding(.bottom, 6)
                     tvSidebarRow("Subtitles", subtitleChoices ? "chevron.up" : "captions.bubble", value: subtitle) { subtitleChoices.toggle() }
                         .accessibilityIdentifier("sidebar.subtitles")
-                        .accessibilityValue("\(persistedSubtitle); \(subtitleChoices ? "Expanded" : "Collapsed")")
+                        .accessibilityValue("\(subtitle); \(subtitleChoices ? "Expanded" : "Collapsed")")
                     if subtitleChoices {
                         ForEach(["Off", "Library tracks", "Transcription"], id: \.self) { choice in
                             tvSidebarRow(choice, subtitle == choice ? "checkmark" : "circle", selected: subtitle == choice) {
@@ -331,15 +330,21 @@ struct HomeView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if !status.isEmpty { Text(status).foregroundStyle(.secondary).accessibilityIdentifier("refresh.status") }
+                if !catalog.persistenceWarning.isEmpty {
+                    Text(catalog.persistenceWarning).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("settings.warning")
+                    Button("Retry saving settings") { catalog.retrySettingsSave() }.accessibilityIdentifier("settings.retry")
+                }
                 if !catalog.error.isEmpty {
                     Text(catalog.error).accessibilityIdentifier("core.error")
-                    Button("Retry") { reload() }.accessibilityIdentifier("core.retry")
+                    Button("Retry") {
+                        if let item = failedOpen { open(item) } else { reload() }
+                    }.accessibilityIdentifier("core.retry")
                 }
                 if catalog.loading { ProgressView("Loading catalog…").accessibilityIdentifier("core.loading") }
                 if !path.isEmpty {
                     breadcrumbs
-                    if let item = path.last {
-                        detail(catalog.detail?.id == item.id ? catalog.detail! : item, width: width, compact: compact)
+                    if let item = catalog.detail, item.id == path.last?.id {
+                        detail(item, width: width, compact: compact)
                     }
                 } else if screen == "Home" {
                     heading("Home")
@@ -510,7 +515,7 @@ struct HomeView: View {
                      Text("Catalog").font(.headline)
                      HStack {
                           ForEach(catalog.capabilities?.sources ?? [], id: \.self) { source in
-                              selection(choiceLabel(source), selected: options.source == source) { options.source = source }
+                               selection(choiceLabel(source), selected: options.source == source) { options.source = source; saveSettings() }
                                   .accessibilityIdentifier("search.source.\(choiceLabel(source))")
                          }
                      }
@@ -524,20 +529,27 @@ struct HomeView: View {
                     Text("Keep at least one method selected.").font(.caption).foregroundStyle(.secondary)
                      if catalog.capabilities?.methods.contains("title_only") == true { selection("Title only", selected: options.titleOnly) {
                         options.titleOnly.toggle()
-                        if options.titleOnly {
+                         if options.titleOnly {
                              options.methods.remove("semantic")
                              if options.methods.isEmpty, let method = catalog.capabilities?.methods.first(where: { $0 != "semantic" && $0 != "title_only" }) { options.methods.insert(method) }
-                        }
+                         }
+                         saveSettings()
                      } }
                      ForEach(catalog.capabilities?.methods.filter { $0 != "title_only" } ?? [], id: \.self) { method in
-                         selection(choiceLabel(method), selected: options.methods.contains(method), disabled: (method == "semantic" && options.titleOnly) || (options.methods.contains(method) && options.methods.count == 1)) {
-                            if options.methods.contains(method) { options.methods.remove(method) } else { options.methods.insert(method) }
+                          selection(choiceLabel(method), selected: options.methods.contains(method), disabled: (method == "semantic" && options.titleOnly) || (options.methods.contains(method) && (options.methods.count == 1 || (["text", "fuzzy"].contains(method) && options.methods.intersection(["text", "fuzzy"]).count == 1)))) {
+                             if options.methods.contains(method) { options.methods.remove(method) } else { options.methods.insert(method) }
+                             saveSettings()
                          }.accessibilityIdentifier("search.method.\(choiceLabel(method))")
                     }
                      if let description = catalog.capabilities?.semanticDescription { Text(description).font(.caption).foregroundStyle(.secondary) }
                 }.padding(20).background(ScreenroomTheme.sidebar, in: RoundedRectangle(cornerRadius: 12))
             }
-            let results = catalog.results
+             let results = catalog.results
+             if !catalog.searchDegradation.isEmpty { Text(catalog.searchDegradation).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("search.degradation") }
+             if let effective = catalog.effectiveSearchMethods, !query.isEmpty, query == settled {
+                 Text("Effective methods: \([(effective.text, "Text"), (effective.fuzzy, "Fuzzy"), (effective.semantic, "Semantic")].filter { $0.0 }.map { $0.1 }.joined(separator: ", "))")
+                     .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("search.effectiveMethods")
+             }
               Text(query.trimmingCharacters(in: .whitespaces).isEmpty ? "Enter a title to search \(catalog.libraryTitle(library))." : query != settled ? "Searching titles…" : results.isEmpty ? "No matches in \(catalog.libraryTitle(library)). Try another search." : "\(results.count) \(results.count == 1 ? "result" : "results") in \(catalog.libraryTitle(library))")
                 .foregroundStyle(.secondary).accessibilityIdentifier("search.status")
             if !query.isEmpty && query == settled { grid(results, compact: compact) }
@@ -545,9 +557,10 @@ struct HomeView: View {
     }
 
     private var typeChoices: some View {
-        ForEach(catalog.capabilities?.types ?? [], id: \.self) { kind in
+        ForEach(catalog.capabilities?.types.map(searchType) ?? [], id: \.self) { kind in
             selection(choiceLabel(kind), selected: options.types.contains(kind), disabled: options.types.contains(kind) && options.types.count == 1) {
-                 if options.types.contains(kind) { options.types.remove(kind) } else { options.types.insert(kind) }
+                  if options.types.contains(kind) { options.types.remove(kind) } else { options.types.insert(kind) }
+                  saveSettings()
             }.accessibilityIdentifier("search.type.\(kind)")
         }
     }
