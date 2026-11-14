@@ -1,18 +1,22 @@
 # Backend development
 
-The catalog, user, and index worker use shared PostgreSQL repositories and typed offline provider adapters.
+The catalog, user, and index worker use shared PostgreSQL repositories.
+Managed Jellyfin connections supply real provider data; runtime fixture adapters and backend profiles are not supported.
 The [component outline](components.md) owns intended product scope and the public deployment contract.
-The [client API guide](client-api.md) owns the public client contract and local settings boundary.
+The [client API guide](client-api.md) owns the public client contract, separate operator capability, and local settings boundary.
+The [indexing architecture](indexing.md) owns the shared queue, retry/redrive, supported policies, incremental execution, and diagnostic semantics.
+Implemented source does not establish active runtime capabilities or authorize lifecycle changes.
 
 ## Transport boundary
 
 | Executable | Registered services | Business behavior |
 | --- | --- | --- |
 | `screenroom-catalog` | `screenroom.catalog.v1.BrowseService`, `screenroom.catalog.v1.CatalogService`, and `screenroom.catalog.v1.SearchService` | Persistent scoped catalog, search, artwork credits, and artwork HTTP transport. |
-| `screenroom-user` | `screenroom.user.v1.UserService` | GetCurrentUser selects an enabled local user through UUID metadata. |
+| `screenroom-user` | `screenroom.user.v1.UserService` | Local user reads and validated Jellyfin profile links through UUID metadata. |
 | `screenroom-playback-gateway` | None | Empty Tonic routes; the `screenroom.playback_gateway.v1` protobuf package defines no messages or RPCs. |
+| `screenroom-index-operator` | Separate local HTTP/JSON API | Managed Jellyfin discovery/save and canonical policies, diagnostics, history, redrive, and run controls; no frontend hosting. |
 
-Each server accepts HTTP/2 gRPC and HTTP/1 gRPC-Web through `tonic-web` on one listener.
+The catalog, user, and playback gateway accept HTTP/2 gRPC and HTTP/1 gRPC-Web through `tonic-web` on one listener.
 Envoy routes public catalog and user paths through one loopback edge. It does not expose operator or internal playback-state RPCs.
 The playback gateway retains empty routes. No service implements authentication, JWT verification, or playback.
 
@@ -21,7 +25,8 @@ Do not expose the local stack to an untrusted network.
 
 ## Persistent local instance
 
-Backend startup requires explicit approval, Docker Compose, Python 3, grpcurl, and the configured embedding endpoint.
+Backend startup requires explicit approval, Docker Compose, Python 3, grpcurl, and Buf for native/browser readiness checks.
+An embedding endpoint is optional; a zero-source installation and empty catalog are healthy.
 Startup builds the backend image unless `SCREENROOM_BACKEND_BUILD=0` selects a current local image.
 From the repository root:
 
@@ -33,24 +38,28 @@ bash scripts/backend.sh down
 ```
 
 These commands mutate local runtime state; they are not prose-validation commands.
-`up` initializes missing installation files, private Garage keys, and local users, then starts the persistent instance.
+`up` initializes missing installation files, private Garage keys, a credential volume, and a local user before service startup.
 Its create-only user initialization preserves operator names, disabled users, cleared links, and remapped links.
-The explicit manual user-init mode also supports updates; service startup itself does not create users.
-`wait` checks real catalog/user RPCs, document coverage, semantic search, artwork, and public/private path boundaries.
+The explicit user initializer supports ordinary local user updates, not provider-link imports; service startup itself does not create users.
+`wait` compares native/browser catalog information and user RPCs with persisted installation identity.
+Readiness does not require provider content, artwork, complete semantic coverage, or an embedding endpoint.
 HTTP 200 alone does not establish readiness. `status` checks the live instance identity against its descriptor.
 `down` preserves named volumes, Garage keys, and the instance UUID; it removes the readiness descriptor.
 Never delete volumes or regenerate missing keys as a routine restart procedure.
 
-The default project is `screenroom-e2e`; `SCREENROOM_BACKEND_PROJECT` also accepts `screenroom-e2e-<suffix>`.
-`SCREENROOM_BACKEND_PORT` defaults to `50051`. The only host listener binds `127.0.0.1` on that port.
+The default project is `screenroom-local`; `SCREENROOM_BACKEND_PROJECT` accepts an explicit `screenroom-<name>` project.
+`SCREENROOM_BACKEND_PROFILE` is retired and fails validation.
+`SCREENROOM_BACKEND_PORT` defaults to `50051`. The public edge binds `127.0.0.1` on that port.
 PostgreSQL 18 with pgvector, Garage, catalog, user, worker, and Envoy share this named instance.
-Private database, object-store, operator, and internal RPC ports have no host publication.
+Private database, object-store, and internal RPC ports have no host publication.
+The optional index operator has a separate loopback HTTP port.
 
 Runtime files live under `build/backend-runtime/<project>/`. Preserve `runtime.env` and `identity.json` with the associated volumes.
 The helper refuses implicit identity or key rotation when volumes already exist.
-`descriptor.json` contains the secret-free instance ID, public origin, client network, local user, model declaration, and readiness evidence.
+`descriptor.json` contains the secret-free instance ID, public origin, client network, local user selector, and native/browser readiness flags.
 The instance ID is not an authentication token.
-Default bootstrap users are Alice (`00000000-0000-0000-0000-000000000001`) and Bob (`00000000-0000-0000-0000-000000000002`).
+A new installation creates one random UUID named `Local user` and persists its selector in `local-user.json`.
+Create-once initialization preserves current users and links; it does not seed demo identities, catalog fixtures, or provider content.
 
 Standalone client suites attach to this instance; they never start an alternate fixture API.
 The root E2E runner owns startup and teardown unless `SCREENROOM_BACKEND_ATTACH=1` explicitly selects attachment.
@@ -58,39 +67,170 @@ Both endpoint aliases must match the descriptor origin: `SCREENROOM_API_ENDPOINT
 Linux joins the descriptor's client network and forwards bytes from loopback to `edge:50051`.
 Android uses same-port ADB reverse. Web uses ports `4173` and `4176` for development and production checks.
 
+### Local index operator
+
+The [index maintenance guide](index-maintenance.md) owns canonical poster repair, security, and Web opt-in.
+The [canonical API](indexing.md#canonical-operator-api) adds backend policy, queue diagnostics, progress, attempts, and terminal redrive routes.
+The operator supports managed connection discovery/save and canonical indexing; connection operations contact Jellyfin and write private credential files.
+The [Jellyfin guide](jellyfin.md) defines those operations, private ownership, and unsupported edit/rotation paths.
+The Web Maintenance screen supports managed setup through shared operator methods and guarded proxy routes.
+The listener serves no frontend files and requires no frontend build.
+The operator starts no worker and needs no embedding credentials or private object-store keys.
+Older maintenance HTTP routes and browser operation-journal recovery have no supported compatibility interface.
+
+The [lifecycle helper](../scripts/backend-lifecycle.py) requires an owned runtime with `runtime.env`, `identity.json`, `descriptor.json`, and `lifecycle.lock`.
+The descriptor must mark the matching instance ready.
+Startup also requires matching public instance identity, healthy owned PostgreSQL, and the restricted `operator_runtime` login role.
+The helper does not initialize these prerequisites.
+
+Prepare the backend image before launch, from the repository root:
+
+```sh
+docker build -f docker/backend/Dockerfile -t screenroom-backend:local .
+```
+
+The [backend Dockerfile](../docker/backend/Dockerfile) includes `screenroom-index-operator`.
+This build command does not start services.
+Launch requires explicit approval: operator startup applies forward-only database migrations before it opens the listener.
+With an approved ready local instance, use:
+
+```sh
+bash scripts/backend.sh operator-up
+bash scripts/backend.sh operator-status
+bash scripts/backend.sh operator-down
+```
+
+Preserve the instance's explicit `SCREENROOM_BACKEND_PROJECT` and `SCREENROOM_BACKEND_PORT` values for each command.
+The default operator origin is `http://127.0.0.1:50072`.
+`SCREENROOM_OPERATOR_PORT` selects an explicit nonconflicting port.
+If set, `SCREENROOM_OPERATOR_ORIGIN` must equal `http://127.0.0.1:<operator-port>` exactly.
+The helper rejects reserved client/public ports, including the retired profile port `50073`.
+
+`operator-up` uses `up -d --no-deps --no-build --pull never index-operator` with the base Compose file.
+It starts only the operator and waits for its database-backed health endpoint.
+`operator-status` checks public instance identity and operator health.
+`operator-down` stops only `index-operator`; it preserves the backend, worker, volumes, keys, and descriptor.
+Worker activation and provider work require separate explicit approval.
+These lifecycle commands do not opt the Web app into operator access or replay historical browser records.
+Web opt-in requires a separate restart with the [explicit attachment configuration](index-maintenance.md#explicit-local-attachment).
+Local jobs, worker execution, runtime identity, and provider activation retain their current boundaries.
+
 ### Database startup and migrations
 
-Every database-backed service and catalog/user initialization command constructs `ServiceDatabaseConfig` and calls `db::connect_service` before listeners, work, or readiness.
+Every database-backed service and the local user initializer construct `ServiceDatabaseConfig` and call `db::connect_service` before listeners, work, or readiness.
 The shared [database module](../crates/screenroom-backend/src/db.rs) applies ordered root [migrations](../migrations/) through SQLx's advisory lock.
 A short-lived DDL pool closes before the restricted runtime pool opens. Migration or runtime-connection failure prevents startup.
 `DATABASE_URL` selects runtime credentials. `SCREENROOM_MIGRATION_DATABASE_URL` optionally selects separate credentials for the same database target.
 Without that variable, startup uses `DATABASE_URL` for migrations too.
 Separate credentials restrict runtime queries, not process privileges: the process still holds the migration credential and DDL capability.
-The runtime NOLOGIN roles define identity-only user, catalog, and worker grants.
+The runtime NOLOGIN roles define restricted user, catalog, worker, and operator grants.
+Compose uses the separate `operator_runtime` login through `screenroom_operator`.
 The `screenroom-migrate` executable supports optional manual migration; no mandatory one-shot migration service precedes normal startup.
 Add forward-only migrations. Never edit applied migration files or add down/reset procedures.
+Applied migrations `001` through `019` remain immutable.
+Forward-only migrations `010` through `019` implement the shared queue, canonical policies, settlement, source admission, receipt resolutions, and deadline eligibility.
+Migration `010` moves jobs into `queue.jobs` and preserves job identities; it supplies no legacy `ingest.jobs` view.
+Migration `020` drops only the exclusive obsolete `ingest.maintenance_starts` table, without `CASCADE`.
+Migrations `021` and `022` add managed connections and restricted private read grants.
+The cutover preserves catalog, artwork, embeddings, users, links, installation identity, and canonical receipt provenance.
+Migration source does not establish the applied schema of any persistent instance.
+It supplies no legacy queue compatibility view or permission to reset persistent state.
 Use runtime `sqlx::query`, `query_as`, and `query_scalar`; avoid compiled query macros and offline query metadata.
 `migrate!` and `FromRow` derive remain supported.
 
 ### Durable ingest and identity
 
+The [shared queue](indexing.md#queue-and-domain-responsibilities) provides transport for every ingest, embedding, artwork, and maintenance path.
+The [canonical policy contract](indexing.md#policy-model) defines effective modes, selection strategies, retry defaults, budgets, and unsupported combinations.
+
 The catalog has installation scope, not user ownership or access grants.
-It has no user-owned search documents, backend preferences, provider-connection records, external identity system, or transactional outbox.
-Identity stores local users and operator-controlled links between stable source keys and Jellyfin user IDs.
-Private `screenroom.user.internal.v1.PlaybackStateService.GetContinueWatching` reads mapped typed mock state; catalog hydration applies the requested source/library scope.
+It has no user-owned search documents, backend preferences, external identity system, or transactional outbox.
+Private managed provider connections remain separate from public catalog models.
+Identity stores local users and validated links between stable source keys and Jellyfin user IDs.
+Public profile selection validates enabled sources and eligible profiles. No private unchecked SetLink/ClearLink service or initializer link import exists.
+Private `screenroom.user.internal.v1.PlaybackStateService.GetContinueWatching` reads mapped provider state; catalog hydration applies the requested source/library scope.
 Absent mappings return empty progress. Personal progress never enters search documents or vectors.
 
-PostgreSQL jobs retain leases, fences, checkpoints, page data, and follow-up work atomically.
-Each source permits one active ingest run. A run retains immutable policy and selection snapshots beside the current policy.
+PostgreSQL transactions couple domain progress, checkpoints, page data, and follow-up enqueue with shared-queue lease and fence checks.
+Each source permits one active ingest run; canonical source concurrency accepts only one.
+A run retains immutable policy and selection snapshots beside the current policy.
+Runs that require embeddings pin a model identity; follow-ups also bind input hashes and compatible worker capabilities.
 This design supplies no policy-history service, broker, or public index API.
-Jellyfin removal reconciliation requires a complete, untainted traversal of selected libraries.
-Partial results and budget stops do not authorize deletion. Invalid checkpoint data fails with safe errors.
+Live Jellyfin full, reconcile, and incremental traversal remains non-authoritative and does not reconcile absence through deletion or membership removal.
+Generic ingest completion grants no absence authority and does not automatically disable the policy.
+Partial results and budget stops never authorize deletion.
+Mutable execution accepts only validated per-work budgets and canonical admission.
+Historical lifetime checkpoint decoding remains read-only; it does not restore obsolete execution or mutation APIs.
+Invalid checkpoint data fails with safe errors.
 Resume counters distinguish a paused segment from cumulative totals.
+Canonical lifetime request reservations and record observations never reset on resume or redrive.
+Record budgets include unchanged touches; `run.items` counts only metadata writes.
+Deadline expiry fails the run and cancels active jobs; expired work cannot redrive.
+Terminal redrive retains attempts, receipts, coverage provenance, and consumed budgets; it differs from paused-run resume and ambiguous-start replay.
 
-TMDB supports seven configurable bounded feeds: movie popular, upcoming, now playing, and trending; TV popular, on the air, and trending.
-Feed membership and ordinal position remain separate from title existence.
-A durable typed frontier expands series into seasons and episodes; linked IDs support enrichment.
-The adapters do not crawl live providers or promise complete external catalogs.
+### Private source provisioning
+
+The [managed connection API](jellyfin.md#connection-api) provisions private connection references and canonical source/profile bindings.
+User and worker resolve current connections from PostgreSQL without manual provider JSON, enrollment commands, or service restart.
+No manual catalog JSON initializer, file-backed `ProviderRegistry`, or private catalog `IngestionService` forms part of source provisioning.
+The canonical operator HTTP API owns admission and run controls; internal progress reads remain separate.
+The [binding contract](indexing.md#source-provisioning-and-locator-binding) retains source snapshots, capability checks, and fail-closed admission.
+The worker CLI accepts only `serve`, `drain`, and `activate-model`; old fixture, sample, index, and run-control commands are not interfaces.
+Canonical configure/start and run controls use the operator API.
+Provider acquisition and worker activation require explicit approval for the exact target.
+
+`SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY` selects `/run/screenroom/credentials` in Compose.
+The persistent credential volume requires directory mode `0700`, generated UUID files mode `0600`, and effective UID `10001`.
+Operator mounts it read/write; user and worker mount it read-only; catalog has no mount.
+Private database references never expose keys or locators to ordinary clients. This is not encryption at rest.
+The [credential contract](jellyfin.md#credential-ownership) defines no-follow file checks, ownership, synchronization, and recovery limits.
+
+### Watched snapshots
+
+The provider-neutral [user-state adapter contract](../crates/screenroom-catalog-adapter/src/user_state.rs) defines `UserStateAdapter`, `UserStateScope`, and complete `WatchedSnapshot` generations.
+Watched observations belong to personal state, not catalog metadata, search documents, vectors, or resume progress.
+The user service alone bridges current Jellyfin identity links into this generic acquisition contract.
+The catalog overlay reads PostgreSQL in batches for the selected local user and chosen source-item rows; it never merges arbitrary provider matches.
+The separate Continue Watching path can still request provider state.
+
+The [watched repository](../crates/screenroom-backend/src/watched.rs) atomically replaces each complete user/source generation and its observations.
+It retains acquisition `fetched_at` and the local user's `updated_at` revision as a publication fence.
+Link changes invalidate that revision, even after a remap back to the original profile.
+Older acquisitions cannot replace newer generations for the same revision.
+Snapshots expire 900 seconds after acquisition starts, not after a catalog read or failed refresh.
+Failures preserve the previous generation and timestamp until expiry; absent or expired observations mean unknown, never unwatched.
+Unsupported adapters and absent or disabled profiles invalidate the applicable generation.
+Disabled local users or sources cannot expose observations.
+
+The [user service scheduler](../crates/screenroom-user/src/watched.rs) resolves managed connections and current personal links dynamically.
+It uses backend-private credentials and checks actual server identity; clients receive neither credentials nor connection locators.
+Its fixed bounds are:
+
+| Bound | Value |
+| --- | --- |
+| First sweep | Immediately after startup. |
+| Sweep interval | 300 seconds; missed ticks do not accumulate. |
+| Concurrent acquisitions | Two. |
+| Bindings per sweep | At most 64, with a rotating keyset cursor. |
+| Sweep wall-clock budget | 240 seconds. |
+| Acquisition timeout per binding | 180 seconds. |
+
+The [Jellyfin adapter](../crates/screenroom-catalog-adapter/src/jellyfin/watched.rs) requests explicit `Played` values for movies and episodes across selected enabled libraries.
+It leaves series and seasons unknown and never derives watched state from resume position or aggregate container state.
+Acquisition requires two identical complete passes and an enabled-profile check before and after both passes.
+Duplicate IDs, partial pages, total-count changes, and differences between passes reject the generation.
+These checks detect observed churn; they do not guarantee an immutable provider snapshot.
+Bounds permit 32 libraries, 50,000 observations total, and a 50,000-item limit per library.
+Both passes share a 1,200-page request budget, with at most 100 items per page.
+Timeouts and capacity failures retain the previous timestamp; they do not publish partial generations.
+
+Forward-only [migration `202611110009_watched_state.sql`](../migrations/202611110009_watched_state.sql) adds the personal snapshot tables and restricted catalog/user grants.
+Migrations `202611100001` through `202611100008` remain immutable.
+Service startup applies migrations through the shared startup path described above.
+Code and documentation changes do not authorize migration application, service restart, provider acquisition, or live activation.
+Those operations require separate explicit approval for the target instance and provider.
+There are no watched controls or provider writes.
+The [client watched contract](client-api.md#watched-state) owns public values, web presentation, and read freshness.
 
 ### Search
 
@@ -117,6 +257,8 @@ Garage stores private path-style S3 objects. Catalog uses a read key; worker use
 `storage::object_key` uses `artwork/v1/sources/{source_uuid}/sha256/{first_two_hex}/{sha256}/original`.
 Clients receive no S3 credentials, presigned URLs, redirects, or direct provider image URLs.
 The worker validates original/native bytes and SHA manifests. Native artwork is mandatory for publication.
+
+Catalog item hydration resolves episode cards to the season poster, then the series poster. Both ancestors use the target's selected source and eligible source/provider/library scope. Kind filters select targets, not ancestors. Only complete published artwork of kind `poster` qualifies; episode artwork is never a fallback. Without an eligible ancestor poster, the item has no artwork. Season `ListChildren` keeps own artwork for actual episode children; other item kinds retain their own primary-artwork ranking. The resolver uses read-only batches, with no metadata changes, reindex, or provider requests.
 An atomic page commit allocates a monotonic revision and enqueues variant work.
 The publication pointer changes only after the full required set passes upload verification and reaches database-ready state.
 The previous complete image remains visible while its replacement lacks required variants; published revision URLs remain immutable.
@@ -133,7 +275,7 @@ Artwork visibility follows the shared installation, not a per-user ACL.
 
 The service `src/main.rs` files own environment defaults; Compose supplies private container addresses.
 Standalone defaults are catalog `127.0.0.1:50052`, user `127.0.0.1:50053`, and empty playback gateway `127.0.0.1:50054`.
-Catalog's private operator default is `127.0.0.1:50062`; user's internal default is `127.0.0.1:50063`.
+User's internal default is `127.0.0.1:50063`. Catalog exposes no private ingestion RPC listener.
 
 Each listen variable accepts a socket address, not an HTTP URL.
 Startup emits a JSON log with the service name and actual listener address.
@@ -179,7 +321,8 @@ Playback gateway routes remain empty.
 The `telemetry` feature in [screenroom-observability](../crates/screenroom-observability/src/telemetry.rs) provides:
 
 - `TelemetryConfig::from_env()` for environment configuration.
-- `Telemetry::init(service_name, config)` for JSON logs, the trace provider, and W3C Trace Context propagation.
+- `Telemetry::init(service_name, config)` for JSON logs, trace and meter providers, and W3C Trace Context propagation.
+- `Telemetry::meter()` for bounded queue and worker instruments; `force_flush()` and `shutdown()` cover both providers.
 - `rpc_layer()` for the community `tonic-tracing-opentelemetry` server middleware, re-exported as `OtelGrpcLayer`.
 - `shutdown_signal()` for process shutdown signals and `Telemetry::shutdown()` for provider shutdown.
 
@@ -192,17 +335,28 @@ The middleware is not an official OpenTelemetry component; the SDK and OTLP expo
 | --- | --- |
 | `RUST_LOG` | Tracing filter; defaults to `info`. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Explicit HTTP(S) traces endpoint, including its path; takes precedence over the general endpoint. |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | HTTP(S) collector base endpoint; setup appends `/v1/traces`. |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Explicit HTTP(S) metrics endpoint, including its path; takes precedence over the general endpoint. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | HTTP(S) collector base endpoint; setup appends `/v1/traces` and `/v1/metrics` for each signal without an explicit override. |
 
 Even with `RUST_LOG=trace`, shared setup suppresses DEBUG and TRACE output for targets with these prefixes:
 `opentelemetry-otlp`, `opentelemetry_otlp`, `opentelemetry-http`, `opentelemetry_http`, `reqwest`, `hyper`, and `h2`.
 This INFO-level cap limits transport diagnostics that can expose endpoint paths, query tokens, headers, or response bodies.
 The cap does not assert that all other logs exclude sensitive data.
-Setup also excludes the unsafe `HttpTraceClient.PartialSuccess` collector-response event at all levels on exact `opentelemetry-otlp`/`opentelemetry_otlp` targets: locked-dependency protection, not general redaction.
+Setup also excludes unsafe `HttpTraceClient.PartialSuccess` and `HttpMetricsClient.PartialSuccess` collector-response events on exact `opentelemetry-otlp`/`opentelemetry_otlp` targets.
+This locked-dependency protection does not establish general redaction.
 
-With both endpoint variables unset, startup needs no collector and exports no OTLP traces.
-An explicit endpoint enables the official OTLP HTTP/protobuf trace exporter, not OTLP gRPC.
-This setup does not export logs or metrics through OTLP.
+With all endpoint variables unset, startup needs no collector and exports neither OTLP traces nor OTLP metrics.
+An explicit endpoint enables the corresponding official OTLP HTTP/protobuf exporter, not OTLP gRPC.
+Metrics use a periodic exporter; setup does not export logs through OTLP.
+The [metric definitions](../crates/screenroom-observability/src/metrics.rs) accept bounded enum labels, not UUIDs, arbitrary source keys, locators, or raw errors.
+Queue counts represent observations, not worker health; reserved-request counters do not represent exact wire traffic.
+The worker attaches per-operation transport observers to provider JSON, capabilities, delta, artwork, embeddings, and storage PUT/HEAD/verification GET.
+Byte counters report consumed body chunks by request kind and direction, including partial failure and cancellation.
+They do not measure wire bytes or prove server acknowledgement.
+Transport HTTP success does not establish decode, indexing, or publication success.
+The [transport contract](indexing.md#progress-completion-and-metrics) distinguishes resource observations from durable progress and budgets.
+Exporter configuration does not establish collector delivery or an exporter-to-collector verification guarantee.
+The observability crate retains no default features; telemetry exporters remain optional dependencies.
 With approved database configuration present, this example uses a local collector that accepts OTLP HTTP/protobuf.
 It also declares the required catalog origin for clients that use the default direct listener:
 
@@ -220,16 +374,8 @@ Those fields still require a privacy review before production use; this setup as
 
 ## Backend verification
 
-From the repository root:
-
-```sh
-cargo fmt --all -- --check
-cargo test --workspace --all-features --locked
-```
-
-Database integration tests require explicit disposable PostgreSQL targets; inspect each test's environment and ignore gate before execution.
-Never point destructive test setup at the persistent development database.
-Ignored live embedding tests require separate approval for their exact endpoint; ordinary workspace tests do not authorize external requests.
+The [testing guide](testing.md) separates isolated fault tests, disposable PostgreSQL checks, and real-provider acceptance.
+No broad test command grants database, provider, Docker lifecycle, or GUI authority.
 The [backend contract helper](../scripts/backend-contract.py) checks an approved live local instance through real RPC and artwork paths.
 Its use does not authorize backend startup, teardown, provider imports, or volume removal.
 
@@ -246,5 +392,6 @@ buf generate
 
 Catalog owns BrowseService, CatalogService, SearchService, and catalog messages; user owns UserService and local user messages.
 Common owns the shared SearchTypes and SearchMethods records.
-Public client-core bindings contain only catalog/common/user contracts, not operator or internal RPC bindings or backend database dependencies.
+The ordinary client exposes only catalog/common/user RPC contracts, not private operator/internal RPC bindings or backend database dependencies.
+The separate [operator capability](client-api.md#operator-capability) uses typed HTTP/JSON through explicit `OperatorClient` construction.
 The contract supplies no old PreferencesService or mock-profile aliases.

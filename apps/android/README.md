@@ -11,30 +11,46 @@ Every artwork record, including provider logos, comes from the server. All bytes
 Failed images show placeholders. APKs contain no catalog JSON, media, portraits, or provider branding; app icons and native glyphs remain local.
 Compose displays licensed posters, portraits, and character stills where available; other cards use abstract placeholders or initials.
 Cast and crew cards preserve snapshot roles. Character stills carry explicit labels.
-The global Data & artwork credits disclosure uses bounded `GetCatalogInfo` notices and branding plus complete paginated `ListArtwork` credits.
-The retrieval timestamp comes from eligible persisted provider snapshots, never the request clock.
-Credits include unvisited portraits, each artwork creator/license/source/download, server logos, item provenance notes, and title/metadata rights.
+There is no global attribution or technical-credit footer, footer-only request, or artwork inventory request.
+Backend CatalogInfo, artwork credits, provenance, and rights APIs remain available; no provider-credit UI is required.
+Portrait cards and item details omit per-item rights, provenance, artwork license, creator, crop, and legal panels.
+Backend and core records retain those fields. Per-item source identifiers, external links, ratings, snapshot disclosures, provider status, and people labels remain available.
 Compose does not supply fixture-specific identity, legal, or provider notices.
+
+Posters show a top-right 26 dp dark-circle checkmark with a light stroke only when watched state explicitly equals `true`.
+Their accessible description includes `Watched`. False and unknown values show no checkmark; progress bars remain independent.
+Series and season completion never follows from episode progress.
+Episode cards show the series name, a small muted number such as `S05:E09`, and the episode title below.
+An explicit season grid uses `E09` only when the episode's parent matches that season.
+Unknown episode numbers stay absent. The core supplies episode artwork and the season-grid artwork exception.
+Artwork reads share URLs and limit active work to eight requests.
+Cancellation detaches individual consumers and preserves reads that other consumers still need.
 
 The sidebar expands within the layout. Mobile uses a fixed top toggle with horizontally scrollable navigation links.
 TV uses a 72 dp side rail that expands to 19% of the configured dp screen width, bounded to 180–260 dp.
 Its 48 dp navigation rows keep destination selection separate from remote-focus outlines.
-Libraries can scroll within the sidebar while Subtitles and Refresh remain pinned below navigation.
-Subtitles starts closed and shows its current value; Select opens a remote-focusable three-choice popup.
+Libraries can scroll within the sidebar while Refresh remains below navigation. No subtitle controls exist.
 Left from the Home entry control enters the sidebar. Right returns to the last focused content control and collapses the sidebar without activating a destination.
 The sidebar returns to its top whenever it expands or collapses.
 Library grids lead through shows, seasons, episodes, and title details. Breadcrumbs and Android Back retain navigation context.
+Library, children, and search grids request 100 items initially, then expose Load more and loaded counts.
+Continuation pages preserve API order and suppress duplicate stable IDs. Page errors preserve loaded cards and the retry token.
+Repeated-token guards, bounded traversal, cancellation, and request identity checks protect continuation state.
+The Jellyfin profile page lists sources, eligible profiles, and the current server link for the selected local UUID.
+Save and Unlink issue one mutation, invalidate reads, and reread the link. Ambiguous failures do not trigger automatic mutation retries.
+Retry reads server state only; unknown link state disables mutation controls. These controls provide no sign-in or operator interface.
+Continue Watching failures show a generic explanation while other Home rows remain usable.
 Search uses the current library and a 350 ms debounce.
 The initially closed Settings panel contains every catalog, type, and method filter.
 Search capabilities supply the available sources, types, methods, maximum query length, and semantic description.
 Known protocol fields receive UI labels; Compose does not add choices absent from those capabilities.
-Title details preserve server rating provider/scale, provider identities/statuses/valid links, runtime notes, metadata dates, and rights.
+Title details preserve server rating provider/scale, provider identities/statuses/valid links, runtime notes, and metadata snapshot disclosures.
 Unknown vote counts retain numeric scores; explicit zero counts show Unrated. Missing ratings remain distinct from missing metadata dates.
 Abstract poster placeholders use server colors, with neutral colors only for missing or invalid palette values.
 Compact text breadcrumbs retain search returns within one row.
 Detail headers use two columns at 640 dp of available content width; narrower screens stack the 160 × 240 dp poster above the summary.
 Wider mobile layouts use 200 × 300 dp posters. TV uses 140 × 210 dp posters, or 280 × 420 pixels on the 1080p profile.
-Cast, Crew, Title rights, and credits follow the header at full content width.
+Cast and Crew follow the header at full content width.
 People grids wrap across rows with square images and complete names, roles, and character-still labels.
 TV uses 90 dp image squares, equivalent to 180 pixels on its 1080p profile.
 Keyboard and remote focus remains visible. Touch input does not add keyboard-focus outlines to buttons.
@@ -45,7 +61,9 @@ At least one type and one method remain selected.
 Each immutable search history entry retains its query, catalog, types, and methods across details and Android Back.
 Fresh searches reset query, catalog, and methods. Type preferences persist in local settings.
 
-Subtitles and search types use validated version-1 SharedPreferences JSON with synchronous `commit` and explicit failure reporting.
+Search settings use validated version-1 SharedPreferences JSON with synchronous `commit` and explicit failure reporting.
+Old settings files ignore the obsolete subtitle field. The shared core normalizes saved `tmdb` to `all` and preserves unrelated valid settings.
+Library IDs are opaque; literal `movies` or `tv` values imply no media type or navigation behavior.
 Refresh invalidates core reads and fetches them again.
 The refresh status reports actual catalog read success or failure, not a local counter.
 There is no Welcome/logout flow, authentication, synchronization, transcription, or playback.
@@ -78,6 +96,7 @@ JNA 5.17.0 is packaged as an AAR.
 
 Debug apps default to `http://127.0.0.1:50051`. Launch intent string extras `SCREENROOM_API_ENDPOINT` and
 `SCREENROOM_USER_ID` override the endpoint and local user UUID selector. The selector is not authentication.
+The selector defaults to empty. Supply the configured installation UUID; no demo-user fallback exists. Provider setup belongs to the Web app, not a native credential form.
 `SCREENROOM_E2E_SETTINGS_NAMESPACE` selects a local preference namespace, not a backend user.
 Android validates the endpoint before core construction because native sockets bypass Android network security configuration.
 Release builds require HTTPS. Their default HTTP endpoint displays a configuration error and never creates a core client.
@@ -95,7 +114,7 @@ From the repository root:
 export SCREENROOM_BACKEND_ATTACH=1
 export SCREENROOM_API_ENDPOINT=http://127.0.0.1:50051
 export SCREENROOM_E2E_API_ENDPOINT="$SCREENROOM_API_ENDPOINT"
-export SCREENROOM_USER_ID=00000000-0000-0000-0000-000000000001
+export SCREENROOM_USER_ID='<enabled local user UUID from this installation>'
 export SCREENROOM_BACKEND_DESCRIPTOR="$PWD/build/backend-runtime/screenroom-e2e/descriptor.json"
 bash apps/android/scripts/e2e.sh          # both profiles
 bash apps/android/scripts/e2e.sh mobile   # mobile only
@@ -113,9 +132,9 @@ The root runner selects its own category defaults; screenshot exports use `happy
 
 | Category | Coverage | Screenshots |
 | --- | --- | --- |
-| `happy-path` | Real Home, default Off sidebar, Movies, default All-catalog Bunny search, and Big Buck Bunny details from Movies; TV remote focus, data/artwork readiness, and layout geometry | Five per profile |
+| `happy-path` | Real Home, sidebar, discovered library, title search and discovered movie details; TV center activation and detail geometry | Five per profile |
 | `retry` | Actual closed-loopback RPC error, real Retry while unavailable, then a real Activity relaunch with the configured healthy endpoint and Home/artwork recovery | None |
-| `regression` | Hierarchy, ratings, source/method/type guards, history, subtitle choices, real refresh, absent fake auth, core pagination/preferences contracts, endpoint rejection, and CatalogInfo/logo PNG decoding | None |
+| `regression` | Source-driven core pagination, same-origin artwork and native decoding, search-type persistence, real refresh and deadline/save-failure recovery | None |
 | `all` | Each category once, with separate local settings namespaces | Only the happy-path set |
 
 Retry does not stop or restart the shared backend. It does not prove in-place recovery after a live server restart.
@@ -194,22 +213,9 @@ Gradle retains `apps/android/.gradle`, module `build/` directories, and `$GRADLE
 AVDs retain their data and snapshots under `ANDROID_AVD_HOME`.
 
 Each test launches the real `MainActivity` through an intent-aware `AndroidComposeTestRule`.
-Shared assertions cover all Home rows, sidebar controls, TV-show hierarchy, episode details, breadcrumbs, scoped search, and search return state.
-They also cover inline sidebar expansion, title-only constraints, the last-type and last-method guards, clear query, no matches, absence of mock authentication controls, and completed server refreshes.
-The TV profile additionally checks D-pad sidebar entry and focus return, persistent Home selection, subtitle choice activation and current values, visible Refresh activation, and absence of mock authentication controls.
-It also checks the sidebar width fraction, D-pad card traversal, automatic horizontal scroll, center activation, and Android Back.
+Shared assertions discover libraries and a movie with published artwork through the public core. Real-data journeys fail with an explicit prerequisite message when none exists; they do not seed a catalog or assume titles, library IDs, counts, notices, or branding. Hierarchy regression also requires an indexed series with a season and episode. Unit tests independently cover episode/season poster fallback, nullable watched state, profile-generation isolation, pagination/cancellation and presentation boundaries.
 Only the happy-path test writes the five showcase flows with `UiAutomation`.
-The regression test retains the unrelated navigation, filter, preference, and capture-state assertions, but writes no PNGs.
-Each capture follows actual data/artwork readiness, assertions, Compose idle, and accessibility idle.
-The flows show Home, the expanded sidebar, the Movies grid, populated All libraries search, and movie details without playback.
-Search uses the query `Bunny` and verifies one result, Big Buck Bunny, on both profiles.
-The test transfers focus from the query to Settings and dismisses the software keyboard.
-Mobile then returns to touch mode. TV retains visible Settings focus.
-The test checks keyboard absence, query, count, and result visibility both before and after capture.
-Every capture checks top scroll positions. Details originate from Movies, not Search, with metadata information closed.
-Detail geometry assertions cover the breakpoint, poster aspect ratio, breadcrumb height, and full-width Cast placement below the header.
-The TV search capture shows the result count and the upper portion of the result poster within the viewport.
-Both profiles check nested search histories, distinct query and method restoration, Android Back, and Search results returns.
+The regression test writes no PNGs. Captures follow Compose and accessibility idle; they use the discovered library and movie title, not a fixed result count. Detail assertions retain poster aspect ratio, responsive placement and absent playback. Device E2E execution is separate from local unit and instrumentation compilation checks and requires explicit device authority.
 
 The script exports the PNG from the debug app's private test output through serial-specific `adb exec-out run-as`.
 Outputs relative to `apps/android`:

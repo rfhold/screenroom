@@ -4,16 +4,18 @@ The iOS, iPadOS, macOS, and tvOS apps share native SwiftUI views and an isolated
 `Sources/Home/Catalog.swift` adapts Rust UniFFI domain records for presentation.
 The Rust client core owns Browse, Catalog, Search, User, and artwork requests to the
 [persistent local backend](../../docs/client-api.md). Home rows, library membership, hierarchy, credits,
-rights, and search results come from that API; all paginated reads follow continuation tokens.
+and search results come from that API. Item grids show the first page, with up to 100 items, then offer Load more.
+Continuation errors retain current items and the retry token. Appends preserve API order and deduplicate stable IDs.
 Preferences use version-1 Foundation atomic JSON in Application Support, not a server preference service.
 Legacy UserDefaults migration runs only when no settings file exists; persistence errors retain choices and expose a save-retry action.
-The Data & artwork credits disclosure reads bounded `CatalogInfo` notices and branding through the core.
-It enumerates complete paginated `ListArtwork` credits on demand, independently of visited Home rows, without eager global image downloads.
-Server notices retain their order, sections, text, and links. Server provenance notes appear without title-specific branches.
-All artwork bytes, including provider logos, load through the core with explicit loading and failure states.
+There is no global attribution or technical-credit footer, footer-only request, or artwork inventory request.
+Backend CatalogInfo, artwork credits, provenance, and rights APIs remain available; no provider-credit UI is required.
+Item details and people omit per-item rights, provenance, artwork creators, licenses, and crop notices.
+All visible artwork bytes load through the core with explicit loading and failure states.
+An eight-request FIFO queue shares concurrent URL requests and retains a bounded byte cache. Cancellation releases queued or active work.
 The app contains no bundled catalog JSON, media, portraits, or provider branding. Native app icons and navigation glyphs remain local.
-There is no playback,
-authentication, connected media provider, or synchronization.
+There is no playback, authentication, or direct native media-provider connection.
+Server-saved Jellyfin profile mappings select progress snapshots for the local user selector; they do not establish sign-in.
 
 ## Core and development endpoint
 
@@ -32,6 +34,7 @@ For manual runs, use an approved persistent instance from the [backend guide](..
 The app defaults to `http://127.0.0.1:50051`. Override it with `SCREENROOM_API_ENDPOINT`
 or the launch arguments `--SCREENROOM_API_ENDPOINT http://127.0.0.1:<port>`.
 `SCREENROOM_USER_ID` (or the matching launch argument) selects an enabled local UUID; it is not authentication.
+The selector defaults to empty. Use the UUID from the configured installation; no demo-user fallback exists. Web setup owns provider credentials and initial connection configuration. Native clients consume the public core only.
 `SCREENROOM_E2E_SETTINGS_NAMESPACE` isolates local settings files, not backend users.
 The core uses a five-second request timeout. Before core construction, Swift validates the endpoint:
 Debug permits HTTP only for localhost, 127.0.0.1, and ::1; Release requires HTTPS.
@@ -46,18 +49,22 @@ without launching the Mac GUI.
 Home presents server-defined horizontal poster rows. The persistent sidebar expands in the layout;
 on narrow windows and phones it becomes an inline top rail and expandable panel.
 Libraries contain movies and series; series open seasons, then episodes.
-Detail pages show server artwork, cast/crew roles and portraits, title rights, provider references, and rating snapshots.
+Detail pages show server artwork, cast/crew roles and portraits, provider references, and rating snapshots.
 Provider identity, status, links, rating scale, vote counts, palette, and metadata dates come from server records.
 Missing vote counts remain distinct from zero votes. Missing colors use a neutral placeholder palette.
 The detail header uses two columns at 640 logical points of available content width.
 Narrow layouts stack a 160×240 poster above the summary; tablet and desktop posters use 200×300, and TV posters use 240×360.
-The provider row precedes the synopsis. Cast, Crew, and Title rights span the content width below the header.
+The provider row precedes the synopsis. Cast and Crew span the content width below the header.
 Adaptive people grids preserve full names, roles, initials, and character-still labels.
-Global Data & artwork credits
-include the exact TMDB notice and approved logo, every artwork author/license/source,
-crop information, and edition/jurisdiction-specific film rights. Sprite Fright keeps its official
-2021 year separately from TMDB's 2024 date. Back and breadcrumb buttons
-return to the originating library, home, or search context.
+Episode cards show the series name and muted `S05:E09`, with the episode title below.
+Explicit season children show `E09` instead. Missing numbering context uses Episode without invented numbers.
+An explicit true watched state adds a poster check; playback progress remains separate.
+Back and breadcrumb buttons return to the originating library, home, or search context.
+
+The Jellyfin profile destination lists server-provided sources and profiles, the current mapping, Save, and Unlink.
+After one write, the app invalidates reads and checks server state. Retry only reloads that state; it never repeats an ambiguous write.
+Unavailable linked profiles remain distinct from an unlinked selector. Confirmed or reconciled changes refresh Home reads.
+Continue Watching errors show a sanitized row message and Retry; other rows remain available.
 
 Search uses stable server library IDs and titles and waits 350 ms after query edits. Local settings supply selected types.
 Search capabilities supply available sources, types, methods, query length, and the semantic description.
@@ -74,14 +81,14 @@ Selected item types persist in local settings. Detail breadcrumbs and Back prese
 query, catalog filter, item types, methods, title-only state, and library scope instead.
 Home uses All libraries, so search from Home covers every library. Search from a library retains
 that library's scope, and its Back button restores the prior hierarchy. Other search state remains in memory.
-Subtitles save Off, Library tracks, or Transcription locally; they do not enable playback.
-Refresh invalidates core reads and reloads active catalog, search, provenance, and artwork tasks.
+No subtitle preference or subtitle controls exist. Old settings files ignore the obsolete field.
+The shared core normalizes a saved `tmdb` provider preference to `all` and preserves unrelated valid settings.
+Library IDs are opaque and imply no icon or media type, even for literal `movies` or `tv` values.
+Refresh invalidates core reads and reloads active catalog, search, and artwork tasks.
 The status reports success or failure only after the active catalog/search request completes.
 The app has no Log out, Welcome, or Continue authentication flow.
 On tvOS, sidebar destinations use uniform 56-point rows with separate selected and focused
-appearances. Subtitles starts as a closed disclosure with its current value.
-A choice of Off, Library tracks, or Transcription closes the disclosure. Subtitles and Refresh
-remain in a footer while library navigation can scroll. Expansion pushes the content.
+appearances. Refresh remains below the library navigation, which can scroll. Expansion pushes the content.
 
 ## E2E tests
 
@@ -95,8 +102,8 @@ Regression tests request one-item pages
 with `SCREENROOM_API_PAGE_SIZE=1` to exercise continuation handling. Startup, server output,
 readiness, and cleanup logs live in the run directory.
 The regression and all categories also execute headless catalog-state and endpoint-policy regressions before platform tests. They cover delayed/failed
-detail transitions, nullable vote counts, variant provider/scale/palette/capability records, and Library/Search-first provenance with one-item API pages.
-The headless tests also retrieve the server logo through the actual core and verify PNG bytes with native image decode.
+detail transitions, nullable vote counts, variant provider/scale/palette/capability records, and one-item API pages.
+The real-source headless checks traverse discovered libraries and decode published artwork natively when present. Empty catalogs require no branding or notices. `SCREENROOM_STATE_LOCAL_TESTS_ONLY=1` runs the isolated state/persistence checks without server requests; it does not claim real-source integration coverage.
 The headless endpoint-policy check requires no server or GUI.
 Run these commands from the repository root:
 
@@ -122,8 +129,8 @@ Unknown or empty categories fail before server startup, preparation, or builds.
 
 | Category | Tests | Successful screenshots |
 | --- | --- | --- |
-| `happy-path` | `testHappyPathShowcase`: one app launch, five canonical flows, default preferences and 100-item pages. | Five per profile. |
-| `retry` | `testCoreUnavailableAndRetry`: unavailable endpoint, failed Retry without fallback, then healthy-endpoint app relaunch and core artwork recovery. | None. |
+| `happy-path` | `testHappyPathShowcase`: five flows using a discovered library/item and one-item pages. Requires indexed real content. | Five per profile. |
+| `retry` | `testCoreUnavailableAndRetry`: unavailable endpoint, failed Retry without fallback, then healthy-endpoint app relaunch. | None. |
 | `regression` | `testHomeCatalogAndNavigation`, `testFreshSearchAndHomeScope`, `testSearchPaginationAndPreferencesRoundTrip`; tvOS also runs `testSidebarRemoteControls`. Includes headless catalog-state and endpoint-policy checks. | None. |
 | `all` | Every category, without duplicate success attachments. | Five per profile. |
 
@@ -160,10 +167,7 @@ GNU timeout limits core preparation to 1200 seconds, each build/test command to 
 generation and export to 60 seconds, and simulator discovery to 30 seconds.
 Each deadline permits ten seconds before a forced stop.
 
-`E2ETests/HomeE2ETests.swift` checks home headings, the first poster, and the sidebar toggle,
-then exercises library hierarchy, details without playback, breadcrumbs, search options,
-actual refresh status and the absence of unsupported authentication controls.
-Simulator captures wait for sidebar-control readiness and check visible glyph pixels, not accessibility visibility alone.
+`E2ETests/HomeE2ETests.swift` checks Home, sidebar geometry, discovered library/item navigation, details without playback, breadcrumbs and title search without fixed counts. Real-data journeys fail explicitly if their library/item prerequisites are absent. Hierarchy regression also requires an indexed series with a season and episode. Isolated state tests retain cancellation, pagination, nullable ratings/watched state, profile-generation guards and context replacement coverage.
 Sidebar and breadcrumb controls use explicit symbols and bounded focus backgrounds without inherited glass rendering.
 On macOS, the test checks accessibility values when a static-text label is empty.
 The happy-path test captures exactly one successful attachment per showcase flow after its UI assertions:
@@ -171,29 +175,23 @@ The happy-path test captures exactly one successful attachment per showcase flow
 | Attachment | State |
 | --- | --- |
 | `home-success` | Home with the first catalog row. |
-| `sidebar-success` | Expanded sidebar with library choices; tvOS shows the closed Subtitles disclosure and footer actions. Other wider layouts show subtitle choices. |
-| `library-success` | Movies grid with the sidebar collapsed. |
-| `search-success` | All libraries, `Bunny` query, default Movies and Shows, All catalogs, Settings closed, and no keyboard. |
-| `detail-success` | Big Buck Bunny detail from Movies, collapsed sidebar, top position, info closed, and no playback controls. |
+| `sidebar-success` | Expanded sidebar with library choices and Refresh, without subtitle controls or attribution footers. |
+| `library-success` | Discovered library with the sidebar collapsed. |
+| `search-success` | Title search for the discovered item within that library. |
+| `detail-success` | Discovered item details without playback controls. |
 
 The iPhone and iPad tests submit Return to dismiss the keyboard before the search capture and assert its absence.
 These captures alone do not establish a successful suite.
 macOS captures only the app window; simulators capture the app screen.
-Tests use the real app, native Rust core, and persistent backend with offline adapters, not replacement screens or bundled catalogs.
+Tests use the real app, native Rust core, and configured persistent backend, not replacement screens or bundled catalogs.
 These smoke checks do not cover every search combination, text size, or device size.
-The iPhone, iPad, and Mac tests cover query search, Jellyfin and TMDB provider filters,
-detail-return context, Clear query, and no-result status. All profiles assert Settings starts closed
-and check the provider information disclosure during the separate Nosferatu detail journey.
-`testFreshSearchAndHomeScope` checks fresh-search resets, retained item types, library hierarchy
-restoration, and All libraries scope after Home on every platform.
-`testHappyPathShowcase` enters the real `Bunny` query through XCUITest on every profile, separate from stateful search regression journeys.
-`testSearchPaginationAndPreferencesRoundTrip` checks a multi-page query and preference retention
-across app relaunches in the same local settings namespace. `testCoreUnavailableAndRetry` uses a closed
+The journeys use titles and IDs observed in the real UI rather than product demo records. `testFreshSearchAndHomeScope` checks All libraries scope after Home.
+`testSearchPaginationAndPreferencesRoundTrip` checks absent subtitle controls across relaunches, Refresh, and a real-data navigation journey.
+Local state tests cover settings persistence separately. `testCoreUnavailableAndRetry` uses a closed
 local endpoint and checks honest error/retry behavior without catalog fallback. It then restores the configured healthy endpoint
 and relaunches the same app to check Home and server artwork. It never restarts the shared backend or proves in-process recovery.
 The tvOS test uses remote directional focus and Select for navigation and options, plus native text entry for the search capture.
-`testSidebarRemoteControls` additionally checks every subtitle choice and its collapsed current value,
-Refresh, the absence of unsupported authentication controls, and directional focus return without changing the selected destination.
+`testSidebarRemoteControls` additionally checks Refresh, absent subtitle controls, and directional focus return without a destination change.
 After text entry, the tvOS test dismisses the native keyboard with Menu before the capture.
 Inspect narrow layouts and tvOS focus separately; SwiftUI buttons and text fields retain native
 keyboard and remote interaction.

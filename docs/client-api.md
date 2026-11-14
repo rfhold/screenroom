@@ -1,13 +1,13 @@
 # Client API and core
 
-Screenroom's client boundary supports a persistent local backend with offline typed provider adapters, local user selectors, and device-local settings.
-It provides no authentication, live provider connections, or playback.
+Screenroom's client boundary supports a persistent local backend, typed provider adapters, local user selectors, and device-local settings.
+Clients own no provider connections. The backend supports managed Jellyfin connections; it provides no authentication or playback.
 The wire contract separates catalog and user ownership:
 
 | Package | Schema and ownership |
 | --- | --- |
 | `screenroom.catalog.v1` | [Catalog schema](../proto/screenroom/catalog/v1/catalog.proto): BrowseService, CatalogService, SearchService, and catalog messages. |
-| `screenroom.user.v1` | [User schema](../proto/screenroom/user/v1/user.proto): UserService.GetCurrentUser and local user records. |
+| `screenroom.user.v1` | [User schema](../proto/screenroom/user/v1/user.proto): UserService local user records and Jellyfin profile links. |
 | `screenroom.common.v1` | [Common schema](../proto/screenroom/common/v1/common.proto): shared SearchTypes and SearchMethods. |
 | `screenroom.playback_gateway.v1` | [Empty playback gateway package](../proto/screenroom/playback_gateway/v1/playback_gateway.proto): no messages or RPC services. |
 
@@ -23,7 +23,6 @@ The intended backend [public deployment contract](components.md#intended-public-
 | Native shells | Native layout, navigation, focus, view state, and image decode; Swift and Kotlin consume UniFFI, while Rust uses the crate directly. |
 | Web SPA | Browser UI and image decode; consumes the same Rust core through WASM. |
 | [Backend](backend.md) | Persistent catalog, local users, scoped search, bounded catalog information, paginated artwork credits, and same-origin artwork routes. |
-| [Canonical fixtures](../fixtures/catalog/) | Neutral catalog data, source records, artwork and provider-brand bytes, notices, and rights provenance. |
 
 Native core transport uses Tonic gRPC. WASM uses `tonic-web-wasm-client` through browser fetch.
 The shared Envoy edge routes both protocols and artwork through one public origin.
@@ -35,10 +34,12 @@ Use the [Apple](../apps/apple/README.md), [Android](../apps/android/README.md), 
 
 ### Server-driven client contract
 
-All catalog content, media artwork, provider branding, and attribution notices reach shells through the Rust core.
+Catalog content and media artwork reach shells through the Rust core.
+The core also exposes backend branding and notices. If shells consume them, those records come from the backend through the core.
+This origin contract requires no global provider-credit UI or unused branding and notice requests.
 Shells must not package catalog JSON, media artwork, or provider logos as runtime resources.
 Shells must not call provider APIs or fetch artwork outside the core.
-Raw source snapshots and fixture tools belong to the development server boundary, not runtime clients.
+Runtime product fixtures and mock adapters are not supported server inputs either.
 
 Shells use server records for libraries, provider presence and status, search capabilities, rights, item colors, and rating providers and scales.
 They render generic records rather than fixture identifiers, title-specific branches, or client-authored provider and legal notices.
@@ -99,11 +100,44 @@ Create one core `Client` with an explicit `ClientConfig`:
 The core sends a nonempty `user_id` as `x-screenroom-user-id` on RPCs.
 It selects an enabled local user; it is not authentication, a token, or a security boundary.
 Construct another client when endpoint or user changes. Configuration remains immutable.
-Native and WASM bindings expose only public catalog/common/user contracts, not private operator/internal bindings or backend SQLx dependencies.
+The ordinary `Client` exposes public catalog/common/user contracts, not private operator/internal RPC bindings or backend SQLx dependencies.
+The bindings also expose the separate, explicit [operator capability](#operator-capability).
 
-`Item` carries hierarchy, metadata, tags, colors, artwork, ratings, runtime, provider references, rights, and optional fixture progress.
+`Item` carries hierarchy, metadata, tags, colors, artwork, ratings, runtime, provider references, rights, and optional personal progress.
+
+### Watched state
+
+`Item.watched` is an optional boolean: `Option<bool>` in Rust, nullable native bindings, and `boolean | null` in WASM.
+The wire field is `optional bool watched = 21`.
+
+| Value | Meaning |
+| --- | --- |
+| `true` | The selected source explicitly reports watched. |
+| `false` | The selected source explicitly reports unwatched. |
+| Absent / `null` | Watched state is unknown. |
+
+Progress remains independent. A progress value of 100 does not imply watched, and absent progress does not imply unwatched.
+Catalog reads hydrate watched state from persisted snapshots for the selected local user and each item's chosen source item.
+They do not merge watched observations across providers or request provider state for this overlay.
+Anonymous reads, absent observations, expired snapshots, and invalid user/source links return unknown.
+The [backend acquisition boundary](backend.md#watched-snapshots) defines snapshot publication and expiry.
+The separate Home Continue Watching path can still read provider state; this overlay does not make every Home operation provider-independent.
+
+Jellyfin supplies explicit `Played` values for movies and episodes. Series and seasons remain unknown; clients do not infer container completion.
+Web, Apple, Android, and Linux posters display a top-right checkmark only for `true`, with the accessible label `Watched`.
+Neither `false` nor unknown displays a checkmark. Progress bars remain independent.
+No watched controls or provider writes accompany the field.
+
+### Metadata and artwork
+
+Episode artwork in catalog reads uses the season poster, then the series poster from the episode's selected source. Only complete published posters qualify. Without either poster, artwork is absent and clients show their normal placeholder. `ListChildren` for a season is the exception: its episode grid keeps each episode's own artwork. This selection happens on reads and needs no metadata update, reindex, or provider request.
+
+Episode `Item.subtitle` reads project `Series title · S02E05` from the selected source's episode `metadata.index`, parent season `metadata.index`, and canonical parent series title. Ancestors must be visible in the requested source, library, and provider scope; kind filters apply only to the target episode. Index zero is valid for specials. If either index or the series title is absent, reads return the stored subtitle unchanged, even when empty. Direct episode-to-series parents also retain the stored subtitle because no season index exists. Reads preserve non-episode subtitles. This bounded batch projection makes no metadata writes, search index changes, or provider requests.
+Apple, Android, and Linux episode cards show the series name beside a small muted number such as `S05:E09`.
+The episode title appears below. Explicit season grids shorten the number to `E09` only when the episode's parent matches that season.
+Unknown episode numbers stay absent; shells do not invent hierarchy from navigation history.
 `Item.provenance_notes` contains ordered strings for generic display; `metadata_retrieved_at` preserves the metadata snapshot timestamp.
-Clients display these values without title-specific interpretations or a substitute client timestamp.
+Backend and core records retain these values; client detail views omit provenance notes and per-item legal panels.
 `HomeRow` contains ordered items; `MediaLibrary` exposes a library identifier and title.
 `ItemPage` and `CreditPage` expose results plus `next_page_token`.
 `Rights`, `Artwork`, `Rating`, `Runtime`, and `ProviderReference` preserve source and display details instead of UI-only text.
@@ -114,12 +148,118 @@ The model generator maps wire `Library` to domain `MediaLibrary`.
 `CatalogInfo` contains bounded `notices`, bounded `branding`, and `retrieved_at` in Rust.
 `CatalogNotice` contains six string fields: `id`, `section`, `title`, `text`, `link_label`, and `link_url`.
 The server supplies notice order and the `metadata`, `catalog`, `artwork`, and `rights` sections.
-Clients preserve notice text, order, and links. Empty titles and links do not require substitute copy.
+For notices they display, clients preserve server text, order, and links. Empty titles and links do not require substitute copy.
 CatalogInfo returns at most 32 notices and eight branding records, not the complete artwork inventory.
 Its timestamp uses the newest valid eligible persisted provider snapshot in UTC; unknown timestamps remain empty, never the request clock.
 `list_artwork(scope, page)` supplies complete enabled-scope credits, including unvisited portraits, character stills, and logos.
-Clients enumerate those pages on demand; they do not preload all image bytes or infer completeness from visited titles.
-`get_catalog_info()` follows the same read-cache, deduplication, deadline, cancellation, and invalidation rules as other catalog reads.
+This API remains available; client shells do not enumerate its pages for a global credits inventory.
+Visited titles do not establish inventory completeness.
+`get_catalog_info()` uses the completed-read cache, active-read deduplication, deadlines, cancellation, and explicit invalidation.
+
+## Operator capability
+
+`OperatorClient` is a separate typed HTTP/JSON capability within the shared Rust core.
+It does not extend `ClientConfig`, change ordinary `Client` methods, or add public RPC routes.
+Rust and native UniFFI expose the same records and operations as WASM.
+The separate operator service is API-only; native clients have no operator onboarding UI.
+This contract does not claim native UI parity for operator controls.
+The [indexing architecture](indexing.md#canonical-operator-api) defines implemented backend policy, queue status, and terminal redrive HTTP contracts.
+Canonical indexing replaces older poster-maintenance operations.
+Managed-connection methods support native/WASM parity and guarded proxy routes; Web Maintenance consumes them for [Jellyfin setup](jellyfin.md#web-setup).
+Native apps expose no onboarding UI.
+Generic operator records remain provider-neutral; browsers do not implement provider traversal, retry classification, or checkpoint rules.
+Generic support preserves explicit opt-in, loopback guards, and the absence of administrator authentication.
+
+| Configuration | Contract |
+| --- | --- |
+| `OperatorClientConfig.endpoint`, native | Exact HTTP loopback origin plus `/api`; no credentials, query, fragment, or trailing slash. |
+| `OperatorClientConfig.endpoint`, WASM | Exact current HTTP(S) browser origin plus `/__operator/api`; no cross-origin or direct loopback API bypass. |
+| `OperatorClientConfig.timeout_ms` | Required operation deadline from 1 through 120000 milliseconds. |
+
+Construct the capability explicitly; ordinary catalog configuration does not enable it.
+`configuration()` returns immutable configuration; `configuration_namespace()` returns the endpoint namespace, not backend identity or authorization proof.
+The [maintenance guide](index-maintenance.md#explicit-local-attachment) owns Web opt-in, proxy security, and origin authority.
+
+| Methods | Typed contract |
+| --- | --- |
+| `health`, `sources`, `libraries` | Availability and paginated source/library discovery. |
+| `discover_connection` | `OperatorConnectionDiscovery`; transient authenticated probe from `OperatorDiscoverConnectionRequest`. |
+| `save_connection` | `OperatorSavedConnection`; explicit `OperatorSaveConnectionRequest`, with optional initial refresh and exact policy version. |
+| `connections` | `OperatorConnectionPage`; safe connection summaries, UUID cursor, and limit 1–200. |
+| `cancel_all` | Abort active operations and reject stale-generation responses. |
+
+### Canonical indexing methods
+
+These methods use the same explicit `OperatorClient`, endpoint guards, cancellation, and mutation-ambiguity rules.
+They do not add native UI or public catalog RPCs.
+
+| Method | Typed result and contract |
+| --- | --- |
+| `indexing_runs` | `OperatorRunPage`; canonical source run history, without the removed `trigger` field. |
+| `indexing_candidates` | `OperatorCandidatePage`; canonical per-run safe outcomes and optional `pending_only` filter. |
+| `indexing_policies` | `OperatorIndexingPolicyPage`; canonical policies for one source. |
+| `indexing_configure` | `OperatorIndexingPolicy`; accepts `OperatorIndexingConfigureRequest` with request UUID, optional version-checked update, and public configuration. |
+| `indexing_progress` | `OperatorIndexingProgress` or null; durable policy version, watermark, and next reconciliation time. |
+| `indexing_start` | `OperatorRun`, not `OperatorRunStatus`; accepts `OperatorStartRequest` with request UUID, policy version, and optional narrowed scope. |
+| `indexing_run_status` | `OperatorRunStatus`; observations, terminal reason, coverage, permitted actions, enumeration, settlement, and success. |
+| `indexing_execution` | `OperatorIndexingExecution` or null; actual mode, lower/candidate watermarks, fallback, and settlement time. |
+| `indexing_pause` | `OperatorRunStatus`; explicit permitted pause. |
+| `indexing_resume` | `OperatorRunStatus`; paused-run continuation, not failed-job redrive. |
+| `indexing_cancel` | `OperatorRunStatus`; explicit permitted cancellation. |
+| `indexing_jobs` | `OperatorJobPage`; sanitized jobs, current redrive eligibility, and safe ineligibility reason. |
+| `indexing_attempts` | `OperatorAttemptPage`; job attempt history, fence cursor, and redrive generation. |
+| `indexing_redrives` | `OperatorRedrivePage`; durable job redrive history with generation cursor. |
+| `indexing_redrive` | `OperatorRedrive`; accepts `OperatorRedriveRequest` with explicit request UUID; no transport-level automatic retry. |
+| `indexing_queue` | `OperatorQueueDiagnostics`; accepts nullable run/capability context and retains non-atomic observation semantics. |
+
+`OperatorIndexingConfiguration` carries modes, components, strategies, scope, artwork reuse, effective retry, and per-work/run limits.
+It has no `operator_profile_id`, provider locator, credential, or raw policy field.
+The server resolves the enabled source's managed connection profile; an unavailable binding rejects configure.
+Clients reject unsupported policy combinations before dispatch; the [backend policy contract](indexing.md#policy-model) remains authoritative.
+
+Canonical policy/job/attempt/redrive collections accept 1–200; run/candidate history accepts 1–1,000.
+Policies and jobs use UUID cursors; attempts use decimal fence cursors and redrives use decimal generation cursors.
+Attempt fences and all `i64` budgets, versions, and counts use `bigint` in WASM; generation and attempt counts use bounded numbers.
+`indexing_queue` preserves null capability context separately from an explicit empty list.
+Its result preserves `atomic: false`, `queue_observation`, `blockers_as_of`, nullable eligibility counts, overlapping count semantics, and unknown worker liveness.
+
+The proxy guards exact allowlisted routes and cursor bounds under `/__operator/api`.
+It forwards successful JSON bytes unchanged after validation, so wide integer tokens never pass through JavaScript number serialization.
+Its response limit is 2 MiB; request bodies retain the 65,536-byte limit.
+Canonical source history uses `/api/indexing/sources/{source_id}/runs` and per-run `/candidates`.
+Backend and Rust method support do not establish complete generated-binding or Web UI parity for managed setup.
+Neither surface authenticates an administrator.
+
+### Transport and exact values
+
+Every read requests fresh server state; the capability has no completed-read cache, public-client cache sharing, or automatic retries.
+Native transport bypasses system proxies and rejects redirects.
+WASM uses same-origin fetch, omits credentials, rejects redirects, and aborts fetch on cancellation or deadline.
+Requests allow at most 65,536 body bytes; core responses allow at most 2 MiB.
+The core permits at most 64 active operations per operator client.
+`OperatorPage` supplies `after` and `limit` from 1 through 1000; page records return `items` and `next_after`.
+
+Operator `i64` fields preserve exact values in Rust/native records and use `bigint` in WASM.
+These fields include policy versions, request budgets, and counters.
+The Rust transport owns JSON serialization; shells must not coerce these values through JavaScript `number`.
+Browser shells must preserve exact versions in memory; no operation journal supplies reload recovery.
+
+`OperatorError` includes `Stale`, `SourceBusy`, `Invalid`, `NotFound`, `Forbidden`, `Unavailable`, `Cancelled`, `Deadline`, and `InvalidResponse`.
+`Connection` carries a bounded `OperatorConnectionErrorCode` and mutation ambiguity, not raw provider diagnostics.
+WASM errors carry snake_case `code`, `ambiguous`, and a safe blocker `run_id` for `source_busy`.
+Transport, cancellation, deadline, and invalid-response failures mark uncertain mutation outcomes through `ambiguous`.
+Errors expose no raw upstream messages, provider URLs, credentials, or SQL details.
+Cancellation does not prove that a server mutation stopped.
+Explicit same-session Retry retains the request UUID and exact body for idempotency; clients never retry mutations automatically.
+An ambiguous mutation permits that exact retry or a current server-state check, not an unrelated replacement request.
+Clients do not read older browser operation records; reload reads server state without journal replay, export, migration, or start continuation.
+The [canonical API](indexing.md#canonical-operator-api) owns policy, idempotency, and run-control semantics.
+
+Source contracts:
+
+- [Operator client](../crates/screenroom-client-core/src/operator.rs): endpoint validation, requests, bounds, cancellation, and typed errors.
+- [Operator records](../crates/screenroom-client-core/src/operator_models.rs): native/domain types.
+- [WASM operator adapter](../crates/screenroom-client-core/src/operator_wasm.rs) and [TypeScript records](../crates/screenroom-client-core/src/operator-models.ts): browser methods and exact integer representation.
 
 ## Unary operations
 
@@ -129,7 +269,7 @@ Envoy routes both public packages through the same local endpoint.
 
 | Service / RPC | Core method | Result and behavior |
 | --- | --- | --- |
-| `BrowseService/GetHome` | `get_home(scope)` | Scoped rows; mapped local users receive typed mock Continue Watching state. |
+| `BrowseService/GetHome` | `get_home(scope)` | Scoped rows; mapped local users receive Continue Watching state, independent of watched snapshots. |
 | `BrowseService/ListLibraries` | `list_libraries(source_id, page)` | Paginated stable library identifiers and titles. |
 | `BrowseService/ListLibraryItems` | `list_library_items(scope, page)` | Scoped top-level library items. |
 | `CatalogService/GetCatalogInfo` | `get_catalog_info()` | Bounded ordered notices, branding, and persisted snapshot timestamp. |
@@ -140,10 +280,16 @@ Envoy routes both public packages through the same local endpoint.
 | `SearchService/Search` | `search(request)` | SearchPage with items, continuation, effective methods, and explicit degradation. |
 | `SearchService/GetSearchCapabilities` | `get_search_capabilities()` | Supported methods, types, sources, semantic limits, and query length. |
 | `UserService/GetCurrentUser` | `get_current_user()` | Enabled local user selected by explicit UUID metadata. |
+| `UserService/ListJellyfinSources` | `list_jellyfin_sources(page)` | Enabled Jellyfin source keys and labels, without upstream URLs or credentials. |
+| `UserService/ListJellyfinProfiles` | `list_jellyfin_profiles(source_id, page)` | Eligible enabled upstream profile choices for one source. |
+| `UserService/GetJellyfinLink` | `get_jellyfin_link(source_id)` | Persisted source/profile link for the selected local user, or absent. |
+| `UserService/SetJellyfinLink` | `set_jellyfin_link(source_id, jellyfin_user_id)` | Persist a link to an eligible enabled profile for the selected local user. |
+| `UserService/ClearJellyfinLink` | `clear_jellyfin_link(source_id)` | Idempotently unlink the selected local user from one source. |
 
 `SourceLibraryScope` contains `source_id` and `library_id`; empty fields mean all enabled installation sources and libraries.
-The clients preserve stable `movies` and `tv` library IDs and pass scope through details, children, credits, search, and continuation pages.
-Provider choices `all`, `tmdb`, and `jellyfin` remain separate from installation source keys such as `mock-jellyfin` and `mock-tmdb`.
+Clients preserve server-supplied library IDs and pass scope through details, children, credits, search, and continuation pages.
+Library IDs are opaque. Literal values such as `movies` and `tv` imply no media type, icon, or navigation behavior.
+Provider filters remain separate from installation source keys; a filter enum does not establish a runtime provider adapter.
 Public item kinds remain `Movie`, `Series`, `Season`, and `Episode`; search excludes seasons.
 
 `Page.size=0` selects 50 results; the maximum is 200. Start with an empty token.
@@ -151,6 +297,22 @@ Treat page tokens as opaque values. Reuse each token only with its original quer
 An empty `next_page_token` marks the last page. Invalid tokens return `InvalidArgument`.
 Tokens bind the operation, target, normalized scope, and query where applicable. They do not establish user ownership.
 Search retains a short-lived ordered result snapshot and rechecks eligibility on continuation.
+
+Apple, Android, and Linux library, children, and search views request an initial page of at most 100 items.
+Their Load more controls append API-order results, suppress duplicate stable IDs, and show loaded counts rather than catalog totals.
+Continuation failures preserve loaded cards and the retry token. Cancellation and request identity guards reject stale results.
+Shells reject repeated continuation tokens and enforce bounded page traversal.
+
+### Jellyfin profile links
+
+Web, Apple, Android, and Linux expose Jellyfin source choices, eligible profile choices, the current link, Save, and Unlink.
+These controls change a server-persisted progress mapping for the selected local UUID, not authentication or provider credentials.
+Each Save or Unlink action issues one mutation, invalidates reads, and rereads the link.
+An ambiguous failure triggers a read of server state, not an automatic mutation retry.
+The profile Retry action reads server state only. Unknown state disables mutation controls until a read confirms the current link.
+Profile discovery uses its own opaque page tokens, bound to the operation, selected local user, and source where applicable.
+The public profile controls do not expose private operator mapping APIs.
+Continue Watching failures show a generic explanation while other Home rows remain usable.
 
 ### Search limits
 
@@ -162,11 +324,12 @@ Semantic uses exact 1024-dimensional pgvector cosine retrieval across all eligib
 Fixed `k=60` reciprocal-rank fusion precedes best-source-document canonical deduplication; display metadata follows separate precedence.
 No approximate nearest-neighbor index or reranker participates.
 The server normalizes whitespace and accepts at most 8000 normalized characters.
-A blank query returns `InvalidArgument`, unlike the retired mock contract. Clients clear blank searches locally.
+A blank query returns `InvalidArgument`. Clients clear blank searches locally.
 Absent types default to movie, series, and episode. An explicit type selection must remain nonempty.
 
-Sources are `all`, `tmdb`, and `jellyfin`.
-Provider filters select eligible persisted documents; queries do not crawl TMDB or Jellyfin.
+Search sources are `all` and `jellyfin`.
+Provider filters select eligible persisted documents; queries do not contact providers.
+Source-supplied TMDB external IDs and item links remain metadata, not a search capability.
 Clients populate choices from `get_search_capabilities()`, not a duplicate local list.
 Clients also use its `semantic_description` and `maximum_query_length` instead of client-authored capability claims.
 Search requests use explicit filters, not server preferences. Shells pass local settings in `SearchRequest`.
@@ -177,7 +340,8 @@ A semantic-only request fails when no valid lexical fallback exists. Clients dis
 ### Local settings
 
 The backend has no PreferencesService. `ClientSettings`, `default_settings`, and `validate_settings` define the shared local settings contract.
-Version-1 platform stores persist scope, provider, types, methods, and subtitle preference:
+`ClientSettings` contains four fields: `scope`, `source`, `types`, and `methods`.
+Version-1 platform stores persist scope, provider, types, and methods:
 
 - Apple uses Foundation atomic JSON in Application Support, with errors and a save-retry action.
 - Apple migrates legacy UserDefaults only when no settings file exists.
@@ -187,10 +351,12 @@ Version-1 platform stores persist scope, provider, types, methods, and subtitle 
 
 Storage failures produce a warning, not a claim that persistence succeeded. Local settings do not confer backend identity or access rights.
 
-Core defaults select movie, series, and episode, text/fuzzy/semantic methods, all-library scope, provider `all`, and subtitle preference `off`.
+Core defaults select movie, series, and episode, text/fuzzy/semantic methods, all-library scope, and provider `all`.
 Web controls initially select Movies and Shows. Title-only defaults to false and disables semantic.
-Subtitle values are `off`, `library_tracks`, and `transcription`.
-These values record a preference only; they provide no subtitle retrieval or transcription service.
+The shared load normalizer maps an old saved `tmdb` provider preference to `all` and preserves unrelated valid preferences.
+All four clients use `normalize_saved_settings` on load; saves use strict validation and reject `tmdb`.
+Ordinary settings files ignore the obsolete subtitle field. The active `ClientSettings` model and client controls contain no subtitle preference.
+These settings provide no subtitle retrieval, transcription, or playback service.
 
 ## Errors, cancellation, and caches
 
@@ -218,9 +384,13 @@ Each client deduplicates equivalent active reads and permits at most 32 distinct
 A refresh calls `invalidate_reads()` before fresh reads. It does not trigger library sync.
 Refresh errors remain errors; a client must not report success from an optimistic local state change.
 
-Completed reads use an insertion-order memory cache with at most 64 entries and 2 MiB of serialized keys and values.
-The cache has no TTL or disk persistence. Failed results do not enter the completed-read cache.
+Home, library-item, item, children, and search reads do not retain completed results, including continuation pages.
+Repeated reads through the same client revalidate watched expiry and external item identity against the backend.
+Equivalent active reads still share one operation, with the same cancellation and stale-result guards.
+Other completed reads use an insertion-order memory cache with at most 64 entries and 2 MiB of serialized keys and values.
+That cache has no TTL or disk persistence. Failed results do not enter the completed-read cache.
 Artwork has a separate insertion-order memory cache: at most 32 entries and 8 MiB total.
+Profile-link mutations invalidate core reads. Snapshot acquisition does not push updates into rendered screens; a refresh or another read obtains current state.
 
 ## Artwork and provenance
 
@@ -229,47 +399,30 @@ It publishes absolute same-origin URLs in item records, credit records, branding
 The core's `load_artwork(url)` accepts only `/artwork/` URLs on the configured endpoint origin.
 It rejects URL credentials, queries, and fragments.
 It returns raw bytes; each renderer owns image decode and placeholders.
+Apple and Android limit shell artwork work to eight active requests and share equivalent URL reads.
+Cancellation detaches individual consumers and preserves reads that other consumers still need.
+Linux uses a separate bounded artwork path; it does not share the Apple or Android scheduler.
 Absent or failed images use truthful unavailable states, initials, or abstract placeholders, never client-local fixture artwork.
 The core accepts JPEG, PNG, and SVG MIME types and limits each response to 4 MiB.
 Native and browser artwork requests reject redirects. Clients never fetch S3 or provider artwork directly.
 The backend preserves complete published revisions during replacement; unknown or disabled images return 404 and storage failures return 503.
 
-The [normalized fixture](../fixtures/catalog/fixture.json) supplies API items, credits, and home rows.
-[Title records](../fixtures/catalog/titles.json), [artwork records](../fixtures/catalog/artwork.json), and the [TMDB snapshot](../fixtures/catalog/tmdb.json) retain provenance.
-The [notice fixture](../fixtures/catalog/notices.json) owns catalog-wide legal, provider, and fixture-specific attribution copy.
-Clients render those notices through CatalogInfo, not duplicate legal paragraphs or branches for specific titles.
+Persisted provider records supply API items, credits, home rows, provenance, and rights data.
+CatalogInfo owns bounded server notices and branding; clients do not invent provider-specific legal text.
+Web, Linux, Apple, and Android omit global attribution and technical-credit footers and the complete artwork inventory.
+They issue no footer-only CatalogInfo, branding, or artwork requests and retain no footer-only state, retries, or styles.
+No provider-credit UI forms part of the client contract.
+Clients must not invent legal paragraphs or add branches for specific titles.
+The public CatalogInfo and ListArtwork APIs remain unchanged; the backend retains provenance, licenses, and attribution data.
 CatalogInfo branding owns provider-brand discovery; clients must not fabricate artwork records or logo URLs.
-The offline adapter supplies the approved TMDB logo from `tmdb.png` for native decoders.
-Canonical fixtures retain both that raster copy and the original SVG with provenance; no bundled-client exception applies.
 Title rights, metadata rights, artwork licenses, and provider references describe distinct concerns.
 A public-domain title does not imply public-domain metadata, artwork, restorations, or scores.
-Preserve attribution, source links, license details, and jurisdiction caveats in client detail views.
-The fixture includes Creative Commons artwork and the TMDB logo under distinct terms; it is not uniformly public domain.
-The server notices carry the required TMDB attribution statement.
-
-### Canonical fixture tools
-
-The [fixture generator](../scripts/generate-mock-fixture.py) requires Python 3.
-It combines canonical title records, the TMDB snapshot, artwork records, and notices into `fixtures/catalog/fixture.json`.
-Typed offline adapters consume canonical fixture inputs; runtime clients never read those files.
-After canonical input edits, regenerate the normalized fixture from the repository root:
-
-```sh
-python3 scripts/generate-mock-fixture.py
-```
-
-Fixture regeneration does not update persisted catalog state automatically.
-An approved ingest through the current backend must apply fixture changes; ordinary startup does not reset operator state or reseed volumes.
-
-The root [TMDB importer](../scripts/import-tmdb.mjs) writes only the canonical snapshot at `fixtures/catalog/tmdb.json`.
-It requires `TMDB_READ_ACCESS_TOKEN` and performs external provider requests.
-An import requires separate, explicit approval for that provider operation; ordinary local client work does not authorize it.
-The importer and raw snapshots supply development server inputs, not a runtime client network bypass.
-The [importer tests](../scripts/import-tmdb.test.mjs) use stub responses without a provider import:
-
-```sh
-node --test scripts/import-tmdb.test.mjs
-```
+Web, Apple, Android, and Linux omit per-item rights, provenance, artwork license, creator, crop, and legal panels.
+They retain per-item source identifiers, external links, ratings, snapshot disclosures, provider status, and people labels.
+Backend and core records retain provenance and rights data.
+Historical records retain their applicable attribution and license terms; no blanket public-domain assumption applies.
+Product fixture generators, TMDB importers, and fixture-backed bootstrap are not supported interfaces.
+The [testing guide](testing.md) distinguishes isolated synthetic responses from real-source acceptance.
 
 ### Client-boundary checks
 

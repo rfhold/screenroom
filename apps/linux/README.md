@@ -1,17 +1,23 @@
 # Screenroom for Linux
 
 A native GTK4/libadwaita catalog interface, independent of the root Rust workspace.
-The Rust client core retrieves catalog data, search results, and artwork through the persistent local backend with offline typed adapters.
-It has no media files, authentication, subtitle engine, real-provider connection, or playback support.
+The Rust client core retrieves configured real catalog data, search results, and artwork through the persistent backend.
+The shell has no media files, authentication, subtitle engine, provider credentials, direct provider HTTP, or playback support.
 The [wire contract](../../docs/client-api.md) places catalog RPCs in `screenroom.catalog.v1` and UserService in `screenroom.user.v1`.
 Immutable ClientConfig holds endpoint, local user UUID selector, and timeout. Scoped requests preserve source/library context through details and continuation pages.
 
 ## Interface
 
-- Home contains server-defined poster rows; mapped local users receive typed mock Continue Watching state.
+- Home contains server-defined poster rows; mapped local users receive actual provider progress or explicit read errors.
+- Row failures show a sanitized message and Retry row; other rows remain usable.
+- The expanded sidebar offers server-saved Jellyfin profile choices, current state, Save and Unlink. These controls do not provide sign-in or credentials.
+- An uncertain profile change requires a server read. Retry never repeats a write; confirmed or reconciled changes refresh Home.
+- Profile tasks end when the panel departs. Later reads reconcile uncertain writes; profile reads never invalidate the catalog client's requests.
 - The sidebar expands within the layout and stays available across Home, libraries, search, and details.
 - Libraries contain responsive poster grids; series open seasons, and seasons open episodes.
-- Title details use a 200×300 poster beside the summary, provider row and synopsis, followed by full-width Cast, Crew and Title rights sections. Below 640 logical content pixels, the header stacks with a 160×240 poster. There are no Play or Resume controls.
+- Title details place a 200×300 poster beside the summary, provider row and synopsis, followed by full-width Cast and Crew sections.
+- Below 640 logical content pixels, the header stacks with a 160×240 poster. There are no Play or Resume controls.
+- General episode cards show the series, a muted season/episode number, and the episode title. Season grids show the episode number and title.
 - People use adaptive grids with 140×140 portraits or honest placeholders, wrapping names and roles, and labels identifying character stills.
 - The provider row uses server identities, statuses, URLs, rating provider and scale. Its native disclosure shows vote counts, snapshot dates, and provider references; unknown votes, zero votes, and absent ratings remain distinct.
 - Clickable breadcrumbs return to libraries, series, seasons, or search results.
@@ -21,7 +27,7 @@ Immutable ClientConfig holds endpoint, local user UUID selector, and timeout. Sc
 - Server capabilities determine the source, content-type and search-method choices, query limit and Semantic description. Controls live inside Settings, closed initially.
 - Inline settings offer PostgreSQL full-text search, title similarity, and exact vector Semantic search with explicit lexical degradation.
 - Title only disables Semantic. Its later removal does not restore Semantic automatically.
-- Subtitle choices and search content types persist in validated version-1 private XDG JSON through atomic file replacement.
+- Search settings persist in validated version-1 private XDG JSON through atomic file replacement.
 - Refresh aborts prior loads and searches, invalidates core reads, and reloads server data. Loading, completion, and errors reflect actual reads; there is no mock refresh counter or authentication flow.
 
 The app uses native GTK widgets, server artwork, and Cairo placeholders without a web view.
@@ -29,21 +35,26 @@ Its app-scoped CSS matches the neutral dark web design; the app requests libadwa
 Navigation state resets when the process exits. Device-local preferences survive app and backend restarts independently.
 The default settings path is `$XDG_CONFIG_HOME/screenroom/settings.json`, or `$HOME/.config/screenroom/settings.json`.
 `SCREENROOM_SETTINGS_PATH` overrides the path; `SCREENROOM_E2E_SETTINGS_NAMESPACE` isolates test files.
-The store reports write failures and preserves the current in-memory choices.
+The store reports read and write failures and preserves current session choices.
+Old settings files ignore the obsolete subtitle field; no subtitle preference or controls exist.
+The shared core normalizes saved `tmdb` to `all` and preserves unrelated valid settings.
 
 `src/catalog.rs` maps core records into thin UI records. The app does not embed catalog JSON or title artwork.
 All catalog artwork, including branding, comes from core-loaded server bytes. There are no local catalog, provenance, or artwork bundles; native application icons, CSS, system glyphs and generic placeholders remain local.
 The core owns all RPC and artwork HTTP requests; no API key participates.
 A two-thread Tokio runtime executes requests and raster image decode outside GTK's main thread.
-GTK's main context installs completed snapshots and creates native textures from ready pixels.
+GTK's main context publishes metadata before artwork. A serial, bounded artwork task updates native pictures as bytes arrive.
+Append and watch-state updates retain textures for stable artwork URLs.
+The pixel cache caps at 256 entries and 96 MiB; the texture cache caps at 512 entries and 32 MiB.
+Live pictures retain their textures independently of cache eviction.
 Request generations reject stale results; query edits abort superseded requests. View destruction cancels core requests.
 Initial load, error, retry, empty results, and missing-image states never substitute embedded catalog data.
 
-The Data & artwork credits disclosure renders bounded CatalogInfo notices and branding, plus the complete paginated ListArtwork inventory on demand.
-Authors, licenses, source links, title rights, metadata rights, and provenance remain server-owned, without title-specific rules.
-The global timestamp reflects eligible persisted provider snapshots, not the request clock or visited-title subset.
-Public-domain claims remain US- and edition-specific. Artwork and metadata have separate terms; character stills carry explicit labels.
-The server supplies stable artwork references for credits, regardless of name variations.
+No global attribution or technical-credit footer, footer-only request, or artwork inventory appears.
+Backend CatalogInfo, artwork credits, provenance, and rights APIs remain available; no provider-credit UI is required.
+Per-item title, metadata and artwork rights, creator credits and provenance notes do not appear in the interface.
+Ratings, votes, snapshot disclosure, provider references, people roles and character-still labels remain visible.
+The server supplies stable artwork references, regardless of name variations.
 
 ## Native run
 
@@ -72,12 +83,16 @@ The native run needs a desktop session and the persistent backend.
 `SCREENROOM_API_ENDPOINT` defaults to `http://127.0.0.1:50051`; endpoint aliases must equal it when set.
 Those aliases are `SCREENROOM_ENDPOINT` and `SCREENROOM_E2E_API_ENDPOINT`.
 `SCREENROOM_USER_ID` selects an enabled local UUID, not an account credential or authentication.
+The selector defaults to empty; use the configured installation UUID. Web setup owns provider credentials and initial connection configuration. The native shell consumes the public core only.
 The core uses a three-second request timeout.
 `src/main.rs` owns application setup; `src/home.rs` owns navigation, the sidebar, grids, and details.
-`src/backend.rs` loads complete paginated core snapshots and decodes artwork.
+`src/backend.rs` loads core metadata pages and decodes artwork.
 Library IDs, titles, order, Home rows and membership come from server responses, not local media-kind filters. Navigation retains stable library and item IDs across reordered records.
-Library, child, credit, and search reads consume every continuation before the UI reports complete results.
-Page failures show an error instead of partial success; repeated tokens fail without an endless loop.
+Library IDs are opaque; literal `movies` and `tv` values imply no special behavior.
+Library, child and search grids publish the first 100 results, then offer Load more and a loaded count.
+Append preserves API order and stable IDs. A continuation failure retains visible entries and its token for Retry.
+Context changes cancel obsolete requests. Repeated tokens, page limits and operation deadlines bound further reads.
+Metadata choices and credits still consume their continuations before display.
 `src/catalog.rs` maps records; `src/state.rs` owns stable-ID navigation and search request state.
 `src/search.rs`, `src/poster.rs`, and `src/theme.css` isolate search controls, poster art, and the app theme.
 
@@ -116,13 +131,9 @@ It drops all capabilities and limits memory and process count.
 Unknown categories and conflicting legacy selectors fail before output cleanup or Docker access.
 Every scenario uses WayDriver `Session` and XPath locators over AT-SPI on a private D-Bus session.
 `happy-path` runs one short native journey through the five canonical capture states, requiring real catalog, search, and artwork readiness.
-`retry` runs the real unavailable-server recovery and artwork-404 scenario described below.
+`retry` runs unavailable-server recovery and artwork-stream fault checks against the configured backend.
 `regression` runs two independent scenarios: catalog/preferences and search/history.
-Catalog coverage includes Home scroll, local subtitle persistence and namespace isolation, scoped hierarchy, breadcrumbs, metadata, role credits, provider disclosure, and absent playback controls.
-Search coverage retains keyboard query input, source and type filters, title-only constraints, default-option guards, Escape, clear/no-results states, global credits and real Refresh reads. It also rejects fake authentication controls and refresh counters.
-Pending-search checks settle a query prefix, then observe the final edit concurrently with its keystroke and invoke the Search breadcrumb or Refresh.
-Both actions must preserve the pending indicator and complete the original query.
-Each locator has a five-second deadline; each scenario's assertion phase has a 55-second timeout.
+Real-data journeys discover a library and movie with published artwork through the public core and fail explicitly when that prerequisite is absent. They assert server-defined Home membership and watched/progress labels, native artwork decoding, settings persistence/save failure recovery, pending search and real Refresh. Unit tests retain profile-generation, episode artwork, pagination/cache and explicit watched-state boundaries. No fixed title, source/library ID or result count is required. Each locator has a ten-second deadline; the runner bounds the test process.
 WayDriver manages Mutter, PipeWire, WirePlumber, application startup, and subprocess cleanup.
 Its Mutter backend captures the compositor output through PipeWire.
 Only `happy-path` captures the five asserted UI states during one journey and lets GTK paint before each capture. Regression scroll assertions compare transient frames but do not publish PNGs. Navigation uses native accessibility actions, alongside pointer scrolling, keyboard input and direct widget clicks; it does not inject application state.
@@ -137,11 +148,11 @@ Artifacts default to ignored `apps/linux/build/e2e/`:
 | Artifact | Purpose |
 | --- | --- |
 | `home.png` | Initial All Home with poster rows, collapsed sidebar and no status. |
-| `sidebar.png` | Home with the expanded sidebar and subtitle controls. |
-| `library.png` | Movies library with its eight-title responsive grid and collapsed sidebar. |
-| `search.png` | All libraries search for `Bunny`, with default options, Settings closed and sidebar collapsed. |
-| `detail.png` | Big Buck Bunny opened from Movies, at the top with provider information closed and sidebar collapsed. |
-| `accessibility.xml` | Last available application accessibility tree, on success or assertion failure. |
+| `sidebar.png` | Home with the expanded sidebar and Refresh, without subtitle controls or attribution footers. |
+| `library.png` | Discovered real library with the sidebar collapsed. |
+| `search.png` | Title search for the discovered movie within its library. |
+| `detail.png` | Discovered movie details without playback. |
+| `<scenario>-accessibility.xml` | Application accessibility tree saved when a scenario reaches cleanup. |
 | `e2e.log`, `build.log` | Rust test, Mutter, D-Bus, and image-build diagnostics. |
 | `app.log` | Completed core reads, artwork byte counts, search results, and preference readbacks. |
 | `backend-instance.json`, `settings-path.txt` | Shared backend identity and isolated local settings path. |
@@ -168,19 +179,19 @@ Run the separate fault/recovery test with:
 E2E_CATEGORY=retry bash apps/linux/tests/e2e/run.sh apps/linux/build/e2e-fault-recovery
 ```
 
-This test gates the per-client forwarder until GTK shows a real transport error and Retry.
+This test gates the per-client forwarder until GTK shows a sanitized read error and Retry.
 It then permits traffic to the same shared backend and invokes GTK's Retry action.
-A per-client fault path returns artwork 404; assertions require an honest placeholder, real titles, and another visible poster.
+A per-client transport gate adds `Connection: close` to artwork GET requests, drops one stream and delays later responses. It preserves server response bytes and leaves RPC streams untouched. Metadata must remain usable during artwork delay; the deadline must stop further image requests. Refresh must recover actual server artwork. This journey requires enough published artwork to exercise multiple requests.
 The test never kills or restarts the shared backend or injects successful catalog fixtures.
-`fault-requests.log` records actual RPC and artwork HTTP responses. `fault-accessibility.xml` records the final GTK tree.
-The scenario creates no PNGs and retains its own 55-second assertion deadline within the unchanged 75-second container limit.
+`fault-accessibility.xml` and `artwork-deadline-accessibility.xml` record the GTK trees after the two successful phases.
+The scenario creates no PNGs. The Docker entry point bounds the container run.
 Legacy `E2E_TEST=fault_recovery` remains an alias for `retry`; `E2E_TEST=home` maps to `all` to retain its former exhaustive coverage. Prefer `E2E_CATEGORY` for new commands. Do not combine conflicting selectors.
 
 ## Limits
 
 These E2E tests cover one 1280×800 software-rendered Linux environment.
 They do not exhaust keyboard paths, narrow-window layouts, assistive technologies, GPU drivers, or other clients.
-The fixture progress values do not represent actual watch history.
+Home expectations come from the configured server's current profile-linked progress; local UUIDs are selectors, not authentication.
 The backend executes Semantic through exact vectors and reports lexical degradation explicitly. Every nonblank search uses a core RPC.
 The screenshots support human inspection; the test does not compare pixels against a baseline.
 The default app wrapper captures application output in `app.log`. WayDriver suppresses PipeWire/WirePlumber output.

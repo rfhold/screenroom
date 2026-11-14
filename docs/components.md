@@ -2,6 +2,7 @@
 
 This outline owns intended product scope and distinguishes implemented local behavior from future integrations.
 The [client API guide](client-api.md) owns the public client contract; the [backend guide](backend.md) owns local operational details.
+The [indexing architecture](indexing.md) owns shared-queue and incremental behavior, supported backend policies, and explicit client and activation limits.
 
 ## Clients and website
 
@@ -15,10 +16,17 @@ The [client API guide](client-api.md) owns the public client contract; the [back
 | `crates/screenroom-client-core/` | Implemented shared Rust client core: domain models, transport, errors, cancellation, and memory caches. |
 
 Client shells own native layout, navigation, focus, and image decode. The web SPA uses the core through WASM.
-The client contract requires catalog data, media artwork, provider branding, and notices from the backend through the core.
+When shells consume catalog data, media artwork, provider branding, or notices, those records come from the backend through the core.
+This origin contract requires no unused global branding or notice requests.
 Libraries, provider presence and status, search capabilities, rights, item colors, and rating providers and scales follow server records.
 Shells must not substitute client fixtures, per-title branches, fake account flows, or fabricated refresh outcomes.
 Application icons, system glyphs, themes, and generic image placeholders remain UI assets, not catalog content.
+Web, Linux, Apple, and Android omit global attribution and technical-credit footers, footer-only requests, and the complete artwork inventory.
+The [client contract](client-api.md#artwork-and-provenance) requires no provider-credit UI.
+All four client families omit per-item rights, provenance, artwork license, creator, crop, and legal panels.
+Per-item source identifiers, external links, ratings, snapshot disclosures, provider status, and people labels remain available; backend provenance remains unchanged.
+Apple, Android, and Linux expose explicit watched indicators, incremental library/children/search pages, and server-persisted Jellyfin profile links.
+The [client contract](client-api.md#jellyfin-profile-links) defines profile failure handling and the trusted-local selector boundary, not authentication.
 The app guides in the [documentation index](README.md) describe each shell's integration and prerequisites.
 
 ## Implemented local boundary
@@ -26,24 +34,29 @@ The app guides in the [documentation index](README.md) describe each shell's int
 | Path | Component |
 | --- | --- |
 | `crates/screenroom-backend/` | Shared PostgreSQL repositories, startup migrations, durable jobs, embeddings, and private object storage. |
-| `crates/screenroom-catalog-adapter/` | Typed offline Jellyfin and TMDB adapters with explicit scope, hierarchy, progress, artwork, and provenance. |
+| `crates/screenroom-queue/` | Provider-neutral PostgreSQL transport, leases, fences, classified retry, attempt history, and terminal redrive. |
+| `crates/screenroom-catalog-adapter/` | Real Jellyfin acquisition, authenticated connection probes, destination guards, hierarchy, artwork, and incremental capability fallback. |
 | `proto/screenroom/catalog/v1/catalog.proto` | `screenroom.catalog.v1`: BrowseService, CatalogService, SearchService, and catalog messages. |
-| `proto/screenroom/user/v1/user.proto` | `screenroom.user.v1`: UserService.GetCurrentUser for a trusted-local UUID selector. |
+| `proto/screenroom/user/v1/user.proto` | `screenroom.user.v1`: local user reads and validated Jellyfin profile links for a trusted-local UUID selector. |
 | `proto/screenroom/common/v1/common.proto` | `screenroom.common.v1`: shared SearchTypes and SearchMethods. |
-| `fixtures/catalog/` | Canonical neutral fixture, artwork, notices, and provenance records; offline adapter inputs, not client resources. |
 
 PostgreSQL persists shared catalog data, local users, source links, durable ingest state, search documents, and embeddings.
-Typed mock adapters implement offline Jellyfin library traversal, bounded TMDB feeds, hierarchy enrichment, and mapped mock playback state.
+Private managed connections bind Jellyfin server identity, selected libraries, and the installation profile.
 Clients persist versioned settings locally; the backend provides no preference service.
 CatalogInfo returns bounded notices and branding. ListArtwork supplies complete paginated credits independently of visited items.
-The local stack provides no authentication, live provider crawl, playback, transcoding, downloads, or remote orchestration.
-The [client API guide](client-api.md#artwork-and-provenance) defines image transport, attribution, and fixture-tool boundaries.
+Both APIs remain available unchanged; removal of global client credits UI does not remove backend provenance or license data.
+An empty installation is healthy before source setup; startup performs no fixture import or provider acquisition.
+Runtime product mocks, TMDB feeds, demo-user bootstrap, and manual provider profiles are not supported.
+Isolated fault servers remain test support, not product adapters.
+Authentication, playback, transcoding, downloads, and remote orchestration remain absent.
+The [client API guide](client-api.md#artwork-and-provenance) defines image transport and attribution boundaries.
+The [Jellyfin guide](jellyfin.md) owns managed setup, private credentials, and unsupported edit/rotation paths.
 
 ## Services and worker
 
 The table describes intended business scope; implemented catalog and user reads use PostgreSQL through Tonic gRPC/gRPC-Web.
 Playback gateway exposes a Tonic listener with empty routes, not a playback API.
-The worker uses offline typed adapters, not live provider credentials or a complete external catalog.
+The worker resolves managed Jellyfin connections dynamically; it provides no complete external-catalog guarantee.
 The [backend development guide](backend.md) defines local startup and telemetry procedures.
 
 | Path | Component |
@@ -52,6 +65,23 @@ The [backend development guide](backend.md) defines local startup and telemetry 
 | `crates/screenroom-catalog/` | Rust catalog service: a copy of the index in our database, embeddings, and links between items in other catalogs. |
 | `crates/screenroom-playback-gateway/` | Rust playback gateway executable: provider integration for Netflix, Amazon, HBO, Jellyfin, Plex, and others. |
 | `crates/screenroom-index-worker/` | Rust index worker: embeddings, text search, and catalog sync from adapters. |
+
+### Indexing boundary
+
+All indexing paths use one provider-neutral PostgreSQL queue under the [accepted architecture](indexing.md#queue-and-domain-responsibilities).
+Stateless workers use durable progress, capability-aware claims, fences, classified retry, and explicit terminal redrive.
+Domain repositories own source eligibility, catalog transactions, and publication.
+Canonical backend policies support full, incremental, reconcile, and poster-only repair within their [validated combinations and limits](indexing.md#policy-model).
+Incremental Jellyfin uses timestamp polls with overlap and periodic complete reconciliation; optional notification hints do not form a journal.
+The canonical operator HTTP API exposes policies, progress, jobs, attempts, diagnostics, and terminal redrive.
+Its separate service is API-only and also supports managed connection discovery/save.
+Web Maintenance supports URL/API-key discovery, profile/library selection, Save, and Save and refresh through shared operator methods and guarded proxy routes.
+Canonical Refresh, Pause, Resume, and Retry use saved policies; Advanced settings expose policy and queue details.
+Browser operation journals and old maintenance routes have no compatibility requirement.
+No native onboarding or operator UI forms part of this support.
+Per-operation transport observers report consumed provider/embedding/storage bodies, not wire bytes or proof of index success.
+Source support grants no live activation authority or collector-delivery guarantee.
+The [maintenance guide](index-maintenance.md) preserves current poster behavior and the trusted-local operator boundary.
 
 ### Intended public deployment
 
@@ -67,7 +97,8 @@ Envoy supplies local path routes on loopback; it does not satisfy the independen
 
 ## Adapters
 
-These entries describe intended integrations. The catalog adapter currently supplies typed offline Jellyfin and TMDB mocks, not active provider connections.
+These entries describe intended integrations beyond the implemented real Jellyfin adapter.
+The live adapter supports timestamp polling on admitted Jellyfin versions, not an authoritative deletion journal.
 
 | Path | Component |
 | --- | --- |
