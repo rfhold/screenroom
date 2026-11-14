@@ -20,6 +20,7 @@ impl search_service_server::SearchService for Catalog {
         &self,
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
+        let user = crate::progress::selected_user(request.metadata())?;
         let r = request.into_inner();
         let query = screenroom_backend::embedding::preprocess(&r.query);
         if query.is_empty() || query.chars().count() > 8000 {
@@ -28,7 +29,7 @@ impl search_service_server::SearchService for Catalog {
         let mut scope = page::scope(&r.source_id, &r.library_id)?;
         match r.source.as_str() {
             "" | "all" => {}
-            "tmdb" | "jellyfin" => scope.providers.push(r.source),
+            "jellyfin" => scope.providers.push(r.source),
             _ => return Err(Status::invalid_argument("source provider")),
         }
         if let Some(t) = r.types {
@@ -183,7 +184,7 @@ impl search_service_server::SearchService for Catalog {
         };
         let methods = &saved.effective_methods;
         Ok(Response::new(SearchResponse {
-            items: self.hydrate_items(&scope, items).await?,
+            items: self.hydrate_items(&scope, items, user.as_deref()).await?,
             next_page_token,
             effective_methods: Some(SearchMethods {
                 title_only: methods.iter().any(|s| s == "title_only"),
@@ -198,7 +199,7 @@ impl search_service_server::SearchService for Catalog {
         &self,
         _: Request<GetSearchCapabilitiesRequest>,
     ) -> Result<Response<GetSearchCapabilitiesResponse>, Status> {
-        Ok(Response::new(GetSearchCapabilitiesResponse {methods:vec!["title_only".into(),"text".into(),"fuzzy".into(),"semantic".into()],types:vec!["movie".into(),"series".into(),"episode".into()],sources:vec!["all".into(),"tmdb".into(),"jellyfin".into()],semantic_description:"Exact eligible-set cosine retrieval and reciprocal-rank fusion; explicit lexical degradation when embeddings are unavailable, incompatible, or incomplete. No reranking.".into(),maximum_query_length:8000}))
+        Ok(Response::new(GetSearchCapabilitiesResponse {methods:vec!["title_only".into(),"text".into(),"fuzzy".into(),"semantic".into()],types:vec!["movie".into(),"series".into(),"episode".into()],sources:vec!["all".into(),"jellyfin".into()],semantic_description:"Exact eligible-set cosine retrieval and reciprocal-rank fusion; explicit lexical degradation when embeddings are unavailable, incompatible, or incomplete. No reranking.".into(),maximum_query_length:8000}))
     }
 }
 fn digest(

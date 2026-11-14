@@ -1,7 +1,7 @@
 use crate::home::{App, accessible_label, clear, column, label};
 use crate::state::Screen;
 use adw::prelude::*;
-use std::{rc::Rc, sync::Arc, time::Duration};
+use std::{rc::Rc, time::Duration};
 
 impl App {
     pub fn search(self: &Rc<Self>) -> gtk::Box {
@@ -60,6 +60,10 @@ impl App {
         surface.set_visible(state.settings);
         surface.append(&panel);
         panel.append(&label("Catalog", "row-heading"));
+        panel.append(&label(
+            "Catalog membership is not playback availability.",
+            "muted",
+        ));
         let sources = gtk::Box::new(gtk::Orientation::Horizontal, 16);
         let mut first: Option<gtk::CheckButton> = None;
         let source_buttons: Vec<_> = capabilities
@@ -136,7 +140,7 @@ impl App {
                 if button.is_active() {
                     if let Some(app) = weak.upgrade() {
                         app.state.borrow_mut().source = source.clone();
-                        app.save_preferences(false);
+                        app.save_preferences();
                         // Source changes share the query revision and pending path.
                         let query = app.state.borrow().query.clone();
                         app.cancel_search();
@@ -166,7 +170,7 @@ impl App {
             button.connect_toggled(move |_| {
                 if let Some(app) = weak.upgrade() {
                     app.state.borrow_mut().toggle_type(i);
-                    app.save_preferences(false);
+                    app.save_preferences();
                     app.options_changed();
                     sync_options(&app, &upgrade(&types), &upgrade(&methods));
                     if let Some(results) = results.upgrade() {
@@ -320,36 +324,52 @@ impl App {
                 state.library.label()
             )
         } else {
-            format!(
-                "{} {} in {}",
+            result_summary(
                 results.len(),
-                if results.len() == 1 {
-                    "result"
-                } else {
-                    "results"
-                },
-                state.library.label()
+                &state.library.label(),
+                !self.search_paging.borrow().next.is_empty(),
             )
         };
-        output.append(&label(&status, "muted"));
+        let count = label(&status, "muted");
+        self.search_count.replace(count.downgrade());
+        output.append(&count);
         if !state.search_status.is_empty() {
             output.append(&label(&state.search_status, "muted"));
         }
         if !state.query.trim().is_empty() {
-            output.append(&self.grid(&results));
+            let grid = self.grid(&results);
+            self.search_grid.replace(grid.downgrade());
+            output.append(&grid);
+            output.append(&self.page_controls(true));
         }
     }
     fn options_changed(self: &Rc<Self>) {
-        self.save_preferences(false);
+        self.save_preferences();
         if !self.state.borrow().query_debouncing {
             self.request_search();
         }
     }
     pub fn request_search(self: &Rc<Self>) {
+        self.request_search_page(false);
+    }
+    pub fn request_search_more(self: &Rc<Self>) {
+        self.request_search_page(true);
+    }
+    fn request_search_page(self: &Rc<Self>, append: bool) {
         if self.loading.get() {
             return;
         }
-        self.cancel_search();
+        let token = if append {
+            let Some(token) = self.search_paging.borrow_mut().begin() else {
+                return;
+            };
+            token
+        } else {
+            self.cancel_search();
+            self.cancel_artwork();
+            self.search_paging.replace(crate::paging::Paging::default());
+            String::new()
+        };
         use screenroom_client_core::{Page, SearchMethods, SearchRequest, SearchTypes};
         let Ok(client) = self.client.clone() else {
             return;
@@ -360,8 +380,11 @@ impl App {
                 state.result_ids.clear();
                 return;
             }
-            state.search_revision += 1;
-            state.search_pending = true;
+            if !append {
+                state.search_revision += 1;
+                state.result_ids.clear();
+            }
+            state.search_pending = !append;
             state.query_debouncing = false;
             state.search_error = None;
             (
@@ -387,49 +410,18 @@ impl App {
                         .as_ref()
                         .map(|s| s.source_id.clone())
                         .unwrap_or_default(),
-                    page: Some(Page {
-                        size: 100,
-                        token: String::new(),
-                    }),
+                    page: Some(Page { size: 100, token }),
                 },
                 state.search_revision,
             )
         };
-        if let Some(output) = self.search_results.borrow().upgrade() {
+        if append {
+            self.update_page_controls(true);
+        } else if let Some(output) = self.search_results.borrow().upgrade() {
             self.update_results(&output);
         }
         let task = crate::backend::runtime().spawn(crate::backend::operation(async move {
-            let status = Arc::new(std::sync::Mutex::new(String::new()));
-            let items = crate::backend::paginate(|page| {
-                let client = client.clone();
-                let status = status.clone();
-                let mut request = request.clone();
-                request.page = Some(page);
-                async move {
-                    let response = client.search(request.clone()).await?;
-                    *status.lock().unwrap() = format!(
-                        "Effective methods: {:?}{}",
-                        response.effective_methods,
-                        if response.degradation_reason.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" · {}", response.degradation_reason)
-                        }
-                    );
-                    eprintln!(
-                        "core Search({:?}, {}, {}): {} results",
-                        request.query,
-                        request.library_id,
-                        request.source,
-                        response.items.len()
-                    );
-                    Ok((response.items, response.next_page_token))
-                }
-            })
-            .await?;
-            let status = status.lock().unwrap().clone();
-            let artwork = crate::backend::search_artwork(client, &items).await?;
-            Ok::<_, screenroom_client_core::ClientError>((items, status, artwork))
+            client.search(request).await
         }));
         let weak = Rc::downgrade(self);
         self.search_task.replace(Some(task.abort_handle()));
@@ -438,29 +430,66 @@ impl App {
             let Some(app) = weak.upgrade() else {
                 return;
             };
+            let mut added = Vec::new();
             {
                 let mut state = app.state.borrow_mut();
-                if state.search_revision != revision || state.screen != Screen::Search {
+                if state.search_revision != revision
+                    || state.screen != Screen::Search
+                    || state.detail.is_some()
+                {
                     return;
                 }
                 state.search_pending = false;
                 match result {
-                    Ok(Ok((items, status, artwork))) => {
-                        state.result_ids = items.iter().map(|i| i.id.clone()).collect();
-                        state.search_status = status;
-                        crate::catalog::merge_items(items);
-                        crate::assets::merge(artwork);
+                    Ok(Ok(response)) => {
+                        let accepted = app.search_paging.borrow_mut().accept(
+                            response.items.iter().map(|i| i.id.clone()),
+                            response.next_page_token,
+                        );
+                        if let Ok(ids) = accepted {
+                            added = ids;
+                            state.result_ids = app.search_paging.borrow().ids.clone();
+                            state.search_status = format!(
+                                "Effective methods: {}{}",
+                                method_labels(&response.effective_methods),
+                                if response.degradation_reason.is_empty() {
+                                    ""
+                                } else {
+                                    " · Search is degraded; results use the effective methods listed above."
+                                }
+                            );
+                            crate::catalog::merge_items(response.items);
+                        } else if !append {
+                            state.search_error = Some("Search exceeded the item limit. Retry to read the server state.".into());
+                        }
                     }
-                    Ok(Err(error)) => state.search_error = Some(error.to_string()),
-                    Err(error) => state.search_error = Some(error.to_string()),
+                    _ if append => app.search_paging.borrow_mut().fail(),
+                    _ => {
+                        state.search_error = Some(
+                            "Search could not be loaded. Retry to read the server state.".into(),
+                        )
+                    }
                 }
             }
-            if let Some(output) = app.search_results.borrow().upgrade() {
+            if append {
+                app.append_cards(true, &added);
+                app.update_page_controls(true);
+                if let Some(count) = app.search_count.borrow().upgrade() {
+                    let paging = app.search_paging.borrow();
+                    count.set_text(&result_summary(
+                        paging.ids.len(),
+                        &app.state.borrow().library.label(),
+                        !paging.next.is_empty() || paging.stopped,
+                    ));
+                }
+            } else if let Some(output) = app.search_results.borrow().upgrade() {
                 app.update_results(&output);
             }
+            app.request_artwork();
         });
     }
     pub fn cancel_search(&self) {
+        self.state.borrow_mut().search_revision += 1;
         if let Some(task) = self.search_task.borrow_mut().take() {
             task.abort();
         }
@@ -506,8 +535,29 @@ fn sync_options(
 fn source_label(source: &str) -> String {
     match source {
         "all" => "All".into(),
-        "tmdb" => "TMDB".into(),
         "jellyfin" => "Jellyfin".into(),
         _ => source.to_owned(),
     }
+}
+fn result_summary(count: usize, library: &str, has_more: bool) -> String {
+    format!(
+        "{count} {}{} in {library}",
+        if count == 1 { "result" } else { "results" },
+        if has_more { " loaded" } else { "" }
+    )
+}
+fn method_labels(methods: &Option<screenroom_client_core::SearchMethods>) -> String {
+    let Some(methods) = methods else {
+        return "Not reported".into();
+    };
+    [
+        (methods.text, "Text"),
+        (methods.fuzzy, "Fuzzy titles"),
+        (methods.semantic, "Semantic"),
+        (methods.title_only, "Titles only"),
+    ]
+    .into_iter()
+    .filter_map(|(enabled, label)| enabled.then_some(label))
+    .collect::<Vec<_>>()
+    .join(", ")
 }

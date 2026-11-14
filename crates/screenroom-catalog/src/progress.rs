@@ -11,6 +11,20 @@ use std::time::{Duration, Instant};
 use tonic::{Status, metadata::MetadataMap};
 
 pub(crate) struct Deadline(Instant);
+fn source_scopes(source_id: String, libraries: &[String]) -> Vec<SourceLibraryScope> {
+    let libraries = if libraries.is_empty() {
+        vec![String::new()]
+    } else {
+        libraries.to_vec()
+    };
+    libraries
+        .into_iter()
+        .map(|library_id| SourceLibraryScope {
+            source_id: source_id.clone(),
+            library_id,
+        })
+        .collect()
+}
 impl Deadline {
     pub(crate) fn from_metadata(metadata: &MetadataMap) -> Result<Self, Status> {
         let mut timeout = crate::transport::RPC_MAXIMUM;
@@ -75,6 +89,20 @@ impl Catalog {
         let Some(user_id) = user_id else {
             return Ok(vec![]);
         };
+        tokio::time::timeout(
+            deadline.remaining()?,
+            self.continue_watching_selected(user_id, scope, &deadline),
+        )
+        .await
+        .map_err(|_| Status::deadline_exceeded("progress deadline"))?
+    }
+
+    async fn continue_watching_selected(
+        &self,
+        user_id: String,
+        scope: &Scope,
+        deadline: &Deadline,
+    ) -> Result<Vec<Item>, Status> {
         let uri = self
             .user_uri
             .as_ref()
@@ -87,14 +115,10 @@ impl Catalog {
             .into_iter()
             .filter(|source| {
                 source.state == "enabled"
-                    && source.provider == "jellyfin"
                     && (scope.source_keys.is_empty()
                         || scope.source_keys.contains(&source.source_key))
             })
-            .map(|source| SourceLibraryScope {
-                source_id: source.source_key,
-                library_id: scope.library_ids.first().cloned().unwrap_or_default(),
-            })
+            .flat_map(|source| source_scopes(source.source_key, &scope.library_ids))
             .collect();
         if scopes.len() > 32 {
             return Err(Status::resource_exhausted("narrow progress source scope"));
@@ -111,57 +135,84 @@ impl Catalog {
             .connect()
             .await
             .map_err(|_| Status::unavailable("private progress unavailable"))?;
-        let mut request = tonic::Request::new(GetContinueWatchingRequest {
-            user_id,
-            scopes,
-            page_size: 50,
-            page_token: String::new(),
-        });
-        request.set_timeout(Duration::from_secs(10).min(deadline.remaining()?));
-        let response = PlaybackStateServiceClient::new(channel)
-            .max_decoding_message_size(256 * 1024)
-            .get_continue_watching(request)
-            .await
-            .map_err(|error| Status::new(error.code(), "private progress request failed"))?
-            .into_inner();
-        if response.entries.len() > 50
-            || response.entries.iter().any(|entry| {
-                entry.progress_percent > 100
-                    || !requested_sources.contains(&entry.source_id)
-                    || entry.external_item_id.is_empty()
-                    || entry.external_item_id.len() > 200
-            })
-        {
-            return Err(Status::unavailable(
-                "incompatible private progress response",
-            ));
-        }
+        let mut client =
+            PlaybackStateServiceClient::new(channel).max_decoding_message_size(256 * 1024);
+        let mut token = String::new();
+        let mut cursors = std::collections::BTreeSet::new();
+        let mut records = std::collections::BTreeSet::new();
         let mut items = vec![];
         let mut progress = vec![];
         let mut seen = std::collections::BTreeSet::new();
-        for entry in response.entries {
-            let Some(reference) = self
-                .catalog
-                .resolve_reference(scope, &entry.source_id, &entry.external_item_id)
+        let mut count = 0;
+        for page in 0..512 {
+            let mut request = tonic::Request::new(GetContinueWatchingRequest {
+                user_id: user_id.clone(),
+                scopes: scopes.clone(),
+                page_size: 50,
+                page_token: token,
+            });
+            request.set_timeout(Duration::from_secs(10).min(deadline.remaining()?));
+            let response = client
+                .get_continue_watching(request)
                 .await
-                .map_err(status)?
-            else {
-                continue;
-            };
-            if !seen.insert(reference.public_id.clone()) {
-                continue;
-            }
-            if let Some(row) = self
-                .catalog
-                .get(scope, &reference.public_id)
-                .await
-                .map_err(status)?
+                .map_err(|error| Status::new(error.code(), "private progress request failed"))?
+                .into_inner();
+            if response.entries.len() > 50
+                || response.entries.iter().any(|entry| {
+                    entry.progress_percent > 100
+                        || !requested_sources.contains(&entry.source_id)
+                        || entry.external_item_id.is_empty()
+                        || entry.external_item_id.len() > 200
+                })
             {
-                items.push(row);
-                progress.push(entry.progress_percent);
+                return Err(Status::unavailable(
+                    "incompatible private progress response",
+                ));
             }
+            count += response.entries.len();
+            if count > 10000 {
+                return Err(Status::resource_exhausted("progress bound"));
+            }
+            for entry in response.entries {
+                if !records.insert((entry.source_id.clone(), entry.external_item_id.clone())) {
+                    continue;
+                }
+                let Some(reference) = self
+                    .catalog
+                    .resolve_reference(scope, &entry.source_id, &entry.external_item_id)
+                    .await
+                    .map_err(status)?
+                else {
+                    continue;
+                };
+                if !seen.insert(reference.public_id.clone()) {
+                    continue;
+                }
+                if let Some(row) = self
+                    .catalog
+                    .get(scope, &reference.public_id)
+                    .await
+                    .map_err(status)?
+                {
+                    items.push(row);
+                    progress.push(entry.progress_percent);
+                    if items.len() == 50 {
+                        break;
+                    }
+                }
+            }
+            if items.len() == 50 || response.next_page_token.is_empty() {
+                break;
+            }
+            if page == 511
+                || response.next_page_token.len() > 16384
+                || !cursors.insert(response.next_page_token.clone())
+            {
+                return Err(Status::unavailable("invalid progress continuation"));
+            }
+            token = response.next_page_token;
         }
-        let mut items = self.hydrate_items(scope, items).await?;
+        let mut items = self.hydrate_items(scope, items, Some(&user_id)).await?;
         for (item, percent) in items.iter_mut().zip(progress) {
             item.progress_percent = Some(percent);
         }
@@ -172,6 +223,19 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_library_is_forwarded_and_empty_means_all() {
+        let scopes = source_scopes("local".into(), &["movies".into(), "tv".into()]);
+        assert_eq!(
+            scopes
+                .iter()
+                .map(|s| s.library_id.as_str())
+                .collect::<Vec<_>>(),
+            ["movies", "tv"]
+        );
+        assert!(scopes.iter().all(|s| s.source_id == "local"));
+        assert_eq!(source_scopes("local".into(), &[])[0].library_id, "");
+    }
     #[test]
     fn local_selector_is_explicit_and_single() {
         let mut metadata = MetadataMap::new();

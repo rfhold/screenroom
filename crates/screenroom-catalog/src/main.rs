@@ -50,13 +50,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("SCREENROOM_EMBEDDING_BASE_URL").is_some() {
             catalog=catalog.with_embedding(screenroom_backend::embedding::EmbeddingClient::new(screenroom_backend::embedding::EmbeddingConfig::from_env()?)?);
         }
-        let private_address=std::env::var("SCREENROOM_CATALOG_PRIVATE_LISTEN").unwrap_or_else(|_|"127.0.0.1:50062".into()).parse::<std::net::SocketAddr>()?;
-        let private_listener=tokio::net::TcpListener::bind(private_address).await?;
         let listener = tokio::net::TcpListener::bind(address).await?;
         tracing::info!(service.name = "screenroom-catalog", address = %listener.local_addr()?, "RPC server listening");
-        tracing::info!(address=%private_listener.local_addr()?,"Private operator server listening");
-        let (public,private)=tokio::join!(screenroom_catalog::serve(listener, shutdown_signal(), origins,catalog),screenroom_catalog::serve_operator(private_listener,shutdown_signal(),screenroom_catalog::Operator::new(pool)));
-        public?;private?;
+        screenroom_catalog::serve(listener, shutdown_signal(), origins,catalog).await?;
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
     let shutdown = telemetry.shutdown();

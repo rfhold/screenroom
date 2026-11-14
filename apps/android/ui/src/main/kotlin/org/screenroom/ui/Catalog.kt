@@ -1,6 +1,7 @@
 package org.screenroom.ui
 
 import androidx.compose.runtime.*
+import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.currentCoroutineContext
@@ -9,6 +10,7 @@ import org.screenroom.core.*
 
 internal typealias Art = Artwork
 internal data class Person(val name: String, val role: String, val art: Art?)
+internal data class HomeSection(val title: String, val items: List<Title>, val error: String?)
 internal typealias Rights = org.screenroom.core.Rights
 internal data class Title(val record: Item, val cast: List<Person> = emptyList(), val crew: List<Person> = emptyList()) {
     val id get() = record.id
@@ -20,6 +22,12 @@ internal data class Title(val record: Item, val cast: List<Person> = emptyList()
     val overview get() = record.overview
     val parent get() = record.parentId
     val progress get() = record.progressPercent?.toInt()
+    val watched get() = record.watched == true
+    val playbackAccessibility get() = listOfNotNull(if (watched) "Watched" else null, progress?.let { "Playback progress $it%" }).joinToString(", ")
+    fun labels(seasonContext: Boolean = false) = cardLabels(kind, title, meta, year, seasonContext)
+    fun accessibility(seasonContext: Boolean = false) = if (kind != "Episode") listOf(title, kind, meta, playbackAccessibility).filter(String::isNotEmpty).joinToString(", ")
+        else labels(seasonContext).let { listOf(it.heading, it.subtitle, playbackAccessibility).filter(String::isNotEmpty).joinToString(", ") }
+    val cardAccessibility get() = accessibility()
     val date get() = record.releaseDate
     val artwork get() = record.artwork
     val ink get() = presentationColor(record.colors.getOrNull(0), 0xff202020)
@@ -39,7 +47,8 @@ internal fun SearchCapabilities.toggleTitleOnly(current: Methods): Methods {
     return Methods(text, fuzzy, false, true)
 }
 internal fun SearchCapabilities.allowedTypes(types: SearchTypes?) = this.types.filter { when (it) { "Movie" -> types?.movie == true; "Series" -> types?.series == true; "Episode" -> types?.episode == true; else -> false } }.toSet()
-internal fun sourceLabel(source: String) = if (source == "all") "All" else source.replaceFirstChar { it.uppercase() }.let { if (source == "tmdb") source.uppercase() else it }
+internal fun SearchCapabilities.allowedSource(source: String) = sources.firstOrNull { it == source } ?: sources.firstOrNull().orEmpty()
+internal fun sourceLabel(source: String) = if (source == "all") "All" else source.replaceFirstChar { it.uppercase() }
 internal fun validLink(url: String): Boolean = try { java.net.URI(url).let { it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() && it.userInfo == null } } catch (_: Exception) { false }
 internal data class ProviderPresentation(val label: String, val url: String?)
 internal fun ProviderReference.presentation(rating: Rating?, score: String): ProviderPresentation = ProviderPresentation(
@@ -47,15 +56,24 @@ internal fun ProviderReference.presentation(rating: Rating?, score: String): Pro
     url.takeIf(::validLink))
 
 internal class CoreStore(endpoint: String, userId: String, private val settingsStore: SettingsStore) {
-    val client = Client(ClientConfig(endpoint, userId, 3000u))
+    private val config = ClientConfig(endpoint, userId, 3000u)
+    val client = Client(config)
+    fun profileClient() = Client(config)
+    var pendingProfileSource by mutableStateOf<String?>(null)
     var catalog by mutableStateOf(emptyList<Title>())
-    var homeRows by mutableStateOf(emptyList<Pair<String, List<Title>>>())
+    var homeRows by mutableStateOf(emptyList<HomeSection>())
+    val artworkRequests = ArtworkRequests { url: String ->
+        val bytes = coreRequest { client.loadArtwork(url) }
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                ?: error("Artwork unavailable")
+        }
+    }
     var homeScope by mutableStateOf<SourceLibraryScope?>(null)
     val localSettings = settingsStore.session
     val preferences get() = localSettings.value
     var capabilities by mutableStateOf<SearchCapabilities?>(null)
     var libraries by mutableStateOf(emptyList<MediaLibrary>())
-    var catalogInfo by mutableStateOf<CatalogInfo?>(null)
     var saving by mutableStateOf(false)
     private val preferenceLock = Mutex()
     val readRefresh = ReadRefresh()
@@ -69,19 +87,16 @@ internal class CoreStore(endpoint: String, userId: String, private val settingsS
         val request = bootstrapRequests.next()
         val caps = coreRequest { client.getSearchCapabilities() }.let { it.copy(types = it.types.map { type -> type.replaceFirstChar(Char::uppercase) }) }
         val libraries = collectPages { token -> coreRequest { client.listLibraries(scope.sourceId, org.screenroom.core.Page(100u, token)) }.let { it.libraries to it.nextPageToken } }
-        val info = coreRequest { client.getCatalogInfo() }
-        val rows = coreRequest { client.getHome(scope) }.map { it.title to it.items.map(Item::ui) }
+        val rows = coreRequest { client.getHome(scope) }.map { HomeSection(it.title, it.items.map(Item::ui), it.readError?.let { error -> progressError(error.code) }) }
         currentCoroutineContext().ensureActive()
         if (!bootstrapRequests.current(request)) throw kotlinx.coroutines.CancellationException("Superseded bootstrap")
-        capabilities = caps; catalog = (rows.flatMap { it.second } + catalog).distinctBy { it.id }; homeRows = rows
+        val source = caps.allowedSource(preferences.source)
+        if (source.isNotEmpty() && source != preferences.source) update(source = source)
+        currentCoroutineContext().ensureActive()
+        if (!bootstrapRequests.current(request)) throw kotlinx.coroutines.CancellationException("Superseded bootstrap")
+        capabilities = caps; catalog = (rows.flatMap { it.items } + catalog).distinctBy { it.id }; homeRows = rows
         homeScope = scope
-        this.libraries = listOf(MediaLibrary("all", "All libraries")) + libraries; catalogInfo = info
-    }
-    suspend fun items(read: suspend (org.screenroom.core.Page) -> ItemPage): List<Title> {
-        return collectPages { token ->
-            val result = coreRequest { read(org.screenroom.core.Page(100u, token)) }
-            result.items.map(Item::ui) to result.nextPageToken
-        }
+        this.libraries = listOf(MediaLibrary("all", "All libraries")) + libraries
     }
     suspend fun detail(id: String, library: String): Pair<Title, List<Title>> = readOperation {
         val request = detailRequests.next()
@@ -94,18 +109,17 @@ internal class CoreStore(endpoint: String, userId: String, private val settingsS
         }
         val full = item.copy(cast = credits.filter { it.department.equals("cast", true) }.map { Person(it.name, it.role, it.artwork) },
             crew = credits.filterNot { it.department.equals("cast", true) }.map { Person(it.name, it.role, it.artwork) })
-        val children = if (item.kind in listOf("Series", "Season")) items { client.listChildren(id, it, scope) } else emptyList()
+        val children = emptyList<Title>()
         currentCoroutineContext().ensureActive()
         if (!detailRequests.current(request)) throw kotlinx.coroutines.CancellationException("Superseded detail")
         catalog = (listOf(full) + ancestors + children + catalog).distinctBy { it.id }
         full to children
     }
-    suspend fun update(subtitle: String? = null, types: Set<String>? = null, methods: Methods? = null, source: String? = null, library: String? = null) = preferenceLock.withLock {
+    suspend fun update(types: Set<String>? = null, methods: Methods? = null, source: String? = null, library: String? = null) = preferenceLock.withLock {
         saving = true
         try {
         val current = preferences
-        val next = current.copy(subtitlePreference = subtitle ?: current.subtitlePreference,
-            types = types?.let { SearchTypes("Movie" in it, "Series" in it, "Episode" in it) } ?: current.types,
+        val next = current.copy(types = types?.let { SearchTypes("Movie" in it, "Series" in it, "Episode" in it) } ?: current.types,
             methods = methods?.let { SearchMethods(it.titleOnly, it.text, it.fuzzy, it.semantic) } ?: current.methods,
             source = source ?: current.source,
             scope = library?.let { requestScope(it) } ?: current.scope)

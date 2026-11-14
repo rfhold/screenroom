@@ -1,4 +1,4 @@
-use crate::{Catalog, Operator};
+use crate::Catalog;
 use axum::{
     Router,
     body::Body,
@@ -9,9 +9,7 @@ use axum::{
 };
 use screenroom_backend::{Uuid, catalog::Scope};
 use screenroom_observability::telemetry::rpc_layer;
-use screenroom_proto::catalog::{
-    operator::v1::ingestion_service_server::IngestionServiceServer, v1::*,
-};
+use screenroom_proto::catalog::v1::*;
 use std::time::Duration;
 
 pub(crate) const RPC_MAXIMUM: Duration = Duration::from_secs(30);
@@ -118,30 +116,6 @@ pub async fn serve(
     )
     .await
     .map_err(std::io::Error::other)
-}
-pub async fn serve_operator(
-    listener: tokio::net::TcpListener,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-    operator: Operator,
-) -> Result<(), tonic::transport::Error> {
-    let (cancel, _) = tokio::sync::watch::channel(false);
-    let server = tonic::transport::Server::builder()
-        .timeout(RPC_MAXIMUM)
-        .layer(rpc_layer())
-        .add_service(IngestionServiceServer::new(operator));
-    bounded_serve(
-        |signal| {
-            server.serve_with_incoming_shutdown(
-                tokio_stream::wrappers::TcpListenerStream::new(listener),
-                async {
-                    let _ = signal.await;
-                },
-            )
-        },
-        shutdown,
-        cancel,
-    )
-    .await
 }
 async fn ready(State(catalog): State<Catalog>) -> StatusCode {
     match screenroom_backend::db::ready(catalog.catalog.pool()).await {

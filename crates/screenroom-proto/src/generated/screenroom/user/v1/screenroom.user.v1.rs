@@ -21,5 +21,133 @@ pub struct GetCurrentUserResponse {
     #[prost(message, optional, tag="1")]
     pub user: ::core::option::Option<User>,
 }
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Page {
+    /// Zero selects 50; maximum 200. Larger sizes are invalid. Tokens are opaque,
+    /// bound to the operation, selected local user, and source (where applicable).
+    #[prost(uint32, tag="1")]
+    pub size: u32,
+    #[prost(string, tag="2")]
+    pub token: ::prost::alloc::string::String,
+}
+/// Public installation source key and label only; no upstream URL or credentials.
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct JellyfinSource {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub display_name: ::prost::alloc::string::String,
+}
+/// Eligible enabled upstream profile. Hidden profiles are allowed; disabled
+/// profiles are excluded. No credentials or private policy are exposed.
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct JellyfinProfile {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub display_name: ::prost::alloc::string::String,
+}
+/// Persisted mapping, not a claim of current upstream eligibility. Remains readable
+/// if the upstream is unavailable or the linked profile has been deleted/disabled.
+/// Display names are obtained separately from eligible profile discovery.
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct JellyfinLink {
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub jellyfin_user_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListJellyfinSourcesRequest {
+    #[prost(message, optional, tag="1")]
+    pub page: ::core::option::Option<Page>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJellyfinSourcesResponse {
+    /// Enabled Jellyfin installation sources only.
+    #[prost(message, repeated, tag="1")]
+    pub sources: ::prost::alloc::vec::Vec<JellyfinSource>,
+    #[prost(string, tag="2")]
+    pub next_page_token: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListJellyfinProfilesRequest {
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub page: ::core::option::Option<Page>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJellyfinProfilesResponse {
+    #[prost(message, repeated, tag="1")]
+    pub profiles: ::prost::alloc::vec::Vec<JellyfinProfile>,
+    #[prost(string, tag="2")]
+    pub next_page_token: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetJellyfinLinkRequest {
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetJellyfinLinkResponse {
+    /// Absent means no persisted mapping for this source and selected local user.
+    #[prost(message, optional, tag="1")]
+    pub link: ::core::option::Option<JellyfinLink>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetJellyfinLinkRequest {
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+    /// Must identify an eligible enabled profile; hidden profiles are allowed.
+    #[prost(string, tag="2")]
+    pub jellyfin_user_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SetJellyfinLinkResponse {
+    /// Authoritative persisted mapping after the mutation succeeds.
+    #[prost(message, optional, tag="1")]
+    pub link: ::core::option::Option<JellyfinLink>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearJellyfinLinkRequest {
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ClearJellyfinLinkResponse {
+    /// Authoritatively unlinked source. Idempotent and independent of upstream
+    /// availability or profile eligibility.
+    #[prost(string, tag="1")]
+    pub source_id: ::prost::alloc::string::String,
+}
 include!("screenroom.user.v1.tonic.rs");
 // @@protoc_insertion_point(module)

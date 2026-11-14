@@ -4,7 +4,7 @@ import { defaultMethods, type Methods, type Types, type Source } from '../core/s
 import { MetadataOperation } from './operation.mjs';
 
 export type Location = {
-  screen: 'home' | 'browse' | 'search';
+  screen: 'home' | 'browse' | 'search' | 'maintenance';
   library: Library;
   path: Item[];
   query: string;
@@ -16,9 +16,9 @@ export type Location = {
 };
 export function readLocation(url: { searchParams: Pick<URLSearchParams, 'get'> }, catalog = [...records.values()]): Location {
   const p = url.searchParams;
-  const screen = ['browse', 'search'].includes(p.get('screen') ?? '') ? p.get('screen') as Location['screen'] : 'home';
+  const screen = ['browse', 'search', 'maintenance'].includes(p.get('screen') ?? '') ? p.get('screen') as Location['screen'] : 'home';
   const library = (screen !== 'home' && libraries.find(entry => entry.id === p.get('library')) || libraries[0]) ?? { id: '', title: '' };
-  const series = library.id !== 'movies' && catalog.find(item => item.id === p.get('series') && item.kind === 'Series');
+  const series = catalog.find(item => item.id === p.get('series') && item.kind === 'Series');
   const season = series && catalog.find(item => item.id === p.get('season') && item.kind === 'Season' && item.parent === series.id);
   const path = screen === 'home' ? [] : [...(series ? [series] : []), ...(season ? [season] : [])];
   const rawTypes = p.get('types')?.split(',');
@@ -30,7 +30,7 @@ export function readLocation(url: { searchParams: Pick<URLSearchParams, 'get'> }
     methods = { titleOnly: rawMethods.includes('titleOnly'), text: rawMethods.includes('text'), fuzzy: rawMethods.includes('fuzzy'), semantic: rawMethods.includes('semantic') };
     if (methods.titleOnly) { methods.semantic = false; if (!methods.text && !methods.fuzzy) methods.text = true; }
   }
-  let title = catalog.find(item => item.id === p.get('title') && ['Movie', 'Episode'].includes(item.kind) && (library.id !== 'movies' || item.kind === 'Movie') && (library.id !== 'tv' || item.kind === 'Episode'));
+  let title = catalog.find(item => item.id === p.get('title') && ['Movie', 'Episode'].includes(item.kind));
   if (screen === 'browse' && path.length && title) {
     const parentId = title.parent;
     const parent = catalog.find(item => item.id === parentId);

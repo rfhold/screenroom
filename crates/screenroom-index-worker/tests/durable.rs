@@ -1,1423 +1,1335 @@
-//! Explicit opt-in tests against an isolated, disposable PostgreSQL database.
+//! Real Jellyfin execution over task-local HTTP and disposable PostgreSQL.
 use screenroom_backend::{
-    catalog::CatalogRepository,
-    db,
-    embedding::{EmbeddingClient, EmbeddingConfig},
-    ingest::{IngestRepository, PolicyWrite},
+    Uuid,
+    indexing::{Configuration, ConfigureRequest, IndexingRepository},
+    ingest::{IngestRepository, OperationClass},
+    repair::RepairRepository,
     sqlx,
-    storage::{ObjectStorage, StorageConfig},
 };
-use screenroom_catalog_adapter::{Faults, MockAdapters};
-use screenroom_index_worker::{Step, Worker};
+use screenroom_index_worker::Step;
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    net::TcpListener,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::atomic::Ordering;
+#[path = "support/http.rs"]
+mod http;
+use http::{Fixture, Http, drain, ready};
 
-struct IoDouble {
-    url: String,
-    stop: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    stall: Arc<AtomicBool>,
-    entered: Arc<AtomicBool>,
-}
-impl IoDouble {
-    fn new() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let done = stop.clone();
-        let stall = Arc::new(AtomicBool::new(false));
-        let entered = Arc::new(AtomicBool::new(false));
-        let stalled = stall.clone();
-        let reached = entered.clone();
-        let thread = std::thread::spawn(move || {
-            let mut objects = HashMap::<String, (Vec<u8>, String)>::new();
-            while !done.load(Ordering::Relaxed) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(2));
-                    continue;
-                };
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .unwrap();
-                let mut bytes = vec![];
-                let mut chunk = [0; 8192];
-                let header_end = loop {
-                    let n = stream.read(&mut chunk).unwrap();
-                    if n == 0 {
-                        break None;
-                    }
-                    bytes.extend_from_slice(&chunk[..n]);
-                    if let Some(i) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
-                        break Some(i + 4);
-                    }
-                };
-                let Some(end) = header_end else { continue };
-                let header = String::from_utf8_lossy(&bytes[..end]).to_string();
-                let length = header
-                    .lines()
-                    .find_map(|l| {
-                        l.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
-                            .map(|s| s.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap_or(0);
-                while bytes.len() < end + length {
-                    let n = stream.read(&mut chunk).unwrap();
-                    if n == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&chunk[..n]);
-                }
-                let mut parts = header.lines().next().unwrap().split_whitespace();
-                let method = parts.next().unwrap();
-                let path = parts.next().unwrap();
-                if method == "PUT" && stalled.load(Ordering::Relaxed) {
-                    reached.store(true, Ordering::Relaxed);
-                    while stalled.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                }
-                let (status, body, length, mime) = if path == "/v1/embeddings" {
-                    let mut vector = vec![0.0f32; 1024];
-                    vector[0] = 1.0;
-                    let body = serde_json::to_vec(
-                        &json!({"model":"test","data":[{"index":0,"embedding":vector}]}),
-                    )
-                    .unwrap();
-                    (200, body.clone(), body.len(), "application/json")
-                } else if method == "PUT" {
-                    let mime = header
-                        .lines()
-                        .find_map(|line| {
-                            line.split_once(':')
-                                .filter(|(name, _)| name.eq_ignore_ascii_case("content-type"))
-                                .map(|(_, value)| value.trim().to_owned())
-                        })
-                        .unwrap();
-                    objects.insert(path.into(), (bytes[end..end + length].to_vec(), mime));
-                    (200, vec![], 0, "application/json")
-                } else if let Some((object, mime)) = objects.get(path) {
-                    (
-                        200,
-                        if method == "HEAD" {
-                            vec![]
-                        } else {
-                            object.clone()
-                        },
-                        object.len(),
-                        mime.as_str(),
-                    )
-                } else {
-                    (404, vec![], 0, "application/json")
-                };
-                let _ = write!(
-                    stream,
-                    "HTTP/1.1 {status} OK\r\nContent-Length: {length}\r\nContent-Type: {mime}\r\nConnection: close\r\n\r\n"
-                );
-                let _ = stream.write_all(&body);
-            }
-        });
-        Self {
-            url,
-            stop,
-            thread: Some(thread),
-            stall,
-            entered,
-        }
-    }
-}
-impl Drop for IoDouble {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        let _ = self.thread.take().unwrap().join();
-    }
-}
-
-async fn worker(pool: sqlx::PgPool, io: &IoDouble, faults: Faults) -> Worker {
-    worker_revision(pool, io, faults, "test-r1").await
-}
-
-async fn worker_revision(
-    pool: sqlx::PgPool,
-    io: &IoDouble,
-    faults: Faults,
-    revision: &str,
-) -> Worker {
-    worker_from_root(
-        pool,
-        io,
-        faults,
-        revision,
-        std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../fixtures/catalog"
-        )),
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn managed_connection_becomes_usable_without_restart_and_replacement_is_fenced() {
+    use screenroom_backend::connections::{ConnectionRepository, CredentialDirectory, SaveRequest};
+    let http = Http::new().await;
+    let f = Fixture::empty().await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    assert!(w.capabilities().await.unwrap().is_empty());
+    assert_eq!(w.step().await.unwrap(), Step::Idle);
+    assert_eq!(http.state.calls.load(Ordering::SeqCst), 0);
+    let user = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO identity.users(id,public_id,display_name) VALUES($1,$2,'Actual local user')",
     )
+    .bind(user)
+    .bind(user.to_string())
+    .execute(&f.pool)
     .await
-}
-
-async fn worker_from_root(
-    pool: sqlx::PgPool,
-    io: &IoDouble,
-    faults: Faults,
-    revision: &str,
-    root: &std::path::Path,
-) -> Worker {
-    Worker::new(
-        pool,
-        MockAdapters::load(root, faults).unwrap(),
-        EmbeddingClient::new(EmbeddingConfig {
-            base_url: format!("{}/v1", io.url),
-            model: "test".into(),
-            revision: revision.into(),
-            dimensions: 1024,
-            api_key: None,
-            timeout: Duration::from_secs(5),
+    .unwrap();
+    let connections = ConnectionRepository::new(
+        f.pool.clone(),
+        Some(CredentialDirectory::new(http.credential_directory()).unwrap()),
+    );
+    let saved = connections
+        .save(&SaveRequest {
+            request_id: Uuid::new_v4(),
+            base_url: http.url.clone(),
+            api_key: "test-only-secret".into(),
+            server_id: "local-http-server".into(),
+            profile_id: "selected".into(),
+            library_ids: vec!["movies".into()],
+            local_user_id: user,
+            refresh: true,
         })
-        .unwrap(),
-        ObjectStorage::new(StorageConfig {
-            endpoint: io.url.clone(),
-            region: "garage".into(),
-            bucket: "test".into(),
-            access_key_id: "test".into(),
-            secret_access_key: "test-secret".into(),
-            timeout: Duration::from_secs(5),
-        })
-        .unwrap(),
-        "durable-test".into(),
-    )
-    .await
-    .unwrap()
-}
-
-async fn drain(w: &Worker) {
-    for _ in 0..300 {
-        match w.step().await.unwrap() {
-            Step::Idle => return,
-            Step::Committed => {}
-            step => panic!("unexpected step {step:?}"),
-        }
-    }
-    panic!("drain did not converge");
-}
-
-async fn isolated_pool() -> sqlx::PgPool {
-    let pool = unmigrated_pool().await;
-    db::migrate(&pool).await.unwrap();
-    pool
-}
-
-async fn unmigrated_pool() -> sqlx::PgPool {
-    static SERVER_BOOTSTRAP: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-    let url = std::env::var("SCREENROOM_W_TEST_DATABASE_URL").unwrap();
-    SERVER_BOOTSTRAP
-        .get_or_init(|| async {
-            let bootstrap = sqlx::PgPool::connect(&url).await.unwrap();
-            db::migrate(&bootstrap).await.unwrap();
-            bootstrap.close().await;
-        })
-        .await;
-    let admin = sqlx::PgPool::connect(&url).await.unwrap();
-    let name = format!("w_{}", screenroom_backend::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE {name}"))
-        .execute(&admin)
         .await
         .unwrap();
-    admin.close().await;
-    let options = url
-        .parse::<sqlx::postgres::PgConnectOptions>()
-        .unwrap()
-        .database(&name);
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(4)
-        .connect_with(options)
-        .await
-        .unwrap()
-}
-
-#[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn service_startup_migrates_fresh_database_and_fails_closed() {
-    use sqlx::ConnectOptions;
-    let pool = unmigrated_pool().await;
-    let migrations: Option<String> =
-        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations')::text")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let run = saved.run_id.unwrap();
     assert!(
-        migrations.is_none(),
-        "service startup target must be unmigrated"
-    );
-    let io = IoDouble::new();
-    let command = || {
-        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_screenroom-index-worker"));
-        command
-            .arg("drain")
-            .env(
-                "DATABASE_URL",
-                pool.connect_options().to_url_lossy().as_str(),
-            )
-            .env_remove("SCREENROOM_MIGRATION_DATABASE_URL")
-            .env(
-                "SCREENROOM_FIXTURE_ROOT",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/catalog"),
-            )
-            .env("SCREENROOM_EMBEDDING_BASE_URL", format!("{}/v1", io.url))
-            .env("SCREENROOM_EMBEDDING_MODEL", "test")
-            .env("SCREENROOM_EMBEDDING_REVISION", "test-r1")
-            .env("SCREENROOM_EMBEDDING_DIMENSIONS", "1024")
-            .env_remove("SCREENROOM_EMBEDDING_API_KEY")
-            .env("SCREENROOM_S3_ENDPOINT", &io.url)
-            .env("SCREENROOM_S3_REGION", "garage")
-            .env("SCREENROOM_S3_BUCKET", "test")
-            .env("SCREENROOM_S3_ACCESS_KEY_ID", "test")
-            .env("SCREENROOM_S3_SECRET_ACCESS_KEY", "test-secret")
-            .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-            .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT");
-        command
-    };
-    let first = command().output().unwrap();
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let migrations: i64 = sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations WHERE success")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(migrations >= 5);
-    let models: i64 = sqlx::query_scalar("SELECT count(*) FROM search.embedding_models")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(
-        models, 1,
-        "worker initializes only after automatic migration"
-    );
-    let repeat = command().output().unwrap();
-    assert!(repeat.status.success());
-    let blocked = command()
-        .env(
-            "SCREENROOM_MIGRATION_DATABASE_URL",
-            "invalid-migration-secret",
-        )
-        .output()
-        .unwrap();
-    assert_eq!(
-        blocked.status.code(),
-        Some(1),
-        "runtime database is reachable but cannot bypass migration failure"
-    );
-    assert!(!String::from_utf8_lossy(&blocked.stderr).contains("invalid-migration-secret"));
-    sqlx::query("UPDATE _sqlx_migrations SET checksum=$1 WHERE version=(SELECT min(version) FROM _sqlx_migrations)")
-        .bind(vec![0u8;48]).execute(&pool).await.unwrap();
-    let checksum_failure = command().output().unwrap();
-    assert_eq!(
-        checksum_failure.status.code(),
-        Some(1),
-        "checksum mismatch cannot start a worker"
-    );
-    pool.close().await;
-}
-
-struct FixtureCopy(std::path::PathBuf);
-impl FixtureCopy {
-    fn new() -> Self {
-        fn copy(source: &std::path::Path, destination: &std::path::Path) {
-            std::fs::create_dir_all(destination).unwrap();
-            for entry in std::fs::read_dir(source).unwrap() {
-                let entry = entry.unwrap();
-                let target = destination.join(entry.file_name());
-                if entry.file_type().unwrap().is_dir() {
-                    copy(&entry.path(), &target);
-                } else {
-                    std::fs::copy(entry.path(), target).unwrap();
-                }
-            }
-        }
-        let root = std::env::temp_dir().join(format!(
-            "screenroom-w-art-{}",
-            screenroom_backend::Uuid::new_v4()
-        ));
-        copy(
-            std::path::Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../fixtures/catalog"
-            )),
-            &root,
-        );
-        Self(root)
-    }
-}
-impl Drop for FixtureCopy {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-#[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn physically_missing_artwork_variants_are_omitted_and_repaired_by_new_ingestion() {
-    use screenroom_backend::{catalog::Scope, media::MediaRepository};
-    use screenroom_catalog_adapter::Error as AdapterError;
-
-    let pool = isolated_pool().await;
-    let io = IoDouble::new();
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let media = MediaRepository::new(pool.clone());
-    for native in [false, true] {
-        let fixture = FixtureCopy::new();
-        let adapters = MockAdapters::load(&fixture.0, Faults::default()).unwrap();
-        let art = adapters
-            .artwork()
-            .iter()
-            .find(|art| art.id == "tmdb")
-            .unwrap();
-        let file = if native {
-            art.render_file.as_ref().unwrap()
-        } else {
-            &art.file
-        };
-        let path = fixture.0.join("artwork").join(file);
-        let bytes = std::fs::read(&path).unwrap();
-        std::fs::remove_file(&path).unwrap();
-        let missing = MockAdapters::load(&fixture.0, Faults::default()).unwrap();
-        assert!(matches!(
-            missing.read_artwork("tmdb", native),
-            Err(AdapterError::MissingArtwork)
-        ));
-        assert!(missing.read_artwork("tmdb", !native).is_ok());
-
-        let source_key = if native {
-            "physical-native"
-        } else {
-            "physical-original"
-        };
-        let source = catalog
-            .configure_source(source_key, "tmdb", &json!({"adapter":"mock"}), &json!({}))
+        w.capabilities()
             .await
-            .unwrap();
-        let policy = ingest.create_policy(source.id, &PolicyWrite {
-            enabled:true, selection_json:json!({"feeds":[{"feed_key":"one-film","feed":"MovieUpcoming","max_pages":1,"page_size":1,"locale":"en-US","region":null,"trending_window":null}]}),
-            max_items:10, max_requests:10, incremental_seconds:3600, reconcile_seconds:3600,
-            enrich_metadata:false, enrich_people:false, enrich_artwork:true,
-        }).await.unwrap();
-        let w = worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-        let run = ingest.start_run(policy.id).await.unwrap();
-        drain(&w).await;
-        assert_eq!(ingest.run(run.id).await.unwrap().unwrap().state, "complete");
-        let metadata_and_vectors:i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.source_items si JOIN search.documents d ON d.source_item_id=si.id JOIN search.embeddings e ON e.document_id=d.id AND e.input_hash=d.content_hash WHERE si.source_id=$1")
-            .bind(source.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(
-            metadata_and_vectors, 1,
-            "missing optional bytes must not stop metadata or embedding jobs"
-        );
-        let omissions = ingest.artwork_omissions(run.id, None, 10).await.unwrap();
-        assert_eq!(omissions.len(), 1);
-        assert_eq!(omissions[0].source_artwork_id, "tmdb");
-        assert_eq!(serde_json::to_value(omissions[0].code).unwrap(), "missing");
-        let generations:i64 = sqlx::query_scalar("SELECT count(*) FROM media.artwork_generations g JOIN media.artwork a ON a.id=g.artwork_id WHERE a.source_id=$1 AND a.source_artwork_id='tmdb'")
-            .bind(source.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(
-            generations, 0,
-            "missing required original or native cannot fabricate a generation"
-        );
-        let variants:i64 = sqlx::query_scalar("SELECT count(*) FROM media.variants v JOIN media.artwork a ON a.id=v.artwork_id WHERE a.source_id=$1 AND a.source_artwork_id='tmdb'")
-            .bind(source.id).fetch_one(&pool).await.unwrap();
-        assert_eq!(variants, 0);
-
-        std::fs::write(&path, &bytes).unwrap();
-        let repaired =
-            worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-        let repair = ingest.start_run(policy.id).await.unwrap();
-        drain(&repaired).await;
-        assert_eq!(
-            ingest.run(repair.id).await.unwrap().unwrap().state,
-            "complete"
-        );
-        assert!(
-            ingest
-                .artwork_omissions(repair.id, None, 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        let ready:(screenroom_backend::Uuid, Option<i64>, i64) = sqlx::query_as("SELECT id,revision,current_generation FROM media.artwork WHERE source_id=$1 AND source_artwork_id='tmdb'")
-            .bind(source.id).fetch_one(&pool).await.unwrap();
-        assert_eq!((ready.1, ready.2), (Some(1), 1));
-        let restored = MockAdapters::load(&fixture.0, Faults::default()).unwrap();
-        for variant in ["original", "native"] {
-            let object = media
-                .resolve(&Scope::default(), ready.0, 1, variant)
-                .await
-                .unwrap()
-                .unwrap();
-            let expected = restored.read_artwork("tmdb", variant == "native").unwrap();
-            use sha2::{Digest, Sha256};
-            assert_eq!(object.location.sha256, Sha256::digest(&expected).to_vec());
-        }
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
-    }
-    pool.close().await;
-}
-
-#[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn actual_artwork_inputs_a_b_a_publish_complete_generations_and_keep_old_objects() {
-    use screenroom_backend::{catalog::Scope, media::MediaRepository};
-    use screenroom_catalog_adapter::{Feed, FeedPolicy};
-    let pool = isolated_pool().await;
-    let fixture = FixtureCopy::new();
-    let io = IoDouble::new();
-    let adapters = MockAdapters::load(&fixture.0, Faults::default()).unwrap();
-    let policy = FeedPolicy {
-        feed: Feed::MovieUpcoming,
-        max_pages: 1,
-        page_size: 1,
-        locale: "en-US".into(),
-        region: None,
-        trending_window: None,
-    };
-    let page = adapters.tmdb_page(&policy, None).unwrap();
-    let key = &page.items[0].item.artwork_keys[0];
-    let art = adapters.artwork().iter().find(|a| &a.id == key).unwrap();
-    assert!(!art.file.ends_with(".svg") && art.render_file.is_none());
-    let image_path = fixture.0.join("artwork").join(&art.file);
-    let a = std::fs::read(&image_path).unwrap();
-    let other = adapters
-        .artwork()
-        .iter()
-        .find(|other| other.id != art.id && other.file.ends_with(".png"))
-        .unwrap();
-    let b = std::fs::read(fixture.0.join("artwork").join(&other.file)).unwrap();
-    assert_ne!(a, b);
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let media = MediaRepository::new(pool.clone());
-    let source = catalog
-        .configure_source(
-            "revision-tmdb",
-            "tmdb",
-            &json!({"adapter":"mock"}),
-            &json!({}),
-        )
-        .await
-        .unwrap();
-    let p=ingest.create_policy(source.id,&PolicyWrite {
-        enabled:true,selection_json:json!({"feeds":[{"feed_key":"one-film","feed":"MovieUpcoming","max_pages":1,"page_size":1,"locale":"en-US","region":null,"trending_window":null}]}),
-        max_items:10,max_requests:10,incremental_seconds:3600,reconcile_seconds:3600,enrich_metadata:false,enrich_people:false,enrich_artwork:true,
-    }).await.unwrap();
-    let w = worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-    ingest.start_run(p.id).await.unwrap();
+            .unwrap()
+            .contains(&format!("source:{}", saved.connection.source_key))
+    );
     drain(&w).await;
-    let id: screenroom_backend::Uuid = sqlx::query_scalar(
-        "SELECT id FROM media.artwork WHERE source_id=$1 AND source_artwork_id=$2",
-    )
-    .bind(source.id)
-    .bind(key)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let first = media
-        .resolve(&Scope::default(), id, 1, "native")
+    let status = RepairRepository::new(f.pool.clone())
+        .run_status(run)
         .await
-        .unwrap()
         .unwrap();
-    for (bytes, revision) in [(&b, 2i64), (&a, 3i64)] {
-        std::fs::write(&image_path, bytes).unwrap();
-        let w = worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-        ingest.start_run(p.id).await.unwrap();
-        assert_eq!(w.step().await.unwrap(), Step::Committed);
-        let pending: (Option<i64>, i64) =
-            sqlx::query_as("SELECT revision,current_generation FROM media.artwork WHERE id=$1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(pending, (Some(revision - 1), revision));
-        assert!(
-            media
-                .resolve(&Scope::default(), id, revision, "native")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert_eq!(w.step().await.unwrap(), Step::Committed);
-        let still_old: Option<i64> =
-            sqlx::query_scalar("SELECT revision FROM media.artwork WHERE id=$1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(
-            still_old,
-            Some(revision - 1),
-            "one variant must not advance the pointer"
-        );
-        drain(&w).await;
-        let ready = media
-            .resolve(&Scope::default(), id, revision, "native")
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(!ready.location.object_key.is_empty());
-        let old = media
-            .resolve(&Scope::default(), id, 1, "native")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(old.location.object_key, first.location.object_key);
-    }
-    let fingerprints: Vec<Vec<u8>> = sqlx::query_scalar(
-        "SELECT fingerprint FROM media.artwork_generations WHERE artwork_id=$1 ORDER BY revision",
-    )
-    .bind(id)
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(fingerprints.len(), 3);
-    assert_eq!(fingerprints[0], fingerprints[2]);
-    assert_ne!(fingerprints[0], fingerprints[1]);
-    // An unchanged repeat reuses generation 3 instead of allocating a fourth revision.
-    let unchanged =
-        worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-    ingest.start_run(p.id).await.unwrap();
-    drain(&unchanged).await;
-    let current: i64 =
-        sqlx::query_scalar("SELECT current_generation FROM media.artwork WHERE id=$1")
-            .bind(id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(current, 3);
-    std::fs::write(&image_path, b"invalid-image-input").unwrap();
-    let invalid =
-        worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-    let invalid_run = ingest.start_run(p.id).await.unwrap();
-    drain(&invalid).await;
+    assert!(status.work_succeeded, "{status:?}");
+    assert_eq!(status.run.items, 6);
     assert_eq!(
-        ingest.run(invalid_run.id).await.unwrap().unwrap().state,
-        "complete"
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embedding_models")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
     );
-    let omissions = ingest
-        .artwork_omissions(invalid_run.id, None, 10)
+    let second = IndexingRepository::new(f.pool.clone())
+        .start(&screenroom_backend::indexing::StartRequest {
+            request_id: Uuid::new_v4(),
+            policy_id: saved.policy_id,
+            policy_version: saved.policy_version,
+            scope: None,
+        })
         .await
         .unwrap();
-    assert_eq!(omissions.len(), 1);
-    assert_eq!(omissions[0].source_artwork_id, *key);
-    assert_eq!(serde_json::to_value(omissions[0].code).unwrap(), "invalid");
-    let still_ready = media
-        .resolve(&Scope::default(), id, 3, "native")
+    http.state.replacement_server.store(1, Ordering::SeqCst);
+    let calls = http.state.calls.load(Ordering::SeqCst);
+    assert_eq!(w.step().await.unwrap(), Step::Failed);
+    assert_eq!(http.state.calls.load(Ordering::SeqCst), calls + 1);
+    let blocked = RepairRepository::new(f.pool.clone())
+        .run_status(second.id)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(still_ready.location.object_key, first.location.object_key);
-    std::fs::write(&image_path, &b).unwrap();
-    let repaired =
-        worker_from_root(pool.clone(), &io, Faults::default(), "test-r1", &fixture.0).await;
-    let repair = ingest.start_run(p.id).await.unwrap();
-    drain(&repaired).await;
-    assert!(
-        ingest
-            .artwork_omissions(repair.id, None, 10)
+    assert!(!blocked.work_succeeded);
+    assert_eq!(blocked.run.items, 0);
+    assert_eq!(blocked.coverage.permanent_attempts, 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM catalog.source_items")
+            .fetch_one(&f.pool)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        6
     );
-    assert!(
-        media
-            .resolve(&Scope::default(), id, 4, "native")
-            .await
-            .unwrap()
-            .is_some()
-    );
-    pool.close().await;
+    f.cleanup().await;
 }
 
 #[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn standalone_tmdb_hierarchy_restart_and_child_corruption() {
-    let pool = isolated_pool().await;
-    let io = IoDouble::new();
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let source = catalog
-        .configure_source(
-            "hierarchy-tmdb",
-            "tmdb",
-            &json!({"adapter":"mock"}),
-            &json!({}),
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn successful_phase_transitions_do_not_exhaust_single_attempt_policy() {
+    let http = Http::new().await;
+    http.state.count.store(4, Ordering::SeqCst);
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let policy = f.policy("full", true, false, "all").await;
+    let mut configuration = Configuration::from_value(&policy.selection_json).unwrap();
+    configuration.limits.retry.max_attempts = 1;
+    let policy = IndexingRepository::new(f.pool.clone())
+        .configure(
+            f.source,
+            &ConfigureRequest {
+                request_id: Uuid::new_v4(),
+                existing: Some(screenroom_backend::indexing::Existing {
+                    policy_id: policy.id,
+                    expected_version: policy.version,
+                }),
+                configuration,
+            },
         )
         .await
         .unwrap();
-    let p=ingest.create_policy(source.id,&PolicyWrite {
-        enabled:true,selection_json:json!({"feeds":[{"feed_key":"tv-root","feed":"TvPopular","max_pages":1,"page_size":1,"locale":"en-US","region":null,"trending_window":null}]}),
-        max_items:1,max_requests:1,incremental_seconds:3600,reconcile_seconds:3600,
-        enrich_metadata:false,enrich_people:false,enrich_artwork:false,
-    }).await.unwrap();
-    for (faults, expected, diagnostic) in [
-        (Faults::default(), "complete", None),
-        (
-            Faults {
-                partial_page: Some(0),
-                ..Default::default()
+    for _ in 0..2 {
+        let run = f.start(&policy).await;
+        drain(&w).await;
+        let status = RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
+            .await
+            .unwrap();
+        assert!(status.work_succeeded, "{status:?}");
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.attempts a JOIN queue.jobs j ON j.id=a.job_id WHERE j.scope_id=$1 AND a.outcome NOT IN ('released','complete')")
+            .bind(run.id).fetch_one(&f.pool).await.unwrap(), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            4
+        );
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.request_receipts WHERE run_id=$1 AND outcome<>'success'")
+            .bind(run.id).fetch_one(&f.pool).await.unwrap(), 0);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND max_attempts<>1"
+            )
+            .bind(run.id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            0
+        );
+    }
+    assert!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM queue.jobs WHERE kind='artwork' AND state='complete'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+            > 0
+    );
+    f.cleanup().await;
+}
+
+async fn automatic_policies(
+    f: &Fixture,
+    include_compatible: bool,
+) -> Option<screenroom_backend::ingest::Policy> {
+    let incompatible = f.policy("full", false, true, "all").await;
+    let mut configuration = Configuration::from_value(&incompatible.selection_json).unwrap();
+    configuration.automatic_runs = true;
+    let indexing = IndexingRepository::new(f.pool.clone());
+    for _ in 0..101 {
+        indexing
+            .configure(
+                f.source,
+                &ConfigureRequest {
+                    request_id: Uuid::new_v4(),
+                    existing: None,
+                    configuration: configuration.clone(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let compatible = if include_compatible {
+        let mut compatible = configuration;
+        compatible.components.embeddings = false;
+        compatible.components.artwork = true;
+        Some(
+            indexing
+                .configure(
+                    f.source,
+                    &ConfigureRequest {
+                        request_id: Uuid::new_v4(),
+                        existing: None,
+                        configuration: compatible,
+                    },
+                )
+                .await
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    sqlx::query("UPDATE ingest.policies SET next_due_at=clock_timestamp()-interval '2 hours' WHERE automatic_runs")
+        .execute(&f.pool).await.unwrap();
+    if let Some(compatible) = &compatible {
+        sqlx::query(
+        "UPDATE ingest.policies SET next_due_at=clock_timestamp()-interval '1 hour' WHERE id=$1",
+    )
+    .bind(compatible.id)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    }
+    compatible
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn bounded_scheduler_continuation_admits_compatible_policy_after_101_incompatible() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let compatible = automatic_policies(&f, true).await.unwrap();
+    assert_eq!(w.start_due().await.unwrap(), (0, false));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(w.start_due().await.unwrap(), (1, true));
+    let run: Uuid = sqlx::query_scalar("SELECT id FROM ingest.runs WHERE policy_id=$1")
+        .bind(compatible.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    drain(&w).await;
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(run)
+            .await
+            .unwrap()
+            .work_succeeded
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs r JOIN ingest.policies p ON p.id=r.policy_id WHERE p.selection_json#>>'{components,embeddings}'='true'").fetch_one(&f.pool).await.unwrap(), 0);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.attempts a JOIN queue.jobs j ON j.id=a.job_id WHERE j.scope_id<>$1").bind(run).fetch_one(&f.pool).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embedding_models")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn automatic_embedding_policy_without_model_does_not_stop_compatible_work() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let compatible = f.policy("full", true, false, "all").await;
+    let incompatible = f.policy("full", false, true, "all").await;
+    let mut configuration = Configuration::from_value(&incompatible.selection_json).unwrap();
+    configuration.automatic_runs = true;
+    let incompatible = IndexingRepository::new(f.pool.clone())
+        .configure(
+            f.source,
+            &ConfigureRequest {
+                request_id: Uuid::new_v4(),
+                existing: Some(screenroom_backend::indexing::Existing {
+                    policy_id: incompatible.id,
+                    expected_version: incompatible.version,
+                }),
+                configuration,
             },
-            "complete",
-            None,
-        ),
-        (
-            Faults {
-                loop_cursor_page: Some(1),
-                ..Default::default()
-            },
-            "failed",
-            Some("cursor_loop"),
-        ),
-        (
-            Faults {
-                duplicate_page: Some(1),
-                ..Default::default()
-            },
-            "failed",
-            Some("repeated_page"),
-        ),
-    ] {
-        let run = ingest.start_run(p.id).await.unwrap();
-        let mut saw_child_cursor = false;
-        for _ in 0..20 {
-            let w = worker(pool.clone(), &io, faults.clone()).await;
-            drain(&w).await;
-            let current = ingest.run(run.id).await.unwrap().unwrap();
-            let state = ingest
-                .run_checkpoint(&current, "traversal-v1")
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE ingest.policies SET next_due_at=clock_timestamp() WHERE id=$1")
+        .bind(incompatible.id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(w.start_due().await.unwrap(), (0, true));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    let run = f.start(&compatible).await;
+    assert_eq!(w.start_due().await.unwrap(), (0, true));
+    drain(&w).await;
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
+            .await
+            .unwrap()
+            .work_succeeded
+    );
+    assert_eq!(w.start_due().await.unwrap(), (0, true));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs WHERE policy_id=$1")
+            .bind(incompatible.id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.jobs WHERE scope_id IN (SELECT id FROM ingest.runs WHERE policy_id=$1)")
+        .bind(incompatible.id).fetch_one(&f.pool).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embedding_models")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(w.step().await.unwrap(), Step::Idle);
+    sqlx::query("UPDATE ingest.policies SET selection_json=jsonb_set(selection_json,'{limits,work_timeout_seconds}','0') WHERE id=$1")
+        .bind(incompatible.id).execute(&f.pool).await.unwrap();
+    assert!(matches!(
+        w.start_due().await,
+        Err(screenroom_backend::Error::Invalid(_))
+    ));
+    f.cleanup().await;
+}
+
+struct WorkerProcess(std::process::Child);
+impl Drop for WorkerProcess {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+fn worker_process(http: &Http, f: &Fixture, command: &str) -> WorkerProcess {
+    use std::process::{Command, Stdio};
+    WorkerProcess(
+        Command::new(env!("CARGO_BIN_EXE_screenroom-index-worker"))
+            .arg(command)
+            .env_clear()
+            .env("DATABASE_URL", f.database_url())
+            .env(
+                "SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY",
+                http.credential_directory(),
+            )
+            .env("SCREENROOM_S3_ENDPOINT", &http.url)
+            .env("SCREENROOM_S3_REGION", "garage")
+            .env("SCREENROOM_S3_BUCKET", "objects")
+            .env("SCREENROOM_S3_ACCESS_KEY_ID", "test")
+            .env("SCREENROOM_S3_SECRET_ACCESS_KEY", "test-only")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    )
+}
+
+async fn process_scheduling_sweep(command: &str, include_compatible: bool) {
+    use std::time::Duration;
+    let http = Http::new().await;
+    http.state.count.store(1, Ordering::SeqCst);
+    let f = Fixture::new(&http).await;
+    let compatible = automatic_policies(&f, include_compatible).await;
+    let mut process = worker_process(&http, &f, command);
+    if command == "serve" {
+        let policy = compatible.as_ref().unwrap();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                assert!(
+                    process.0.try_wait().unwrap().is_none(),
+                    "serve exited prematurely"
+                );
+                let run: Option<Uuid> =
+                    sqlx::query_scalar("SELECT id FROM ingest.runs WHERE policy_id=$1")
+                        .bind(policy.id)
+                        .fetch_optional(&f.pool)
+                        .await
+                        .unwrap();
+                if let Some(run) = run
+                    && RepairRepository::new(f.pool.clone())
+                        .run_status(run)
+                        .await
+                        .unwrap()
+                        .work_succeeded
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("serve never reached the compatible automatic policy");
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-TERM", &process.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let status = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(status) = process.0.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("worker did not terminate after a scheduling sweep or shutdown signal");
+    assert!(status.success(), "worker failed: {status}");
+    if let Some(compatible) = compatible {
+        let run: Uuid = sqlx::query_scalar("SELECT id FROM ingest.runs WHERE policy_id=$1")
+            .bind(compatible.id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert!(
+            RepairRepository::new(f.pool.clone())
+                .run_status(run)
                 .await
                 .unwrap()
-                .unwrap();
-            saw_child_cursor |= state["children"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|c| c["cursor"].is_string());
-            if current.state != "paused" {
-                break;
-            }
-            assert!(current.budget_requests <= 1 && current.budget_items <= 1);
-            w.resume(run.id).await.unwrap();
-        }
-        let done = ingest.run(run.id).await.unwrap().unwrap();
-        assert_eq!(done.state, expected);
-        if let Some(code) = diagnostic {
-            assert_eq!(done.requests, 4);
-            assert_eq!(
-                ingest
-                    .run_checkpoint(&done, "traversal-v1")
-                    .await
-                    .unwrap()
-                    .unwrap()["error_code"],
-                code
-            );
-            assert!(saw_child_cursor);
-        } else if faults.partial_page.is_none() {
-            assert!(
-                saw_child_cursor,
-                "episode continuation must survive worker replacement"
-            );
-            let kinds:Vec<String>=sqlx::query_scalar("SELECT i.kind FROM catalog.source_items si JOIN catalog.items i ON i.id=si.item_id WHERE si.source_id=$1 ORDER BY i.kind").bind(source.id).fetch_all(&pool).await.unwrap();
-            assert_eq!(kinds, vec!["episode", "episode", "season", "series"]);
-            let children:i64=sqlx::query_scalar("SELECT count(*) FROM catalog.source_items si JOIN catalog.items i ON i.id=si.item_id WHERE si.source_id=$1 AND i.parent_id IS NOT NULL").bind(source.id).fetch_one(&pool).await.unwrap();
-            assert_eq!(children, 3);
-            let memberships: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM ingest.feed_memberships WHERE source_id=$1",
-            )
-            .bind(source.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-            assert_eq!(memberships, 1, "children are not feed roots");
-        } else {
-            assert_eq!(done.coverage["partial"], true);
-        }
-        let retained: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM catalog.source_items WHERE source_id=$1 AND state='enabled'",
-        )
-        .bind(source.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(retained, 4, "child scopes never authorize title deletion");
+                .work_succeeded
+        );
+        assert!(http.state.calls.load(Ordering::SeqCst) > 0);
+        assert!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.attempts a JOIN queue.jobs j ON j.id=a.job_id WHERE j.scope_id=$1")
+            .bind(run).fetch_one(&f.pool).await.unwrap()>0);
+    } else {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.jobs")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.attempts")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(http.state.calls.load(Ordering::SeqCst), 0);
     }
-    pool.close().await;
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingest.runs r JOIN ingest.policies p ON p.id=r.policy_id WHERE p.selection_json#>>'{components,embeddings}'='true'").fetch_one(&f.pool).await.unwrap(), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embedding_models")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    f.cleanup().await;
 }
 
 #[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn absent_membership_embedding_rebuild_uses_internal_reference() {
-    use screenroom_backend::{
-        catalog::Scope,
-        ingest::{CheckpointWrite, Completion, Followup, JobKind, PageCommit},
-        search::SearchRepository,
-    };
-    let pool = isolated_pool().await;
-    let io = IoDouble::new();
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let search = SearchRepository::new(pool.clone());
-    let source = catalog
-        .configure_source(
-            "hidden-jellyfin",
-            "jellyfin",
-            &json!({"adapter":"mock"}),
-            &json!({}),
-        )
-        .await
-        .unwrap();
-    let p = ingest
-        .create_policy(
-            source.id,
-            &PolicyWrite {
-                enabled: true,
-                selection_json: json!({"library_ids":["movies"],"page_size":3}),
-                max_items: 100,
-                max_requests: 100,
-                incremental_seconds: 3600,
-                reconcile_seconds: 3600,
-                enrich_metadata: false,
-                enrich_people: false,
-                enrich_artwork: false,
-            },
-        )
-        .await
-        .unwrap();
-    let initial = worker(pool.clone(), &io, Faults::default()).await;
-    ingest.start_run(p.id).await.unwrap();
-    drain(&initial).await;
-    initial.activate_model().await.unwrap();
-    let faults = Faults {
-        removed_item: Some("sintel".into()),
-        ..Default::default()
-    };
-    let removed = worker(pool.clone(), &io, faults.clone()).await;
-    ingest.start_run(p.id).await.unwrap();
-    drain(&removed).await;
-    assert!(
-        catalog
-            .resolve_reference(&Scope::default(), "hidden-jellyfin", "sintel")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    let doc = search
-        .document_for_reference("hidden-jellyfin", "sintel")
-        .await
-        .unwrap()
-        .unwrap();
-    let replacement = worker_revision(pool.clone(), &io, faults, "test-r2").await;
-    let model = search
-        .register_model("test", "test-r2", 1024)
-        .await
-        .unwrap();
-    assert!(replacement.activate_model().await.is_err());
-    // Explicit rebuild jobs use the same durable followup contract as page-produced jobs.
-    let run = ingest.start_run(p.id).await.unwrap();
-    let claim = ingest
-        .claim("rebuild-dispatch", 300)
-        .await
-        .unwrap()
-        .unwrap();
-    ingest
-        .commit_page(
-            &claim,
-            &PageCommit {
-                libraries: vec![],
-                items: vec![],
-                feeds: vec![],
-                artwork_inputs: vec![],
-                artwork_omissions: vec![],
-                followups: vec![Followup {
-                    kind: JobKind::Embedding,
-                    dedupe_key: format!("rebuild:{}:{}", doc.id, model.id),
-                    input: json!({"external_id":"sintel","model_id":model.id}),
-                }],
-                checkpoint: CheckpointWrite {
-                    scope_key: "rebuild-dispatch".into(),
-                    cursor: json!({}),
-                    watermark: None,
-                },
-                requests: 0,
-                completion: Completion::Continue,
-            },
-        )
-        .await
-        .unwrap();
-    drain(&replacement).await;
-    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().state, "complete");
-    let current:i64=sqlx::query_scalar("SELECT count(*) FROM search.embeddings WHERE document_id=$1 AND model_id=$2 AND input_hash=$3").bind(doc.id).bind(model.id).bind(&doc.content_hash).fetch_one(&pool).await.unwrap();
-    assert_eq!(current, 1);
-    replacement.activate_model().await.unwrap();
-    assert!(
-        catalog
-            .resolve_reference(&Scope::default(), "hidden-jellyfin", "sintel")
-            .await
-            .unwrap()
-            .is_none()
-    );
-    pool.close().await;
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn process_drain_admits_later_automatic_policy_after_101_incompatible() {
+    process_scheduling_sweep("drain", true).await;
 }
 
-#[cfg(unix)]
 #[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn sigterm_during_upload_exits_without_publication_and_lease_is_reclaimable() {
-    use sqlx::ConnectOptions;
-    let pool = isolated_pool().await;
-    let io = IoDouble::new();
-    io.stall.store(true, Ordering::Relaxed);
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let source = catalog
-        .configure_source(
-            "shutdown-tmdb",
-            "tmdb",
-            &json!({"adapter":"mock"}),
-            &json!({}),
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn process_drain_terminates_after_101_incompatible_policies_only() {
+    process_scheduling_sweep("drain", false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn process_serve_admits_later_automatic_policy_after_101_incompatible() {
+    process_scheduling_sweep("serve", true).await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn sigterm_during_blocked_upload_reclaims_lease_without_false_publication() {
+    use std::{process::Command, time::Duration};
+    let http = Http::new().await;
+    http.state.count.store(1, Ordering::SeqCst);
+    let f = Fixture::new(&http).await;
+    let replacement = http.worker(f.pool.clone(), false, "unused").await;
+    let policy = f.policy("full", true, false, "all").await;
+    let run = f.start(&policy).await;
+    for _ in 0..20 {
+        if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind='artwork' AND state='ready'")
+            .bind(run.id).fetch_one(&f.pool).await.unwrap() > 0 { break; }
+        assert_eq!(replacement.step().await.unwrap(), Step::Committed);
+    }
+    http.state.block_upload.store(1, Ordering::SeqCst);
+    let mut process = worker_process(&http, &f, "serve");
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        http.state.upload_started.notified(),
+    )
+    .await
+    .unwrap();
+    let leased: (Uuid, i64) = sqlx::query_as(
+        "SELECT id,fence FROM queue.jobs WHERE scope_id=$1 AND kind='artwork' AND state='leased'",
+    )
+    .bind(run.id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
         )
+        .fetch_one(&f.pool)
         .await
-        .unwrap();
-    ingest.create_policy(source.id,&PolicyWrite {
-        enabled:true,selection_json:json!({"feeds":[{"feed_key":"one-film","feed":"MoviePopular","max_pages":1,"page_size":1,"locale":"en-US","region":null,"trending_window":null}]}),
-        max_items:10,max_requests:10,incremental_seconds:3600,reconcile_seconds:3600,enrich_metadata:false,enrich_people:false,enrich_artwork:true,
-    }).await.unwrap();
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_screenroom-index-worker"))
-        .arg("serve")
-        .env(
-            "DATABASE_URL",
-            pool.connect_options().to_url_lossy().as_str(),
-        )
-        .env(
-            "SCREENROOM_FIXTURE_ROOT",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/catalog"),
-        )
-        .env("SCREENROOM_EMBEDDING_BASE_URL", format!("{}/v1", io.url))
-        .env("SCREENROOM_EMBEDDING_MODEL", "test")
-        .env("SCREENROOM_EMBEDDING_REVISION", "test-r1")
-        .env("SCREENROOM_EMBEDDING_DIMENSIONS", "1024")
-        .env_remove("SCREENROOM_EMBEDDING_API_KEY")
-        .env("SCREENROOM_S3_ENDPOINT", &io.url)
-        .env("SCREENROOM_S3_REGION", "garage")
-        .env("SCREENROOM_S3_BUCKET", "test")
-        .env("SCREENROOM_S3_ACCESS_KEY_ID", "test")
-        .env("SCREENROOM_S3_SECRET_ACCESS_KEY", "test-secret")
-        .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !io.entered.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
-        if let Some(status) = child.try_wait().unwrap() {
-            panic!("worker exited before delayed upload: {status}");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    if !io.entered.load(Ordering::Relaxed) {
-        let _ = child.kill();
-        let _ = child.wait();
-        panic!("worker never reached delayed upload");
-    }
-    let leased: (screenroom_backend::Uuid, i64) =
-        sqlx::query_as("SELECT id,fence FROM ingest.jobs WHERE kind='artwork' AND state='leased'")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        .unwrap(),
+        0
+    );
     assert!(
-        std::process::Command::new("kill")
-            .args(["-TERM", &child.id().to_string()])
+        Command::new("/bin/kill")
+            .args(["-TERM", &process.0.id().to_string()])
             .status()
             .unwrap()
             .success()
     );
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
+    let status = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(status) = process.0.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("SIGTERM did not exit within three seconds");
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-    assert!(status.success());
-    let ready: i64 = sqlx::query_scalar("SELECT count(*) FROM media.variants WHERE source_id=$1")
-        .bind(source.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(ready, 0, "unverified upload cannot publish on shutdown");
-    sqlx::query(
-        "UPDATE ingest.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
-    )
-    .bind(leased.0)
-    .execute(&pool)
+    })
     .await
     .unwrap();
-    let reclaimed = ingest
-        .claim("replacement-after-term", 300)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(reclaimed.id, leased.0);
-    assert!(reclaimed.fence > leased.1);
-    ingest
-        .retry(&reclaimed, "shutdown_recovery", 0)
-        .await
-        .unwrap();
-    io.stall.store(false, Ordering::Relaxed);
-    let replacement = worker(pool.clone(), &io, Faults::default()).await;
-    drain(&replacement).await;
-    let ready: i64 = sqlx::query_scalar("SELECT count(*) FROM media.variants WHERE source_id=$1")
-        .bind(source.id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(ready > 0);
-    pool.close().await;
-}
-
-#[tokio::test]
-#[ignore = "requires SCREENROOM_W_TEST_DATABASE_URL on a task-owned disposable PostgreSQL server"]
-async fn restart_budget_reconciliation_and_verified_followups() {
-    let pool = isolated_pool().await;
-    let catalog = CatalogRepository::new(pool.clone());
-    let ingest = IngestRepository::new(pool.clone());
-    let source = catalog
-        .configure_source(
-            "mock-jellyfin",
-            "jellyfin",
-            &json!({"adapter":"mock"}),
-            &json!({}),
-        )
-        .await
-        .unwrap();
-    let p = ingest
-        .create_policy(
-            source.id,
-            &PolicyWrite {
-                enabled: true,
-                selection_json: json!({"library_ids":["movies","tv"],"page_size":3}),
-                max_items: 6,
-                max_requests: 8,
-                incremental_seconds: 3600,
-                reconcile_seconds: 3600,
-                enrich_metadata: true,
-                enrich_people: true,
-                enrich_artwork: true,
-            },
-        )
-        .await
-        .unwrap();
-    let io = IoDouble::new();
-    let w = worker(pool.clone(), &io, Faults::default()).await;
-    let run = ingest.start_run(p.id).await.unwrap();
-    drain(&w).await;
-    let paused = ingest.run(run.id).await.unwrap().unwrap();
-    assert_eq!(paused.state, "paused");
-    assert_eq!(paused.items, 6);
-    drop(w);
-    let w = worker(pool.clone(), &io, Faults::default()).await;
-    w.resume(run.id).await.unwrap();
-    drain(&w).await;
-    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().state, "complete");
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.source_items")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(count, 12);
-    let vectors:i64=sqlx::query_scalar("SELECT count(*) FROM search.embeddings e JOIN search.documents d ON d.id=e.document_id WHERE e.input_hash=d.content_hash").fetch_one(&pool).await.unwrap();
-    assert_eq!(vectors, 12);
-    let objects: i64 = sqlx::query_scalar("SELECT count(*) FROM media.objects WHERE state='ready'")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert!(objects > 0);
-    w.activate_model().await.unwrap();
-    // Repeat traversal must preserve source identities, vectors, and content-addressed objects.
-    let repeat = ingest.start_run(p.id).await.unwrap();
-    drain(&w).await;
-    w.resume(repeat.id).await.unwrap();
-    drain(&w).await;
+    assert!(
+        status.success(),
+        "worker did not shut down cleanly: {status}"
+    );
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        http.state.upload_cancelled.notified(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM catalog.source_items")
-            .fetch_one(&pool)
+        sqlx::query_scalar::<_, String>("SELECT state FROM queue.jobs WHERE id=$1")
+            .bind(leased.0)
+            .fetch_one(&f.pool)
             .await
             .unwrap(),
-        count
+        "leased"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        0
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM media.objects")
-            .fetch_one(&pool)
+            .fetch_one(&f.pool)
             .await
             .unwrap(),
-        objects
+        0
     );
-    // Partial coverage must not remove a previously present membership.
-    let partial = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            partial_page: Some(0),
-            removed_item: Some("sintel".into()),
-            ..Default::default()
-        },
+    sqlx::query(
+        "UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
     )
-    .await;
-    let partial_run = ingest.start_run(p.id).await.unwrap();
-    drain(&partial).await;
-    assert_eq!(
-        ingest.run(partial_run.id).await.unwrap().unwrap().state,
-        "complete"
+    .bind(leased.0)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    http.state.block_upload.store(0, Ordering::SeqCst);
+    drain(&replacement).await;
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
+            .await
+            .unwrap()
+            .work_succeeded
     );
-    let present:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM catalog.library_items li JOIN catalog.source_items si ON si.id=li.source_item_id WHERE si.external_id='sintel' AND li.state='enabled')").fetch_one(&pool).await.unwrap();
-    assert!(present);
-    // Full selected traversal is the only absence authority.
-    let removed = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            removed_item: Some("sintel".into()),
-            ..Default::default()
-        },
-    )
-    .await;
-    let removal = ingest.start_run(p.id).await.unwrap();
-    drain(&removed).await;
-    removed.resume(removal.id).await.unwrap();
-    drain(&removed).await;
-    let absent:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM catalog.library_items li JOIN catalog.source_items si ON si.id=li.source_item_id WHERE si.external_id='sintel' AND li.state='absent')").fetch_one(&pool).await.unwrap();
-    assert!(absent);
-    let tmdb = catalog
-        .configure_source("mock-tmdb", "tmdb", &json!({"adapter":"mock"}), &json!({}))
+    let completed: (String, i64) = sqlx::query_as("SELECT state,fence FROM queue.jobs WHERE id=$1")
+        .bind(leased.0)
+        .fetch_one(&f.pool)
         .await
         .unwrap();
-    let feeds = [
-        "MoviePopular",
-        "MovieUpcoming",
-        "MovieNowPlaying",
-        "MovieTrending",
-        "TvPopular",
-        "TvOnTheAir",
-        "TvTrending",
-    ]
-    .into_iter()
-    .map(|feed| {
-        json!({"feed_key":format!("{feed}:en-US:day:2"),"feed":feed,
-            "max_pages":2,"page_size":1,"locale":"en-US","region":null,
-            "trending_window":if feed.ends_with("Trending"){Some("Day")}else{None}})
-    })
-    .collect::<Vec<_>>();
-    let tmdb_policy = ingest
-        .create_policy(
-            tmdb.id,
-            &PolicyWrite {
-                enabled: true,
-                selection_json: json!({"feeds":feeds}),
-                max_items: 2,
-                max_requests: 2,
-                incremental_seconds: 3600,
-                reconcile_seconds: 3600,
-                enrich_metadata: true,
-                enrich_people: true,
-                enrich_artwork: true,
+    assert_eq!(completed.0, "complete");
+    assert!(completed.1 > leased.1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.attempts WHERE job_id=$1")
+            .bind(leased.0)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        1
+    );
+    f.cleanup().await;
+}
+
+async fn selected_items(f: &Fixture, run: Uuid) -> Vec<(String, Option<String>)> {
+    sqlx::query_as("SELECT external_id,selection_reason FROM ingest.maintenance_candidates WHERE run_id=$1 ORDER BY external_id")
+        .bind(run).fetch_all(&f.pool).await.unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn repair_changed_stale_unknown_age_and_current_failed_generation_selection() {
+    let http = Http::new().await;
+    http.state.count.store(3, Ordering::SeqCst);
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let ingest = IngestRepository::new(f.pool.clone());
+    let full = f.policy("full", true, false, "all").await;
+    f.start(&full).await;
+    drain(&w).await;
+
+    let changed = f.policy("repair", true, false, "changed").await;
+    let unchanged = f.start(&changed).await;
+    assert!(selected_items(&f, unchanged.id).await.is_empty());
+    drain(&w).await;
+    sqlx::query("UPDATE catalog.source_items SET metadata=jsonb_set(metadata,'{provider_artwork_inputs,0,tag}','\"b\"') WHERE external_id='movie0'")
+        .execute(&f.pool).await.unwrap();
+    http.state.tag.store(1, Ordering::SeqCst);
+    http.state.image.store(1, Ordering::SeqCst);
+    let changed_run = f.start(&changed).await;
+    assert_eq!(
+        selected_items(&f, changed_run.id)
+            .await
+            .iter()
+            .map(|v| v.0.as_str())
+            .collect::<Vec<_>>(),
+        ["movie0"]
+    );
+    drain(&w).await;
+    let unchanged = f.start(&changed).await;
+    assert!(selected_items(&f, unchanged.id).await.is_empty());
+    drain(&w).await;
+
+    sqlx::query("UPDATE media.artwork_generations g SET published_at=CASE WHEN si.external_id='movie1' THEN NULL ELSE clock_timestamp()-interval '2 hours' END FROM media.item_artwork ia JOIN catalog.source_items si ON si.id=ia.source_item_id WHERE ia.artwork_id=g.artwork_id AND si.external_id IN ('movie0','movie1') AND g.state='published'")
+        .execute(&f.pool).await.unwrap();
+    sqlx::query("UPDATE ingest.maintenance_candidates SET updated_at=clock_timestamp()-interval '2 hours' WHERE external_id='movie0'")
+        .execute(&f.pool).await.unwrap();
+    let mut stale = Configuration::from_value(&changed.selection_json).unwrap();
+    stale.strategy = screenroom_backend::indexing::Strategy::Stale;
+    stale.stale_after_seconds = Some(3600);
+    let stale = IndexingRepository::new(f.pool.clone())
+        .configure(
+            f.source,
+            &ConfigureRequest {
+                request_id: Uuid::new_v4(),
+                existing: None,
+                configuration: stale,
             },
         )
         .await
         .unwrap();
-    let tmdb_run = ingest.start_run(tmdb_policy.id).await.unwrap();
-    for _ in 0..30 {
-        // Restart between every tranche: completed feed evidence and next-feed position are durable.
-        let restarted = worker(pool.clone(), &io, Faults::default()).await;
-        drain(&restarted).await;
-        let state = ingest.run(tmdb_run.id).await.unwrap().unwrap();
-        if state.state == "complete" {
-            break;
-        }
-        assert_eq!(state.state, "paused");
-        restarted.resume(tmdb_run.id).await.unwrap();
-    }
+    let stale_run = f.start(&stale).await;
     assert_eq!(
-        ingest.run(tmdb_run.id).await.unwrap().unwrap().state,
-        "complete"
+        selected_items(&f, stale_run.id).await,
+        vec![
+            ("movie0".into(), Some("known_stale".into())),
+            ("movie1".into(), Some("unknown_age".into())),
+        ]
     );
-    let feed_count: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT feed_key) FROM ingest.feed_memberships WHERE source_id=$1",
+    ingest.cancel_run(stale_run.id).await.unwrap();
+
+    http.state.single_changed.store(1, Ordering::SeqCst);
+    http.state.tag.store(2, Ordering::SeqCst);
+    http.state.image.store(2, Ordering::SeqCst);
+    let failed_full = f.start(&full).await;
+    for _ in 0..100 {
+        if sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind='artwork' AND state='ready'")
+            .bind(failed_full.id).fetch_one(&f.pool).await.unwrap() > 0 { break; }
+        assert_eq!(w.step().await.unwrap(), Step::Committed);
+    }
+    http.state.storage_status.store(503, Ordering::SeqCst);
+    let mut failures = 0;
+    for _ in 0..100 {
+        match w.step().await.unwrap() {
+            Step::Idle => break,
+            Step::Committed => {}
+            Step::Failed => failures += 1,
+            Step::Retried | Step::Deferred => ready(&f.pool, failed_full.id).await,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert!(failures > 0);
+    let failed_job: (Uuid, String) = sqlx::query_as("SELECT id,input->>'revision' FROM queue.jobs WHERE scope_id=$1 AND kind='artwork' AND state='failed' ORDER BY id LIMIT 1")
+        .bind(failed_full.id).fetch_one(&f.pool).await.unwrap();
+    let failed = f.policy("repair", true, false, "failed").await;
+    let failed_run = f.start(&failed).await;
+    assert_eq!(
+        selected_items(&f, failed_run.id)
+            .await
+            .iter()
+            .map(|v| v.0.as_str())
+            .collect::<Vec<_>>(),
+        ["movie0"]
+    );
+    ingest.cancel_run(failed_run.id).await.unwrap();
+
+    http.state.tag.store(1, Ordering::SeqCst);
+    http.state.image.store(1, Ordering::SeqCst);
+    http.state.storage_status.store(0, Ordering::SeqCst);
+    let replacement = f.start(&full).await;
+    drain(&w).await;
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(replacement.id)
+            .await
+            .unwrap()
+            .work_succeeded
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM queue.jobs WHERE id=$1")
+            .bind(failed_job.0)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        "failed"
+    );
+    assert!(!sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT FROM media.artwork a JOIN media.item_artwork ia ON ia.artwork_id=a.id JOIN catalog.source_items si ON si.id=ia.source_item_id WHERE si.external_id='movie0' AND a.current_generation::text=$1)")
+        .bind(failed_job.1).fetch_one(&f.pool).await.unwrap());
+    let superseded = f.start(&failed).await;
+    assert!(selected_items(&f, superseded.id).await.is_empty());
+    drain(&w).await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn metadata_and_artwork_run_without_embedding_configuration_and_pin() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    assert!(
+        !w.capabilities()
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c.starts_with("model:"))
+    );
+    assert!(
+        !w.capabilities()
+            .await
+            .unwrap()
+            .iter()
+            .any(|c| c == "adapter:mock")
+    );
+    let p = f.policy("full", true, false, "all").await;
+    let run = f.start(&p).await;
+    assert!(run.embedding_model_id.is_none());
+    drain(&w).await;
+    let status = RepairRepository::new(f.pool.clone())
+        .run_status(run.id)
+        .await
+        .unwrap();
+    assert!(status.work_succeeded);
+    assert_eq!(status.run.items, 6);
+    assert_eq!(status.observed_records, Some(6));
+    assert_eq!(http.state.embedding_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embedding_models")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        6
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn capability_routing_keeps_incompatible_attempts_unconsumed() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let configured = http.worker(f.pool.clone(), true, "r1").await;
+    let p = f.policy("full", false, true, "all").await;
+    let run = f.start(&p).await;
+    let metadata = http.worker(f.pool.clone(), false, "unused").await;
+    drain(&metadata).await;
+    let pending:Vec<(Uuid,i32)>=sqlx::query_as("SELECT id,attempts FROM queue.jobs WHERE scope_id=$1 AND kind='embedding' AND state='ready'").bind(run.id).fetch_all(&f.pool).await.unwrap();
+    assert_eq!(pending.len(), 6);
+    assert!(pending.iter().all(|(_, a)| *a == 0));
+    let other = http.worker(f.pool.clone(), true, "r2").await;
+    assert_eq!(other.step().await.unwrap(), Step::Idle);
+    let attempts:i64=sqlx::query_scalar("SELECT COALESCE(sum(attempts),0)::bigint FROM queue.jobs WHERE scope_id=$1 AND kind='embedding'").bind(run.id).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(attempts, 0);
+    drain(&configured).await;
+    assert_eq!(http.state.embedding_calls.load(Ordering::SeqCst), 6);
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
+            .await
+            .unwrap()
+            .work_succeeded
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn canonical_delta_restart_overlap_fallback_and_settlement() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let p = f.policy("incremental", false, false, "all").await;
+    let repo = IndexingRepository::new(f.pool.clone());
+    let ingest = IngestRepository::new(f.pool.clone());
+    let baseline = f.start(&p).await;
+    assert_eq!(
+        repo.execution(baseline.id).await.unwrap().unwrap().mode,
+        "reconcile"
+    );
+    drain(&w).await;
+    let watermark = repo
+        .progress(p.id)
+        .await
+        .unwrap()
+        .unwrap()
+        .watermark
+        .unwrap();
+    let delta = f.start(&p).await;
+    assert_eq!(
+        repo.execution(delta.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .lower_watermark,
+        Some(watermark - screenroom_backend::chrono::Duration::seconds(120))
+    );
+    assert_eq!(w.step().await.unwrap(), Step::Committed);
+    let crash = ingest
+        .claim_canonical("crashed", 60, &w.capabilities().await.unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    ingest
+        .reserve_work_request(&crash, OperationClass::Discovery)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
     )
-    .bind(tmdb.id)
-    .fetch_one(&pool)
+    .bind(crash.id)
+    .execute(&f.pool)
     .await
     .unwrap();
-    assert_eq!(feed_count, 7);
-    let membership_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest.feed_memberships WHERE source_id=$1")
-            .bind(tmdb.id)
-            .fetch_one(&pool)
+    http.state.provider_status.store(503, Ordering::SeqCst);
+    assert_eq!(w.step().await.unwrap(), Step::Deferred);
+    assert!(
+        repo.execution(delta.id)
             .await
-            .unwrap();
-    assert_eq!(membership_count, 11);
-    let orders:Vec<(String,Vec<i32>)>=sqlx::query_as("SELECT feed_key,array_agg(ordinal ORDER BY ordinal) FROM ingest.feed_memberships WHERE source_id=$1 GROUP BY feed_key").bind(tmdb.id).fetch_all(&pool).await.unwrap();
-    for (key, ordinals) in orders {
-        assert_eq!(
-            ordinals,
-            if key.starts_with("Movie") {
-                vec![0, 1]
-            } else {
-                vec![0]
-            }
-        );
-    }
-    let title_count: i64 = sqlx::query_scalar("SELECT count(*) FROM catalog.items")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(title_count, 12);
-    let missing_source = catalog
-        .configure_source(
-            "missing-art-test",
-            "tmdb",
-            &json!({"adapter":"mock"}),
-            &json!({}),
-        )
-        .await
-        .unwrap();
-    let missing_policy=ingest.create_policy(missing_source.id,&PolicyWrite {
-        enabled:true,selection_json:json!({"feeds":[{"feed_key":"upcoming-one","feed":"MovieUpcoming","max_pages":1,"page_size":1,"locale":"en-US","region":null,"trending_window":null}]}),
-        max_items:1,max_requests:1,incremental_seconds:3600,reconcile_seconds:3600,
-        enrich_metadata:false,enrich_people:false,enrich_artwork:true,
-    }).await.unwrap();
-    let missing_run = ingest.start_run(missing_policy.id).await.unwrap();
-    let missing_worker = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            missing_artwork: Some("his-girl-friday".into()),
-            ..Default::default()
-        },
-    )
-    .await;
-    let mut retries = 0;
-    for _ in 0..20 {
-        match missing_worker.step().await.unwrap() {
-            Step::Idle => break,
-            Step::Retried => retries += 1,
-            Step::Committed => {}
-            step => panic!("unexpected {step:?}"),
-        }
-    }
-    assert_eq!(retries, 0);
-    let fabricated:i64=sqlx::query_scalar("SELECT count(*) FROM media.variants v JOIN media.artwork a ON a.id=v.artwork_id WHERE a.source_id=$1 AND a.source_artwork_id='his-girl-friday'").bind(missing_source.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(
-        fabricated, 0,
-        "missing original/native bytes cannot become ready"
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
     );
-    let omissions = ingest
-        .artwork_omissions(missing_run.id, None, 10)
-        .await
-        .unwrap();
-    assert_eq!(omissions.len(), 1);
-    assert_eq!(omissions[0].source_artwork_id, "his-girl-friday");
-    assert_eq!(serde_json::to_value(omissions[0].code).unwrap(), "missing");
-    assert_eq!(
-        ingest.run(missing_run.id).await.unwrap().unwrap().state,
-        "complete"
-    );
-    let repair = ingest.start_run(missing_policy.id).await.unwrap();
-    let repaired_worker = worker(pool.clone(), &io, Faults::default()).await;
-    drain(&repaired_worker).await;
     assert!(
         ingest
-            .artwork_omissions(repair.id, None, 10)
+            .run_coverage(delta.id)
+            .await
+            .unwrap()
+            .unresolved_attempts
+            > 0
+    );
+    http.state.provider_status.store(0, Ordering::SeqCst);
+    ready(&f.pool, delta.id).await;
+    assert_eq!(w.step().await.unwrap(), Step::Committed);
+    let checkpoint = ingest
+        .run_checkpoint(&delta, "full-index-v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint["delta"].is_object());
+    let restarted = http.worker(f.pool.clone(), false, "unused").await;
+    drain(&restarted).await;
+    let coverage = ingest.run_coverage(delta.id).await.unwrap();
+    assert!(coverage.unknown_attempts > 0);
+    assert_eq!(coverage.unresolved_attempts, 0);
+    assert_eq!(
+        repo.progress(p.id).await.unwrap().unwrap().watermark,
+        Some(delta.started_at)
+    );
+    assert_eq!(ingest.run(delta.id).await.unwrap().unwrap().items, 0);
+    http.state.delta_reject.store(1, Ordering::SeqCst);
+    let fallback = f.start(&p).await;
+    drain(&restarted).await;
+    let execution = repo.execution(fallback.id).await.unwrap().unwrap();
+    assert_eq!(
+        execution.fallback_reason.as_deref(),
+        Some("filter_rejected")
+    );
+    assert!(execution.settled_at.is_some());
+    http.state.delta_reject.store(0, Ordering::SeqCst);
+    sqlx::query("UPDATE ingest.indexing_progress SET next_reconcile_at=clock_timestamp()-interval '1 second' WHERE policy_id=$1").bind(p.id).execute(&f.pool).await.unwrap();
+    let reconcile = f.start(&p).await;
+    assert_eq!(
+        repo.execution(reconcile.id).await.unwrap().unwrap().mode,
+        "reconcile"
+    );
+    drain(&restarted).await;
+    assert!(
+        repo.progress(p.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .next_reconcile_at
+            > reconcile.started_at
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn canonical_retry_classification_receipts_redrive_and_cancel_fences() {
+    for status in [401, 429, 503] {
+        let http = Http::new().await;
+        let f = Fixture::new(&http).await;
+        let w = http.worker(f.pool.clone(), false, "unused").await;
+        let p = f.policy("full", false, false, "all").await;
+        let run = f.start(&p).await;
+        http.state.provider_status.store(status, Ordering::SeqCst);
+        assert_eq!(
+            w.step().await.unwrap(),
+            if status == 401 {
+                Step::Failed
+            } else {
+                Step::Deferred
+            }
+        );
+        let ingest = IngestRepository::new(f.pool.clone());
+        let coverage = ingest.run_coverage(run.id).await.unwrap();
+        if status == 401 {
+            assert!(coverage.unresolved_attempts > 0);
+            assert!(coverage.permanent_attempts > 0);
+        } else {
+            assert!(coverage.retryable_attempts > 0);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM ingest.request_receipts WHERE run_id=$1 AND outcome='success'"
+            )
+            .bind(run.id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+            0
+        );
+        let (job, attempts, state): (Uuid, i32, String) = sqlx::query_as(
+            "SELECT id,attempts,state FROM queue.jobs WHERE scope_id=$1 AND kind='ingest'",
+        )
+        .bind(run.id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(attempts, 1);
+        assert_eq!(state, if status == 401 { "failed" } else { "ready" });
+        http.state.provider_status.store(0, Ordering::SeqCst);
+        if status == 401 {
+            let request = Uuid::new_v4();
+            let first = ingest.redrive_job(job, request).await.unwrap();
+            assert_eq!(first.job_id, job);
+            assert_eq!(
+                ingest.redrive_job(job, request).await.unwrap().generation,
+                first.generation
+            );
+        } else {
+            ready(&f.pool, run.id).await;
+        }
+        let restarted = http.worker(f.pool.clone(), false, "unused").await;
+        drain(&restarted).await;
+        assert_eq!(
+            ingest
+                .run_coverage(run.id)
+                .await
+                .unwrap()
+                .unresolved_attempts,
+            0
+        );
+        let next = f.start(&p).await;
+        let lease = ingest
+            .claim_canonical("late", 60, &w.capabilities().await.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        ingest.cancel_run(next.id).await.unwrap();
+        assert!(matches!(
+            ingest.renew(&lease, 60).await,
+            Err(screenroom_backend::Error::Stale)
+        ));
+        let late_page = screenroom_backend::ingest::PageCommit {
+            libraries: vec![],
+            items: vec![],
+            artwork_inputs: vec![],
+            artwork_omissions: vec![],
+            followups: vec![],
+            checkpoint: screenroom_backend::ingest::CheckpointWrite {
+                scope_key: "full-index-v1".into(),
+                cursor: json!({"late":true}),
+                watermark: None,
+            },
+            requests: 0,
+            completion: screenroom_backend::ingest::Completion::Continue,
+        };
+        assert!(matches!(
+            ingest
+                .commit_traversal_page(&lease, &late_page, &Default::default())
+                .await,
+            Err(screenroom_backend::Error::Stale)
+        ));
+        let before = http.state.calls.load(Ordering::SeqCst);
+        assert_eq!(w.step().await.unwrap(), Step::Idle);
+        assert_eq!(before, http.state.calls.load(Ordering::SeqCst));
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn real_artwork_a_b_a_preserves_previous_complete_and_storage_dedupe() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    http.state.count.store(1, Ordering::SeqCst);
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let p = f.policy("full", true, false, "all").await;
+    f.start(&p).await;
+    drain(&w).await;
+    let first: (i64, i64) =
+        sqlx::query_as("SELECT revision,current_generation FROM media.artwork LIMIT 1")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(first.0, first.1);
+    http.state.tag.store(1, Ordering::SeqCst);
+    http.state.image.store(1, Ordering::SeqCst);
+    let run = f.start(&p).await;
+    for _ in 0..100 {
+        let pending:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM queue.jobs WHERE scope_id=$1 AND kind='artwork' AND state='ready')").bind(run.id).fetch_one(&f.pool).await.unwrap();
+        if pending {
+            break;
+        }
+        assert_eq!(w.step().await.unwrap(), Step::Committed);
+    }
+    let before: (i64, i64) =
+        sqlx::query_as("SELECT revision,current_generation FROM media.artwork LIMIT 1")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(before.0, first.0);
+    assert!(before.1 > first.1);
+    http.state.storage_status.store(503, Ordering::SeqCst);
+    assert_eq!(w.step().await.unwrap(), Step::Retried);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT revision FROM media.artwork LIMIT 1")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        first.0
+    );
+    http.state.storage_status.store(0, Ordering::SeqCst);
+    ready(&f.pool, run.id).await;
+    drain(&w).await;
+    let second: i64 = sqlx::query_scalar("SELECT revision FROM media.artwork LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(second > first.0);
+    http.state.tag.store(0, Ordering::SeqCst);
+    http.state.image.store(0, Ordering::SeqCst);
+    f.start(&p).await;
+    let restarted = http.worker(f.pool.clone(), false, "unused").await;
+    drain(&restarted).await;
+    let third: i64 = sqlx::query_scalar("SELECT revision FROM media.artwork LIMIT 1")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(third > second);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM media.artwork_generations WHERE state='published'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM media.objects")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn canonical_poster_repair_candidates_restart_and_no_metadata_mutation() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let w = http.worker(f.pool.clone(), false, "unused").await;
+    let full = f.policy("full", false, false, "all").await;
+    f.start(&full).await;
+    drain(&w).await;
+    let metadata: Vec<(Uuid, serde_json::Value)> =
+        sqlx::query_as("SELECT id,metadata FROM catalog.source_items ORDER BY id")
+            .fetch_all(&f.pool)
+            .await
+            .unwrap();
+    let repair = f.policy("repair", true, false, "missing").await;
+    let run = f.start(&repair).await;
+    assert_eq!(run.selection_snapshot["repair"], 1);
+    assert!(run.selection_snapshot.get("maintenance").is_none());
+    assert!(run.embedding_model_id.is_none());
+    let repo = RepairRepository::new(f.pool.clone());
+    assert_eq!(
+        repo.candidates(run.id, None, 100, true)
+            .await
+            .unwrap()
+            .len(),
+        6
+    );
+    assert_eq!(w.step().await.unwrap(), Step::Committed);
+    let restarted = http.worker(f.pool.clone(), false, "unused").await;
+    drain(&restarted).await;
+    assert!(repo.run_status(run.id).await.unwrap().work_succeeded);
+    assert_eq!(
+        metadata,
+        sqlx::query_as::<_, (Uuid, serde_json::Value)>(
+            "SELECT id,metadata FROM catalog.source_items ORDER BY id"
+        )
+        .fetch_all(&f.pool)
+        .await
+        .unwrap()
+    );
+    let second = f.start(&repair).await;
+    assert!(
+        repo.candidates(second.id, None, 100, true)
             .await
             .unwrap()
             .is_empty()
     );
-    let repaired:i64=sqlx::query_scalar("SELECT count(*) FROM media.variants v JOIN media.artwork a ON a.id=v.artwork_id WHERE a.source_id=$1 AND a.source_artwork_id='his-girl-friday'").bind(missing_source.id).fetch_one(&pool).await.unwrap();
-    assert_eq!(repaired, 2);
-    // A dead process cannot publish with its old fence after lease reclamation.
-    let lease_run = ingest.start_run(p.id).await.unwrap();
-    let old = ingest.claim("dead-worker", 1).await.unwrap().unwrap();
-    sqlx::query(
-        "UPDATE ingest.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
-    )
-    .bind(old.id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let fresh = ingest
-        .claim("replacement-worker", 300)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(old.id, fresh.id);
-    assert!(fresh.fence > old.fence);
-    assert!(matches!(
-        ingest.retry(&old, "unavailable", 0).await,
-        Err(screenroom_backend::Error::Stale)
-    ));
-    catalog.set_source_state(source.id, false).await.unwrap();
-    assert!(matches!(
-        ingest.retry(&fresh, "unavailable", 0).await,
-        Err(screenroom_backend::Error::Stale)
-    ));
-    ingest.cancel_run(lease_run.id).await.unwrap();
-    catalog.set_source_state(source.id, true).await.unwrap();
-    let selected = PolicyWrite {
-        enabled: true,
-        selection_json: json!({"library_ids":["movies"],"page_size":3}),
-        max_items: 100,
-        max_requests: 100,
-        incremental_seconds: 3600,
-        reconcile_seconds: 3600,
-        enrich_metadata: true,
-        enrich_people: true,
-        enrich_artwork: true,
-    };
-    ingest.update_policy(p.id, &selected, false).await.unwrap();
-    let selected_worker = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            removed_item: Some("beverly-hillbillies-s1-e1".into()),
-            ..Default::default()
-        },
-    )
-    .await;
-    let selected_run = ingest.start_run(p.id).await.unwrap();
-    drain(&selected_worker).await;
+    drain(&restarted).await;
+    let all = f.policy("repair", true, false, "all").await;
+    let refresh = f.start(&all).await;
     assert_eq!(
-        ingest.run(selected_run.id).await.unwrap().unwrap().state,
-        "complete"
+        repo.candidates(refresh.id, None, 100, true)
+            .await
+            .unwrap()
+            .len(),
+        6
     );
-    let tv_present:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM catalog.library_items li JOIN catalog.source_items si ON si.id=li.source_item_id WHERE si.external_id='beverly-hillbillies-s1-e1' AND li.state='enabled')").fetch_one(&pool).await.unwrap();
-    assert!(
-        tv_present,
-        "an unselected library cannot supply absence evidence"
-    );
-    let loop_worker = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            loop_cursor_page: Some(0),
-            ..Default::default()
-        },
-    )
-    .await;
-    let looping = ingest.start_run(p.id).await.unwrap();
-    drain(&loop_worker).await;
-    let looped = ingest.run(looping.id).await.unwrap().unwrap();
-    assert_eq!(looped.state, "failed");
-    assert_eq!(looped.requests, 1);
-    let loop_checkpoint = ingest
-        .run_checkpoint(&looped, "traversal-v1")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(loop_checkpoint["error_code"], "cursor_loop");
-    let diagnostic: String =
-        sqlx::query_scalar("SELECT error_code FROM ingest.jobs WHERE run_id=$1 AND kind='ingest'")
-            .bind(looping.id)
-            .fetch_one(&pool)
+    drain(&restarted).await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn hierarchy_and_repeated_pages_never_falsely_complete() {
+    for fault in [0, 1, 2] {
+        let http = Http::new().await;
+        let f = Fixture::new(&http).await;
+        let w = http.worker(f.pool.clone(), false, "unused").await;
+        let mut config:Configuration=serde_json::from_value(json!({"indexing":1,"enabled":true,"mode":"full","cadence_seconds":60,"components":{"metadata":true,"artwork":false,"embeddings":false},"strategy":"all","scope":{"library_ids":[Fixture::library("shows")],"item_kinds":["movie","series"]},"operator_profile_id":"profile","limits":{"work_requests":100,"work_records":3,"lifetime_requests":10000,"lifetime_records":1000,"deadline_seconds":3600,"work_timeout_seconds":30}})).unwrap();
+        if fault == 1 {
+            http.state.missing_parent.store(1, Ordering::SeqCst);
+        }
+        if fault == 2 {
+            http.state.repeated_page.store(1, Ordering::SeqCst);
+            http.state.count.store(12, Ordering::SeqCst);
+            config.scope.library_ids = vec![Fixture::library("movies")];
+        }
+        let policy = IndexingRepository::new(f.pool.clone())
+            .configure(
+                f.source,
+                &ConfigureRequest {
+                    request_id: Uuid::new_v4(),
+                    existing: None,
+                    configuration: config,
+                },
+            )
             .await
             .unwrap();
-    assert_eq!(diagnostic, "cursor_loop");
-    let duplicate_worker = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            duplicate_page: Some(1),
-            ..Default::default()
-        },
-    )
-    .await;
-    let duplicate = ingest.start_run(p.id).await.unwrap();
-    drain(&duplicate_worker).await;
-    let repeated = ingest.run(duplicate.id).await.unwrap().unwrap();
-    assert_eq!(repeated.state, "failed");
-    assert_eq!(repeated.requests, 5);
-    assert_eq!(
-        ingest
-            .run_checkpoint(&repeated, "traversal-v1")
+        let run = f.start(&policy).await;
+        for _ in 0..100 {
+            match w.step().await.unwrap() {
+                Step::Committed => {}
+                Step::Failed | Step::Idle => break,
+                step => panic!("{step:?}"),
+            }
+        }
+        let status = RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
             .await
-            .unwrap()
-            .unwrap()["error_code"],
-        "repeated_page"
-    );
-    let rate_worker = worker(
-        pool.clone(),
-        &io,
-        Faults {
-            rate_limit_page: Some(0),
-            ..Default::default()
-        },
-    )
-    .await;
-    let limited = ingest.start_run(p.id).await.unwrap();
-    drain(&rate_worker).await;
-    let limited_run = ingest.run(limited.id).await.unwrap().unwrap();
-    assert_eq!(limited_run.state, "paused");
-    assert_eq!(limited_run.requests, 5);
-    assert_eq!(limited_run.items, 0);
-    let checkpoint = ingest
-        .run_checkpoint(&limited_run, "traversal-v1")
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(checkpoint["error_code"], "rate_limited");
-    assert!(checkpoint["cursor"].is_null());
-    ingest.cancel_run(limited.id).await.unwrap();
-    let disabled_run = ingest.start_run(p.id).await.unwrap();
-    let disabled_claim = ingest
-        .claim("disabled-policy-worker", 300)
-        .await
-        .unwrap()
-        .unwrap();
-    ingest
-        .update_policy(
-            p.id,
-            &PolicyWrite {
-                enabled: false,
-                ..selected
-            },
-            false,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        ingest.retry(&disabled_claim, "unavailable", 0).await,
-        Err(screenroom_backend::Error::Stale)
-    ));
-    assert_eq!(
-        ingest.run(disabled_run.id).await.unwrap().unwrap().state,
-        "cancelled"
-    );
+            .unwrap();
+        if fault == 0 {
+            assert!(status.work_succeeded);
+            assert_eq!(status.run.items, 8);
+        } else {
+            assert!(!status.work_succeeded);
+        }
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn full_embedding_errors_are_not_false_successes() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let configured = http.worker(f.pool.clone(), true, "r1").await;
+    let p = f.policy("full", false, true, "all").await;
+    let run = f.start(&p).await;
+    drain(&http.worker(f.pool.clone(), false, "unused").await).await;
+    http.state.embedding_status.store(503, Ordering::SeqCst);
+    assert_eq!(configured.step().await.unwrap(), Step::Deferred);
     assert!(
-        ingest
-            .claim("disabled-policy-worker", 300)
+        IngestRepository::new(f.pool.clone())
+            .run_coverage(run.id)
             .await
             .unwrap()
-            .is_none()
+            .retryable_attempts
+            > 0
     );
-    pool.close().await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM search.embeddings")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    http.state.embedding_status.store(0, Ordering::SeqCst);
+    ready(&f.pool, run.id).await;
+    drain(&configured).await;
+    assert!(
+        RepairRepository::new(f.pool.clone())
+            .run_status(run.id)
+            .await
+            .unwrap()
+            .work_succeeded
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL; large generated traversal"]
+async fn full_21021_generated_records_resume_bounded_checkpoint() {
+    let http = Http::new().await;
+    http.state.count.store(21021, Ordering::SeqCst);
+    let f = Fixture::new(&http).await;
+    let p = f.policy("full", false, false, "all").await;
+    let run = f.start(&p).await;
+    let first = http.worker(f.pool.clone(), false, "unused").await;
+    for _ in 0..5 {
+        assert_eq!(first.step().await.unwrap(), Step::Committed);
+    }
+    let restarted = http.worker(f.pool.clone(), false, "unused").await;
+    drain(&restarted).await;
+    let status = RepairRepository::new(f.pool.clone())
+        .run_status(run.id)
+        .await
+        .unwrap();
+    assert!(status.work_succeeded);
+    assert_eq!(status.run.items, 21021);
+    let checkpoint = IngestRepository::new(f.pool.clone())
+        .run_checkpoint(&run, "full-index-v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(checkpoint.to_string().len() < 32768);
+    f.cleanup().await;
+}
+
+#[test]
+fn retired_cli_commands_fail_before_configuration_or_database() {
+    for command in [
+        "sample",
+        "index",
+        "index-status",
+        "index-stop",
+        "index-resume",
+        "resume",
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_screenroom-index-worker"))
+            .arg(command)
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("password"));
+    }
 }

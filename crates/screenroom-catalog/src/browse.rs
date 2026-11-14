@@ -14,19 +14,30 @@ impl browse_service_server::BrowseService for Catalog {
         let r = request.into_inner();
         let scope = page::scope(&r.source_id, &r.library_id)?;
         let rows = self.catalog.list(&scope, None, 50).await.map_err(status)?;
-        let items = self.hydrate_items(&scope, rows).await?;
-        let progress = self.continue_watching(user, &scope, deadline).await?;
+        let items = self.hydrate_items(&scope, rows, user.as_deref()).await?;
+        let (progress, read_error) = match self.continue_watching(user, &scope, deadline).await {
+            Ok(items) => (items, None),
+            Err(_) => (
+                vec![],
+                Some(HomeRowReadError {
+                    code: "progress_unavailable".into(),
+                    message: "Continue watching is temporarily unavailable".into(),
+                }),
+            ),
+        };
         Ok(Response::new(GetHomeResponse {
             rows: vec![
                 HomeRow {
                     id: "continue-watching".into(),
                     title: "Continue watching".into(),
                     items: progress,
+                    read_error,
                 },
                 HomeRow {
                     id: "catalog".into(),
                     title: "Catalog".into(),
                     items,
+                    read_error: None,
                 },
             ],
         }))
@@ -71,6 +82,7 @@ impl browse_service_server::BrowseService for Catalog {
         &self,
         request: Request<ListLibraryItemsRequest>,
     ) -> Result<Response<ListLibraryItemsResponse>, Status> {
+        let user = crate::progress::selected_user(request.metadata())?;
         let r = request.into_inner();
         let scope = page::scope(&r.source_id, &r.library_id)?;
         let binding = page::binding("items", "", &scope);
@@ -94,7 +106,7 @@ impl browse_service_server::BrowseService for Catalog {
             String::new()
         };
         Ok(Response::new(ListLibraryItemsResponse {
-            items: self.hydrate_items(&scope, rows).await?,
+            items: self.hydrate_items(&scope, rows, user.as_deref()).await?,
             next_page_token,
         }))
     }
@@ -182,6 +194,7 @@ impl catalog_service_server::CatalogService for Catalog {
         &self,
         request: Request<GetItemRequest>,
     ) -> Result<Response<GetItemResponse>, Status> {
+        let user = crate::progress::selected_user(request.metadata())?;
         let r = request.into_inner();
         let scope = page::request_scope(r.scope)?;
         let row = self
@@ -191,16 +204,29 @@ impl catalog_service_server::CatalogService for Catalog {
             .map_err(status)?
             .ok_or_else(|| Status::not_found("item"))?;
         Ok(Response::new(GetItemResponse {
-            item: self.hydrate_items(&scope, vec![row]).await?.pop(),
+            item: self
+                .hydrate_items(&scope, vec![row], user.as_deref())
+                .await?
+                .pop(),
         }))
     }
     async fn list_children(
         &self,
         request: Request<ListChildrenRequest>,
     ) -> Result<Response<ListChildrenResponse>, Status> {
+        let user = crate::progress::selected_user(request.metadata())?;
         let r = request.into_inner();
         let scope = page::request_scope(r.scope)?;
         let binding = page::binding("children", &r.parent_id, &scope);
+        let mut parent_scope = scope.clone();
+        parent_scope.kinds.clear();
+        let season_parent = self
+            .catalog
+            .get(&parent_scope, &r.parent_id)
+            .await
+            .map_err(status)?
+            .filter(|parent| parent.kind == "season")
+            .map(|parent| parent.item_id);
         let (size, after) = page::decode::<String>(r.page.as_ref(), &binding)?;
         let mut rows = self
             .catalog
@@ -221,7 +247,9 @@ impl catalog_service_server::CatalogService for Catalog {
             String::new()
         };
         Ok(Response::new(ListChildrenResponse {
-            items: self.hydrate_items(&scope, rows).await?,
+            items: self
+                .hydrate_items_in_season(&scope, rows, season_parent, user.as_deref())
+                .await?,
             next_page_token,
         }))
     }

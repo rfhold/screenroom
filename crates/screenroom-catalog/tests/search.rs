@@ -1,10 +1,10 @@
+mod support;
 use screenroom_backend::{
     Uuid,
-    catalog::{CatalogRepository, ItemWrite},
+    catalog::ItemWrite,
     embedding::{EmbeddingClient, EmbeddingConfig},
-    ingest::{
-        CheckpointWrite, Completion, Followup, IngestRepository, JobKind, PageCommit, PolicyWrite,
-    },
+    indexing::{Configuration, ConfigureRequest, IndexingRepository, StartRequest},
+    ingest::{CheckpointWrite, Completion, Followup, JobKind, PageCommit, Policy, TraversalWrites},
     search::SearchRepository,
     sqlx::{
         self,
@@ -24,6 +24,7 @@ use std::{
     },
     time::Duration,
 };
+use support::{CatalogRepository, IngestRepository};
 
 fn item(id: &str, hash: u8) -> ItemWrite {
     ItemWrite {
@@ -46,8 +47,24 @@ fn item(id: &str, hash: u8) -> ItemWrite {
         document_version: 1,
     }
 }
-async fn page(ingest: &IngestRepository, policy: Uuid, items: Vec<ItemWrite>, followups: bool) {
-    ingest.start_run(policy).await.unwrap();
+async fn page(
+    ingest: &IngestRepository,
+    indexing: &IndexingRepository,
+    policy: &Policy,
+    model: Uuid,
+    items: Vec<ItemWrite>,
+    followups: bool,
+) {
+    let run = indexing
+        .start(&StartRequest {
+            request_id: Uuid::new_v4(),
+            policy_id: policy.id,
+            policy_version: policy.version,
+            scope: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(run.embedding_model_id, Some(model));
     let claim = ingest.claim("g-search", 60).await.unwrap().unwrap();
     let jobs = if followups {
         items
@@ -61,13 +78,16 @@ async fn page(ingest: &IngestRepository, policy: Uuid, items: Vec<ItemWrite>, fo
     } else {
         vec![]
     };
+    let writes = TraversalWrites {
+        primary_external_ids: items.iter().map(|item| item.external_id.clone()).collect(),
+        ..Default::default()
+    };
     ingest
-        .commit_page(
+        .commit_traversal_page(
             &claim,
             &PageCommit {
                 libraries: vec![],
                 items,
-                feeds: vec![],
                 artwork_inputs: vec![],
                 artwork_omissions: vec![],
                 followups: jobs,
@@ -76,11 +96,12 @@ async fn page(ingest: &IngestRepository, policy: Uuid, items: Vec<ItemWrite>, fo
                     cursor: json!({}),
                     watermark: None,
                 },
-                requests: 1,
+                requests: 0,
                 completion: Completion::Complete {
                     evidence: json!({"synthetic":true}),
                 },
             },
+            &writes,
         )
         .await
         .unwrap();
@@ -96,6 +117,30 @@ fn request(semantic_only: bool) -> SearchRequest {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn supported_sources_exclude_tmdb_without_database_access() {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://synthetic:synthetic@127.0.0.1:1/synthetic")
+        .unwrap();
+    let service = Catalog::new(pool, "http://localhost:50052".into(), None, None).unwrap();
+    let capabilities = service
+        .get_search_capabilities(tonic::Request::new(GetSearchCapabilitiesRequest {}))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(capabilities.sources, ["all", "jellyfin"]);
+    for source in ["tmdb", "unknown"] {
+        let mut input = request(false);
+        input.source = source.into();
+        let status = service
+            .search(tonic::Request::new(input))
+            .await
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), "source provider");
     }
 }
 
@@ -121,12 +166,13 @@ async fn exact_hybrid_and_explicit_degradation() {
     screenroom_backend::db::migrate(&pool).await.unwrap();
     let catalog_repo = CatalogRepository::new(pool.clone());
     let ingest = IngestRepository::new(pool.clone());
+    let indexing = IndexingRepository::new(pool.clone());
     let search = SearchRepository::new(pool.clone());
     let source = catalog_repo
         .configure_source(
             "synthetic",
             "jellyfin",
-            &json!({"adapter":"mock"}),
+            &json!({"adapter":"jellyfin"}),
             &json!({}),
         )
         .await
@@ -135,29 +181,37 @@ async fn exact_hybrid_and_explicit_degradation() {
         .configure_library(source.id, "movies", "movies", "Movies")
         .await
         .unwrap();
-    let policy = ingest
-        .create_policy(
+    indexing
+        .enroll_locator(source.id, &"0".repeat(64))
+        .await
+        .unwrap();
+    let configuration: Configuration = serde_json::from_value(json!({"indexing":1,"enabled":true,"cadence_seconds":3600,"mode":"full","components":{"metadata":true,"artwork":false,"embeddings":true},"strategy":"all","scope":{"library_ids":["movies"],"item_kinds":["movie","series"]},"operator_profile_id":"synthetic","limits":{"work_requests":10,"work_records":100,"lifetime_requests":100,"lifetime_records":100,"deadline_seconds":3600,"work_timeout_seconds":30}})).unwrap();
+    let policy = indexing
+        .configure(
             source.id,
-            &PolicyWrite {
-                enabled: true,
-                selection_json: json!({"library_ids":["movies"]}),
-                max_items: 100,
-                max_requests: 100,
-                incremental_seconds: 60,
-                reconcile_seconds: 3600,
-                enrich_metadata: false,
-                enrich_people: false,
-                enrich_artwork: false,
+            &ConfigureRequest {
+                request_id: Uuid::new_v4(),
+                existing: None,
+                configuration,
             },
         )
         .await
         .unwrap();
-    page(&ingest, policy.id, vec![item("a", 1), item("b", 2)], true).await;
     let model = search
         .register_model("synthetic-model", "synthetic-revision", 1024)
         .await
         .unwrap();
+    page(
+        &ingest,
+        &indexing,
+        &policy,
+        model.id,
+        vec![item("a", 1), item("b", 2)],
+        true,
+    )
+    .await;
     while let Some(claim) = ingest.claim("g-search", 60).await.unwrap() {
+        assert_eq!(claim.input["model_id"], json!(model.id));
         let id = claim.input["external_id"].as_str().unwrap();
         let document = search
             .document_for_reference("synthetic", id)
@@ -471,7 +525,15 @@ async fn exact_hybrid_and_explicit_degradation() {
     })
     .await
     .unwrap();
-    page(&ingest, policy.id, vec![item("a", 9)], false).await;
+    page(
+        &ingest,
+        &indexing,
+        &policy,
+        model.id,
+        vec![item("a", 9)],
+        false,
+    )
+    .await;
     let raced = racing.await.unwrap();
     if raced.effective_methods.unwrap().semantic {
         assert!(raced.degradation_reason.is_empty());

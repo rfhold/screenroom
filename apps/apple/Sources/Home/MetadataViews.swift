@@ -19,7 +19,8 @@ struct CoreImage: View {
         .task(id: "\(url)|\(catalog.artworkRevision)") {
             bytes = nil; failed = false
             do {
-                guard let data = try await catalog.client?.loadArtwork(url: url) else { throw CocoaError(.fileReadUnknown) }
+                guard let client = catalog.client else { throw CocoaError(.fileReadUnknown) }
+                let data = try await catalog.artworkLoader.load(key: "\(url)|\(catalog.artworkRevision)") { try await client.loadArtwork(url: url) }
                 try Task.checkCancellation()
                 #if os(macOS)
                 let decodable = NSImage(data: data) != nil
@@ -118,61 +119,51 @@ struct PeopleView: View {
     }
 }
 
-struct CreditsView: View {
+struct JellyfinProfileView: View {
     @Environment(CatalogStore.self) private var catalog
-    @State private var expanded = false
-    @State private var retry = 0
+    @Bindable var profile: JellyfinProfileStore
+    private enum Action { case load(String?), change(String?) }
+    @State private var action = Action.load(nil)
+    @State private var operationID = 0
+    private func request(_ action: Action) {
+        self.action = action
+        operationID += 1
+    }
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Button("Data & artwork credits") { expanded.toggle() }.buttonStyle(.borderless).frame(minHeight: 44).accessibilityIdentifier("credits.toggle")
-                .task(id: "\(expanded)|\(retry)|\(catalog.artworkRevision)") { if expanded { await catalog.loadProvenance() } }
-            if expanded {
-                Group {
-                    if catalog.provenanceLoading { ProgressView("Loading provenance…") }
-                    else if !catalog.provenanceError.isEmpty {
-                        Text(catalog.provenanceError).accessibilityIdentifier("credits.error")
-                        Button("Retry credits") { retry += 1 }.accessibilityIdentifier("credits.retry")
-                    }
-                }
-                if let info = catalog.catalogInfo, !catalog.provenanceLoading && catalog.provenanceError.isEmpty {
-                ForEach(info.branding.filter { $0.kind == "logo" }, id: \.id) { art in
-                    CoreImage(url: art.url).scaledToFit().frame(width: 88, height: 40).accessibilityLabel(art.label).accessibilityIdentifier("credits.logo.\(art.id)")
-                }
-                ForEach(Array(info.notices.enumerated()), id: \.element.id) { index, notice in
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !notice.section.isEmpty && (index == 0 || info.notices[index - 1].section != notice.section) { Text(notice.section).font(.headline) }
-                        if !notice.title.isEmpty { Text(notice.title).font(.headline) }
-                        Text(notice.text)
-                        if let link = externalURL(notice.linkUrl) { Link(notice.linkLabel, destination: link) }
-                    }.accessibilityIdentifier("credits.notice.\(notice.id)")
-                }
-                if !info.retrievedAt.isEmpty { Text("Snapshot · \(info.retrievedAt)") }
-                ForEach(catalog.provenanceArtwork, id: \.id) { art in
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(art.label).bold()
-                        Text(art.creator)
-                        if let license = externalURL(art.licenseUrl) { Link(art.license, destination: license) }
-                        else { Text(art.license) }
-                        if let source = externalURL(art.source) { Link("Source & provenance", destination: source) }
-                    }.accessibilityIdentifier("credits.artwork.\(art.id)")
-                }
-                if !catalog.provenanceItems.isEmpty { Text("Film & episode rights").font(.headline) }
-                ForEach(catalog.provenanceItems) { item in
-                    Text(item.title).bold()
-                    Text(item.rights)
-                    if let attribution = item.attribution { Text(attribution) }
-                    if let source = externalURL(item.rightsSource) { Link("\(item.title) rights source", destination: source) }
-                    if let value = item.licenseURL, let license = externalURL(value) { Link("License", destination: license) }
-                    ForEach(Array(item.value.provenanceNotes.enumerated()), id: \.offset) { _, note in Text(note) }
-                    if let rights = item.value.metadataRights {
-                        Text("Metadata: \(rights.label) · \(rights.note)")
-                        if !rights.attribution.isEmpty { Text(rights.attribution) }
-                        if let source = externalURL(rights.source) { Link("Metadata rights source", destination: source) }
-                        if let license = externalURL(rights.licenseUrl) { Link("Metadata license", destination: license) }
-                    }
-                }
-                }
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Jellyfin profile").font(.headline)
+            Text("Server-saved progress mapping for this local user selector. This is not sign-in.").font(.caption).foregroundStyle(.secondary)
+            if profile.busy { ProgressView("Loading Jellyfin profile settings…") }
+            if !profile.error.isEmpty {
+                Text(profile.error)
+                Button("Retry Jellyfin settings") { request(.load(nil)) }.disabled(profile.busy)
             }
-        }.font(.caption).foregroundStyle(.secondary)
+            if !profile.status.isEmpty { Text(profile.status).foregroundStyle(.secondary) }
+            if !profile.sources.isEmpty {
+                Picker("Jellyfin source", selection: Binding(get: { profile.source }, set: { request(.load($0)) })) {
+                    ForEach(profile.sources, id: \.id) { Text($0.displayName).tag($0.id) }
+                }.disabled(profile.busy)
+                Text("Current profile: \(profile.currentProfile)")
+                Picker("Profile", selection: $profile.selected) {
+                    if !profile.profiles.contains(where: { $0.id == profile.selected }) { Text("Choose a profile").tag(profile.selected) }
+                    ForEach(profile.profiles, id: \.id) { Text($0.displayName).tag($0.id) }
+                }.disabled(profile.busy || !profile.known || profile.profiles.isEmpty)
+                if profile.known && profile.profiles.isEmpty { Text("No enabled profiles are available.") }
+                Button("Save Jellyfin profile") { request(.change(profile.selected)) }
+                    .disabled(profile.busy || !profile.known || !profile.profiles.contains { $0.id == profile.selected })
+                Button("Unlink Jellyfin profile") { request(.change(nil)) }
+                    .disabled(profile.busy || !profile.known || profile.link == nil)
+            } else if !profile.busy && profile.error.isEmpty { Text("No Jellyfin sources are available.") }
+        }
+        .task(id: operationID) {
+            switch action {
+            case let .load(target): await profile.load(client: catalog.profileClient, target: target)
+            case let .change(selected): await profile.change(client: catalog.profileClient, profile: selected)
+            }
+        }
+        .onDisappear {
+            profile.deactivate()
+            action = .load(nil)
+        }
     }
 }

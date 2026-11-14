@@ -2,7 +2,10 @@
 set -euo pipefail
 apple=$(cd "$(dirname "$0")/.." && pwd)
 root=$(cd "$apple/../.." && pwd)
-: "${SCREENROOM_API_ENDPOINT:?Set SCREENROOM_API_ENDPOINT to the shared backend}"
+if [ "${SCREENROOM_STATE_LOCAL_TESTS_ONLY:-0}" != 1 ] && [ "${SCREENROOM_STATE_OPERATION_TESTS_ONLY:-0}" != 1 ]; then
+    : "${SCREENROOM_API_ENDPOINT:?Set SCREENROOM_API_ENDPOINT to the configured backend}"
+    : "${SCREENROOM_USER_ID:?Set SCREENROOM_USER_ID to the installation local user selector}"
+fi
 mkdir -p "$apple/build/catalog-state"
 swiftc -D DEBUG "$apple/Sources/Home/Catalog.swift" "$apple/Tests/CatalogStateTests.swift" \
     "$root/target/client-core/bindings/ScreenroomClientCore.swift" \

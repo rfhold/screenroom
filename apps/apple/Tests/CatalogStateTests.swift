@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 
 private func testItem(_ id: String) -> Item {
-    Item(id: id, title: id, kind: "Movie", parentId: nil, year: 2000, subtitle: "", overview: "", tags: [], colors: [], releaseDate: "", addedOrder: 0, titleRights: nil, metadataRights: nil, artwork: nil, rating: nil, runtime: nil, providerReferences: [], progressPercent: nil, provenanceNotes: [], metadataRetrievedAt: "")
+    Item(id: id, title: id, kind: "Movie", parentId: nil, year: 2000, subtitle: "", overview: "", tags: [], colors: [], releaseDate: "", addedOrder: 0, titleRights: nil, metadataRights: nil, artwork: nil, rating: nil, runtime: nil, providerReferences: [], progressPercent: nil, provenanceNotes: [], metadataRetrievedAt: "", watched: nil)
 }
 
 private actor CreditGate {
@@ -36,8 +36,6 @@ private final class LoopingClient: Client, @unchecked Sendable {
     override func listLibraries(sourceId: String, page: Page) async throws -> LibraryPage {
         LibraryPage(libraries: [MediaLibrary(id: "partial", title: "Partial")], nextPageToken: "cycle")
     }
-    override func getCatalogInfo() async throws -> CatalogInfo { CatalogInfo(notices: [], retrievedAt: "", branding: []) }
-    override func listArtwork(scope: SourceLibraryScope, page: Page) async throws -> ArtworkPage { ArtworkPage(artwork: [], nextPageToken: "cycle") }
 }
 
 private actor ReadProbe {
@@ -67,6 +65,9 @@ private final class TimedClient: Client, @unchecked Sendable {
         return SearchCapabilities(methods: ["text"], types: ["movie"], sources: ["all"], semanticDescription: "", maximumQueryLength: 100)
     }
     override func getHome(scope: SourceLibraryScope) async throws -> [HomeRow] { try await probe.pause("home"); return [] }
+    override func listLibraryItems(scope: SourceLibraryScope, page: Page) async throws -> ItemPage {
+        ItemPage(items: [], nextPageToken: "")
+    }
     override func getItem(id: String, scope: SourceLibraryScope) async throws -> Item {
         try await probe.pause("item:\(id)")
         var item = testItem(id)
@@ -96,6 +97,94 @@ private final class TimedClient: Client, @unchecked Sendable {
     }
 }
 
+private actor ProfileProbe {
+    var writes = 0
+    var mapping: JellyfinLink?
+    var failRead = false
+    func mutate(_ profile: String?) throws {
+        writes += 1
+        mapping = profile.map { JellyfinLink(sourceId: "source", jellyfinUserId: $0) }
+        failRead = true
+        throw CocoaError(.fileReadUnknown)
+    }
+    func read() throws -> JellyfinLink? {
+        if failRead { failRead = false; throw CocoaError(.fileReadUnknown) }
+        return mapping
+    }
+}
+
+private final class InvalidationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func record() { lock.lock(); defer { lock.unlock() }; value += 1 }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+}
+
+private actor DelayedWriteProbe {
+    var writes = 0
+    var homeReadStarted = false
+    var mapping: JellyfinLink?
+    private var continuation: CheckedContinuation<Void, Never>?
+    var pending: Bool { continuation != nil }
+    func save() async -> JellyfinLink {
+        writes += 1
+        await withCheckedContinuation { continuation = $0 }
+        let saved = JellyfinLink(sourceId: "source", jellyfinUserId: "profile")
+        mapping = saved
+        return saved
+    }
+    func finish() { continuation?.resume(); continuation = nil }
+    func startHome() { homeReadStarted = true }
+}
+
+private final class DelayedProfileClient: Client, @unchecked Sendable {
+    let probe: DelayedWriteProbe
+    let invalidations = InvalidationProbe()
+    init(probe: DelayedWriteProbe = DelayedWriteProbe()) { self.probe = probe; super.init(noHandle: NoHandle()) }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("Test-only transport") }
+    override func invalidateReads() { invalidations.record() }
+    override func listJellyfinSources(page: Page) async throws -> JellyfinSourcePage {
+        JellyfinSourcePage(sources: [JellyfinSource(id: "source", displayName: "Server")], nextPageToken: "")
+    }
+    override func listJellyfinProfiles(sourceId: String, page: Page) async throws -> JellyfinProfilePage {
+        JellyfinProfilePage(profiles: [JellyfinProfile(id: "profile", displayName: "Viewer")], nextPageToken: "")
+    }
+    override func getJellyfinLink(sourceId: String) async throws -> JellyfinLink? { await probe.mapping }
+    override func setJellyfinLink(sourceId: String, jellyfinUserId: String) async throws -> JellyfinLink {
+        defer { invalidateReads() }
+        return await probe.save()
+    }
+    override func getHome(scope: SourceLibraryScope) async throws -> [HomeRow] {
+        let before = invalidations.count
+        await probe.startHome()
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(invalidations.count == before, "Departed profile operation invalidated current Home reads")
+        return []
+    }
+}
+
+private final class ProfileClient: Client, @unchecked Sendable {
+    let probe = ProfileProbe()
+    init() { super.init(noHandle: NoHandle()) }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("Test-only transport") }
+    override func invalidateReads() {}
+    override func listJellyfinSources(page: Page) async throws -> JellyfinSourcePage {
+        JellyfinSourcePage(sources: page.token.isEmpty ? [JellyfinSource(id: "source", displayName: "Server")] : [JellyfinSource(id: "source", displayName: "Server"), JellyfinSource(id: "other", displayName: "Other server")], nextPageToken: page.token.isEmpty ? "last" : "")
+    }
+    override func listJellyfinProfiles(sourceId: String, page: Page) async throws -> JellyfinProfilePage {
+        JellyfinProfilePage(profiles: page.token.isEmpty ? [JellyfinProfile(id: "profile", displayName: "Viewer")] : [JellyfinProfile(id: "profile", displayName: "Viewer"), JellyfinProfile(id: "other", displayName: "Other viewer")], nextPageToken: page.token.isEmpty ? "last" : "")
+    }
+    override func getJellyfinLink(sourceId: String) async throws -> JellyfinLink? { try await probe.read() }
+    override func setJellyfinLink(sourceId: String, jellyfinUserId: String) async throws -> JellyfinLink {
+        try await probe.mutate(jellyfinUserId)
+        throw CocoaError(.fileReadUnknown)
+    }
+    override func clearJellyfinLink(sourceId: String) async throws -> String {
+        try await probe.mutate(nil)
+        return sourceId
+    }
+}
+
 private final class ContextClient: Client, @unchecked Sendable {
     let actual: Client
     let probe: ReadProbe
@@ -120,6 +209,29 @@ private final class ContextClient: Client, @unchecked Sendable {
     }
     override func listCredits(itemId: String, page: Page, scope: SourceLibraryScope) async throws -> CreditPage { try await actual.listCredits(itemId: itemId, page: page, scope: scope) }
     override func listChildren(parentId: String, page: Page, scope: SourceLibraryScope) async throws -> ItemPage { try await actual.listChildren(parentId: parentId, page: page, scope: scope) }
+}
+
+private final class BoundaryClient: Client, @unchecked Sendable {
+    init() { super.init(noHandle: NoHandle()) }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("Test-only transport") }
+    override func listLibraries(sourceId: String, page: Page) async throws -> LibraryPage {
+        LibraryPage(libraries: [MediaLibrary(id: "movies", title: "Movies"), MediaLibrary(id: "tv", title: "TV")], nextPageToken: "")
+    }
+    override func getSearchCapabilities() async throws -> SearchCapabilities {
+        SearchCapabilities(methods: ["text"], types: ["Movie"], sources: ["all"], semanticDescription: "", maximumQueryLength: 100)
+    }
+    override func listLibraryItems(scope: SourceLibraryScope, page: Page) async throws -> ItemPage {
+        ItemPage(items: [testItem("boundary-item")], nextPageToken: "")
+    }
+    override func getHome(scope: SourceLibraryScope) async throws -> [HomeRow] {
+        [HomeRow(id: "boundary-row", title: "Boundary row", items: [testItem("boundary-item")], readError: nil)]
+    }
+    override func getItem(id: String, scope: SourceLibraryScope) async throws -> Item { testItem(id) }
+    override func listCredits(itemId: String, page: Page, scope: SourceLibraryScope) async throws -> CreditPage {
+        let art = Artwork(id: "portrait", url: "https://example.test/portrait.png", label: "Portrait", creator: "Creator", license: "License", source: "https://example.test/source", licenseUrl: "https://example.test/license", kind: "portrait")
+        return CreditPage(credits: [Credit(id: "credit", name: "Credit", role: "Role", department: "cast", artwork: art)], nextPageToken: "")
+    }
+    override func listChildren(parentId: String, page: Page, scope: SourceLibraryScope) async throws -> ItemPage { ItemPage(items: [], nextPageToken: "") }
 }
 
 @main
@@ -154,16 +266,18 @@ private struct CatalogStateTests {
             let finalCalls = await probe.calls
             precondition(store.detail == nil && store.rows.isEmpty && finalCalls == calls)
         }
-        let provenanceProbe = ReadProbe(["info": .milliseconds(60), "artwork": .milliseconds(60)])
-        let provenance = CatalogStore(client: TimedClient(provenanceProbe), operationTimeout: .milliseconds(100))
-        await provenance.loadProvenance()
-        let artworkCancellation = await provenanceProbe.cancelled
-        precondition(provenance.provenanceError.contains("timed out") && provenance.catalogInfo == nil && provenance.provenanceArtwork.isEmpty && artworkCancellation == ["artwork"])
-        let searchProbe = ReadProbe(["search:": .milliseconds(60), "search:last": .milliseconds(100)])
+        let providerProbe = ReadProbe([:])
+        let provider = CatalogStore(client: TimedClient(providerProbe))
+        await provider.load(screen: "Home", library: "all", itemID: nil)
+        let providerCalls = await providerProbe.calls
+        precondition(provider.error.isEmpty && !providerCalls.contains("info"))
+        let searchProbe = ReadProbe(["search:": .milliseconds(60), "search:last": .milliseconds(600)])
         let search = CatalogStore(client: TimedClient(searchProbe), operationTimeout: .milliseconds(450))
         await search.search(query: "movie", library: "all", options: SearchOptions(source: "all", types: ["Movie"], methods: ["text"]))
+        precondition(search.error.isEmpty && search.results.count == 1 && search.searchPage.token == "last")
+        await search.loadMore(search: true)
         let searchCancellation = await searchProbe.cancelled
-        precondition(search.error.contains("timed out") && search.results.isEmpty && searchCancellation == ["search:last"])
+        precondition(!search.pageError.isEmpty && search.results.count == 1 && search.searchPage.token == "last" && searchCancellation == ["search:last"])
         let ancestorProbe = ReadProbe(["item:child": .milliseconds(60), "item:parent": .milliseconds(60)])
         let ancestors = CatalogStore(client: TimedClient(ancestorProbe), operationTimeout: .milliseconds(100))
         do { _ = try await ancestors.ancestors(for: "child"); preconditionFailure("Late ancestors published") }
@@ -183,13 +297,134 @@ private struct CatalogStateTests {
     }
 
     @MainActor
+    static func parityRegressions() async throws {
+        var item = testItem("episode")
+        item.kind = "Episode"; item.title = "Episode title"
+        var season = testItem("season")
+        season.kind = "Season"
+        item.parentId = "season"
+        precondition(CatalogItem(value: item).isSeasonChild(of: CatalogItem(value: season)))
+        item.parentId = "different-season"
+        precondition(!CatalogItem(value: item).isSeasonChild(of: CatalogItem(value: season)))
+        item.parentId = nil
+        precondition(!CatalogItem(value: item).isSeasonChild(of: CatalogItem(value: season)))
+        item.parentId = "season"; item.kind = "Movie"
+        precondition(!CatalogItem(value: item).isSeasonChild(of: CatalogItem(value: season)))
+        item.kind = "Episode"; season.kind = "Series"
+        precondition(!CatalogItem(value: item).isSeasonChild(of: CatalogItem(value: season)))
+        precondition(!CatalogItem(value: item).isSeasonChild(of: nil))
+        for (subtitle, heading, season) in [
+            ("Series · S05E09", "Series · S05:E09", "E09"),
+            ("Series: Part · Two · S5 E9 · 40 min", "Series: Part · Two · S05:E09", "E09"),
+            ("Series · S0E100", "Series · S00:E100", "E100"),
+            ("S100E0", "S100:E00", "E00"),
+            ("Series · missing", "Episode", "Episode")
+        ] {
+            item.subtitle = subtitle
+            let value = CatalogItem(value: item)
+            precondition(value.labels().heading == heading)
+            precondition(value.labels(seasonContext: true).heading == season)
+            precondition(value.labels().subtitle == item.title)
+        }
+        precondition(!homeRowError("progress_unavailable").contains("private"))
+        precondition(homeRowError("private id and server error") == "This row could not be loaded. Other catalog rows remain available.")
+        var page = ItemPagination()
+        var values = try page.append((0..<100).map { testItem(String($0)) }, next: "next", to: [])
+        precondition(values.count == 100 && loadedItemCount(values.count) == "100 items loaded")
+        values = try page.append([testItem("99"), testItem("101"), testItem("100")], next: "final", to: values)
+        precondition(values.suffix(2).map(\.id) == ["101", "100"])
+        precondition(loadedItemCount(values.count) == "102 items loaded" && loadedItemCount(1) == "1 item loaded")
+        do { _ = try page.append([testItem("bad")], next: "next", to: values); preconditionFailure("Token cycle accepted") }
+        catch { precondition(page.token == "final" && values.count == 102 && loadedItemCount(values.count) == "102 items loaded") }
+
+        let delayedClient = DelayedProfileClient()
+        let readClient = DelayedProfileClient(probe: delayedClient.probe)
+        let activeHome = CatalogStore(client: readClient, profileClient: delayedClient)
+        precondition(activeHome.client !== activeHome.profileClient)
+        activeHome.libraries = [MediaLibrary(id: "all", title: "All libraries")]
+        let departedProfile = activeHome.jellyfinProfile
+        await departedProfile.load(client: delayedClient)
+        let write = Task { await departedProfile.change(client: delayedClient, profile: "profile") }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !(await delayedClient.probe.pending) && ContinuousClock.now < deadline { await Task.yield() }
+        let pending = await delayedClient.probe.pending
+        precondition(pending)
+        departedProfile.deactivate(); write.cancel()
+        let invalidationsBefore = delayedClient.invalidations.count
+        await departedProfile.load(client: delayedClient)
+        precondition(!departedProfile.known && departedProfile.error.contains("still settling") && delayedClient.invalidations.count == invalidationsBefore)
+        departedProfile.deactivate()
+        let home = Task { await activeHome.load(screen: "Home", library: "all", itemID: nil) }
+        let homeDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !(await delayedClient.probe.homeReadStarted) && ContinuousClock.now < homeDeadline { await Task.yield() }
+        let homeStarted = await delayedClient.probe.homeReadStarted
+        precondition(homeStarted)
+        await delayedClient.probe.finish()
+        await write.value
+        await home.value
+        precondition(delayedClient.invalidations.count == invalidationsBefore + 1 && readClient.invalidations.count == 0)
+        precondition(activeHome.error.isEmpty && !activeHome.loading)
+        precondition(!departedProfile.known && !departedProfile.busy && departedProfile.link == nil && departedProfile.revision == 0 && departedProfile.error.contains("still settling"))
+        await departedProfile.load(client: delayedClient)
+        let departedWrites = await delayedClient.probe.writes
+        precondition(departedWrites == 1 && departedProfile.currentProfile == "Viewer" && departedProfile.revision == 1)
+        await activeHome.load(screen: "Home", library: "all", itemID: nil)
+        precondition(activeHome.error.isEmpty && readClient.invalidations.count == 1)
+        await activeHome.load(screen: "Home", library: "all", itemID: nil)
+        precondition(activeHome.error.isEmpty && readClient.invalidations.count == 1)
+
+        let client = ProfileClient()
+        let profile = JellyfinProfileStore()
+        await profile.load(client: client)
+        precondition(profile.known && profile.currentProfile == "Not linked" && profile.sources.count == 2 && profile.profiles.count == 2)
+        await profile.change(client: client, profile: "profile")
+        precondition(!profile.known && profile.error.contains("will not be repeated"))
+        await profile.change(client: client, profile: "profile")
+        profile.deactivate()
+        await profile.load(client: client)
+        let writes = await client.probe.writes
+        precondition(writes == 1 && profile.known && profile.currentProfile == "Viewer" && profile.revision == 1)
+        profile.link = JellyfinLink(sourceId: "source", jellyfinUserId: "unavailable")
+        precondition(profile.currentProfile == "Linked profile unavailable in choices")
+
+        let paginationProbe = ReadProbe(["search:last": .milliseconds(200)])
+        let search = CatalogStore(client: TimedClient(paginationProbe), operationTimeout: .seconds(2))
+        let options = SearchOptions(source: "all", types: ["Movie"], methods: ["text"])
+        await search.search(query: "first", library: "all", options: options)
+        let oldMore = Task { await search.loadMore(search: true) }
+        await wait(paginationProbe, "search:last")
+        await search.loadMore(search: true)
+        await search.search(query: "new query", library: "movies", options: options)
+        await oldMore.value
+        let continuationCalls = await paginationProbe.calls.filter { $0 == "search:last" }
+        precondition(continuationCalls.count == 1 && search.results.count == 1 && search.searchPage.token == "last")
+
+        let loader = ArtworkLoader()
+        let probe = ReadProbe(Dictionary(uniqueKeysWithValues: (0..<16).map { ("art:\($0)", Duration.milliseconds(100)) }))
+        let tasks = (0..<16).map { n in Task { try await loader.load(key: "\(n)") { try await probe.pause("art:\(n)"); return Data([UInt8(n)]) } } }
+        await wait(probe, "art:7")
+        let firstCalls = await probe.calls
+        precondition(firstCalls.count == 8)
+        tasks[0].cancel(); tasks[8].cancel()
+        for task in tasks { _ = try? await task.value }
+        precondition(loader.peakActive == 8)
+        let finalCalls = await probe.calls
+        precondition(!finalCalls.contains("art:8"))
+        let a = Task { try await loader.load(key: "shared") { try await probe.pause("shared"); return Data([1]) } }
+        let b = Task { try await loader.load(key: "shared") { try await probe.pause("shared"); return Data([1]) } }
+        _ = try await a.value; _ = try await b.value
+        let sharedCalls = await probe.calls.filter { $0 == "shared" }
+        precondition(sharedCalls.count == 1)
+    }
+
+    @MainActor
     static func contextRegressions() async throws {
-        let keys: Set<String> = ["library:tv", "home:mock-tmdb", "item:sintel"]
+        let keys: Set<String> = ["library:tv", "home:source-id", "item:detail-id"]
         let probe = ReadProbe(Dictionary(uniqueKeysWithValues: keys.map { ($0, Duration.milliseconds(100)) }), failures: keys)
-        let actual = CatalogStore().client!
+        let actual = BoundaryClient()
         let store = CatalogStore(client: ContextClient(actual, probe))
         await store.load(screen: "Library", library: "movies", itemID: nil)
-        precondition(store.error.isEmpty && store.items.contains { $0.id == "big-buck-bunny" })
+        precondition(store.error.isEmpty && store.items.contains { $0.id == "boundary-item" })
         let tv = Task { await store.load(screen: "Library", library: "tv", itemID: nil) }
         await wait(probe, "library:tv")
         precondition(store.items.isEmpty && store.rows.isEmpty && store.detail == nil && store.loading)
@@ -197,21 +432,23 @@ private struct CatalogStateTests {
         precondition(!store.error.isEmpty && store.items.isEmpty)
         await store.load(screen: "Home", library: "all", itemID: nil)
         precondition(store.error.isEmpty && !store.rows.isEmpty)
-        store.scope = SourceLibraryScope(sourceId: "mock-tmdb", libraryId: "")
+        store.scope = SourceLibraryScope(sourceId: "source-id", libraryId: "")
         let home = Task { await store.load(screen: "Home", library: "all", itemID: nil) }
-        await wait(probe, "home:mock-tmdb")
+        await wait(probe, "home:source-id")
         precondition(store.rows.isEmpty && store.items.isEmpty && store.loading)
         await home.value
         precondition(!store.error.isEmpty && store.rows.isEmpty)
         store.scope = SourceLibraryScope(sourceId: "", libraryId: "movies")
-        await store.load(screen: "Library", library: "movies", itemID: "big-buck-bunny")
-        precondition(store.error.isEmpty && store.detail?.id == "big-buck-bunny" && !store.credits.isEmpty)
-        let detail = Task { await store.load(screen: "Library", library: "movies", itemID: "sintel") }
-        await wait(probe, "item:sintel")
+        await store.load(screen: "Library", library: "movies", itemID: "boundary-item")
+        precondition(store.error.isEmpty && store.detail?.id == "boundary-item" && !store.credits.isEmpty)
+        let portraits = store.credits.compactMap(\.artwork).filter { $0.kind == "portrait" }
+        precondition(!portraits.isEmpty && portraits.allSatisfy { !$0.creator.isEmpty && !$0.license.isEmpty && !$0.licenseUrl.isEmpty && !$0.source.isEmpty })
+        let detail = Task { await store.load(screen: "Library", library: "movies", itemID: "detail-id") }
+        await wait(probe, "item:detail-id")
         precondition(store.detail == nil && store.credits.isEmpty && store.children.isEmpty && store.loading)
         await detail.value
         precondition(!store.error.isEmpty && store.detail == nil && store.credits.isEmpty)
-        FileHandle.standardOutput.write(Data("Real-response Movies-to-TV, Home/source and detail context replacement/failure checks passed.\n".utf8))
+        print("Isolated library, Home/source and detail context replacement/failure checks passed")
     }
     static func wait(_ gate: CreditGate, _ id: String) async {
         let deadline = Date().addingTimeInterval(5)
@@ -224,6 +461,19 @@ private struct CatalogStateTests {
 
     @MainActor
     static func main() async throws {
+        var watchedItem = testItem("watched-state")
+        watchedItem.progressPercent = 100
+        for state in [nil, false, true, false, nil, true] as [Bool?] {
+            watchedItem.watched = state
+            let presentation = CatalogItem(value: watchedItem)
+            precondition(presentation.watched == (state == true))
+            precondition(presentation.cardAccessibility.components(separatedBy: "Watched").count == (state == true ? 2 : 1))
+            precondition(presentation.playbackAccessibility.contains("Playback progress 100%"))
+            precondition(presentation.id == "watched-state")
+        }
+        watchedItem.progressPercent = nil
+        precondition(CatalogItem(value: watchedItem).playbackAccessibility == "Watched")
+        try await parityRegressions()
         try await operationRegressions()
         if ProcessInfo.processInfo.environment["SCREENROOM_STATE_OPERATION_TESTS_ONLY"] == "1" { return }
         try await contextRegressions()
@@ -241,6 +491,7 @@ private struct CatalogStateTests {
         variant.metadataRetrievedAt = "metadata-date"
         variant.titleRights = Rights(label: "Title rights", note: "Title note", source: "https://example.com/title-rights", licenseUrl: "https://example.com/title-license", attribution: "Title author")
         variant.metadataRights = Rights(label: "Metadata rights", note: "Metadata note", source: "https://example.com/metadata-rights", licenseUrl: "https://example.com/metadata-license", attribution: "Metadata author")
+        variant.artwork = Artwork(id: "poster", url: "https://example.com/poster.png", label: "Poster", creator: "Poster artist", license: "Poster CC BY", source: "https://example.com/poster-source", licenseUrl: "https://example.com/poster-license", kind: "poster")
         let mapped = CatalogItem(value: variant)
         precondition(mapped.ink == "010203" && mapped.light == "aabbcc")
         precondition(mapped.record?.score == "3.5/5" && mapped.record?.ratingDetail.contains("Independent") == true)
@@ -249,6 +500,9 @@ private struct CatalogStateTests {
         precondition(mapped.rights == "Title rights · Title note" && mapped.attribution == "Title author")
         precondition(mapped.rightsSource == variant.titleRights!.source && mapped.licenseURL == variant.titleRights!.licenseUrl)
         precondition(mapped.value.metadataRights == variant.metadataRights)
+        precondition(mapped.artwork == variant.artwork && mapped.artwork?.creator == "Poster artist")
+        precondition(mapped.artwork?.creator != mapped.attribution && mapped.artwork?.licenseUrl != mapped.licenseURL)
+        precondition(mapped.artwork?.source == "https://example.com/poster-source")
         precondition(CatalogItem(value: testItem("neutral")).ink == "303030")
         precondition(externalURL("") == nil && externalURL("relative/path") == nil && externalURL("https://example.com") != nil)
         let caps = SearchCapabilities(methods: ["fuzzy"], types: ["Episode"], sources: ["archive"], semanticDescription: "Server-defined method", maximumQueryLength: 17)
@@ -260,20 +514,35 @@ private struct CatalogStateTests {
         let settingsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("build/settings-tests/\(UUID().uuidString)", isDirectory: true)
         let settingsURL = settingsDirectory.appendingPathComponent("roundtrip.json")
         let local = CatalogStore(settingsURL: settingsURL)
-        local.scope = SourceLibraryScope(sourceId: "mock-tmdb", libraryId: "")
-        let localOptions = SearchOptions(source: "tmdb", types: ["Episode"], methods: ["fuzzy"], titleOnly: true)
-        local.save(options: localOptions, library: "tv", subtitle: "library_tracks")
+        local.scope = SourceLibraryScope(sourceId: "source-id", libraryId: "")
+        let localOptions = SearchOptions(source: "jellyfin", types: ["Episode"], methods: ["fuzzy"], titleOnly: true)
+        local.save(options: localOptions, library: "tv")
         precondition(local.error.isEmpty, local.error)
         let relaunched = CatalogStore(settingsURL: settingsURL)
         precondition(relaunched.preferences == local.preferences)
-        precondition(relaunched.scope == SourceLibraryScope(sourceId: "mock-tmdb", libraryId: "tv") && relaunched.preferences?.source == "tmdb")
+        precondition(relaunched.scope == SourceLibraryScope(sourceId: "source-id", libraryId: "tv") && relaunched.preferences?.source == "jellyfin")
         precondition(relaunched.preferences?.types?.episode == true && relaunched.preferences?.types?.movie == false)
         precondition(relaunched.preferences?.methods?.titleOnly == true && relaunched.preferences?.methods?.fuzzy == true && relaunched.preferences?.methods?.semantic == false)
-        precondition(relaunched.preferences?.subtitlePreference == "library_tracks")
         let namespace = ProcessInfo.processInfo.environment["SCREENROOM_E2E_SETTINGS_NAMESPACE"] ?? "default"
         let key = "screenroom.settings.v1.\(namespace)"
         let savedData = try Data(contentsOf: settingsURL)
         let savedDocument = try JSONSerialization.jsonObject(with: savedData) as! [String: Any]
+        precondition(savedDocument["subtitle"] == nil)
+        var unsupportedOptions = localOptions
+        unsupportedOptions.source = "tmdb"
+        local.save(options: unsupportedOptions, library: "tv")
+        precondition(local.preferences == relaunched.preferences && !local.persistenceWarning.isEmpty)
+        let afterUnsupportedSave = try Data(contentsOf: settingsURL)
+        precondition(afterUnsupportedSave == savedData)
+        for subtitle in [nil, "transcription"] as [String?] {
+            var legacy = savedDocument
+            legacy["source"] = "tmdb"
+            legacy["subtitle"] = subtitle
+            try JSONSerialization.data(withJSONObject: legacy).write(to: settingsURL, options: .atomic)
+            var expected = local.preferences!
+            expected.source = "all"
+            precondition(CatalogStore(settingsURL: settingsURL).preferences == expected)
+        }
         for invalid: [String: Any] in [["version": 2], ["movie": false, "series": false, "episode": false], ["text": false, "fuzzy": false], ["titleOnly": true, "semantic": true]] {
             var document = savedDocument
             document.merge(invalid) { _, value in value }
@@ -298,18 +567,18 @@ private struct CatalogStateTests {
         UserDefaults.standard.removeObject(forKey: key)
         var failWrite = true
         let failureURL = settingsDirectory.appendingPathComponent("write-recovery.json")
-        let failure = CatalogStore(settingsURL: failureURL, settingsWriter: { data, url in
+        let failure = CatalogStore(client: TimedClient(ReadProbe([:])), settingsURL: failureURL, settingsWriter: { data, url in
             if failWrite { throw CocoaError(.fileWriteNoPermission) }
             try data.write(to: url, options: .atomic)
         })
-        failure.save(options: localOptions, library: "tv", subtitle: "library_tracks")
-        precondition(failure.preferences?.source == "tmdb" && !failure.persistenceWarning.isEmpty && failure.error.isEmpty)
+        failure.save(options: localOptions, library: "tv")
+        precondition(failure.preferences?.source == "jellyfin" && !failure.persistenceWarning.isEmpty && failure.error.isEmpty)
         let warning = failure.persistenceWarning
         await failure.load(screen: "Library", library: "tv", itemID: nil)
         precondition(failure.error.isEmpty && failure.persistenceWarning == warning)
-        await failure.search(query: "beverly", library: "tv", options: localOptions)
+        await failure.search(query: "query", library: "tv", options: localOptions)
         precondition(failure.error.isEmpty && failure.persistenceWarning == warning)
-        _ = try await failure.ancestors(for: "beverly-hillbillies-s1-e1")
+        _ = try await failure.ancestors(for: "episode-id")
         precondition(failure.persistenceWarning == warning)
         failWrite = false
         failure.retrySettingsSave()
@@ -321,24 +590,22 @@ private struct CatalogStateTests {
         let looping = CatalogStore(client: LoopingClient())
         await looping.load(screen: "Home", library: "all", itemID: nil)
         precondition(!looping.error.isEmpty && looping.libraries.isEmpty && !looping.loading)
-        await looping.loadProvenance()
-        precondition(!looping.provenanceError.isEmpty && looping.provenanceArtwork.isEmpty && !looping.provenanceLoading)
 
         let gate = CreditGate()
         let store = CatalogStore(client: DelayedClient(gate: gate))
-        store.scope = SourceLibraryScope(sourceId: "mock-tmdb", libraryId: "movies")
+        store.scope = SourceLibraryScope(sourceId: "source-id", libraryId: "movies")
         store.libraries = [MediaLibrary(id: "all", title: "All libraries")]
         store.libraries.append(MediaLibrary(id: "variant-id", title: "Renamed collection"))
         precondition(store.libraryTitle("variant-id") == "Renamed collection")
-        store.detail = CatalogItem(value: testItem("bunny"))
-        store.credits = [Credit(id: "bunny", name: "Bunny crew", role: "Director", department: "crew", artwork: nil)]
-        store.children = [CatalogItem(value: testItem("bunny-child"))]
-        let failing = Task { await store.load(screen: "Library", library: "movies", itemID: "nosferatu") }
-        await wait(gate, "nosferatu")
-        let requestedScope = await gate.requestedScope("nosferatu")
-        precondition(requestedScope == SourceLibraryScope(sourceId: "mock-tmdb", libraryId: "movies"))
+        store.detail = CatalogItem(value: testItem("prior-item"))
+        store.credits = [Credit(id: "prior-credit", name: "Prior credit", role: "Director", department: "crew", artwork: nil)]
+        store.children = [CatalogItem(value: testItem("prior-child"))]
+        let failing = Task { await store.load(screen: "Library", library: "movies", itemID: "failed-item") }
+        await wait(gate, "failed-item")
+        let requestedScope = await gate.requestedScope("failed-item")
+        precondition(requestedScope == SourceLibraryScope(sourceId: "source-id", libraryId: "movies"))
         precondition(store.detail == nil && store.credits.isEmpty && store.children.isEmpty)
-        await gate.finish("nosferatu", fail: true)
+        await gate.finish("failed-item", fail: true)
         await failing.value
         precondition(!store.error.isEmpty && store.detail == nil && store.credits.isEmpty && store.children.isEmpty)
 
@@ -359,53 +626,50 @@ private struct CatalogStateTests {
         precondition(store.detail == nil && store.credits.isEmpty && store.children.isEmpty && store.error.isEmpty && !store.loading)
         print("Delayed/failing cross-title state and null-vote regressions passed")
 
-        var baseline: [String] = []
-        var snapshotsNonempty = true
+        if ProcessInfo.processInfo.environment["SCREENROOM_STATE_LOCAL_TESTS_ONLY"] == "1" {
+            print("Local state checks passed; real-source integration was not requested")
+            return
+        }
         for origin in ["Library", "Search"] {
             let actual = CatalogStore()
             await actual.load(screen: origin, library: "all", itemID: nil)
             precondition(actual.error.isEmpty, actual.error)
-            if origin == "Search", let caps = actual.capabilities {
-                var options = SearchOptions()
-                options.reconcile(caps, preferences: actual.preferences)
-                await actual.search(query: "Bunny", library: "all", options: options)
-                precondition(actual.error.isEmpty && actual.results.count == 11)
-                FileHandle.standardOutput.write(Data("Shared API libraries: \(actual.libraries.map { "\($0.id)=\($0.title)" }); paged hybrid Bunny results: \(actual.results.map(\.id))\n".utf8))
-                options.source = "jellyfin"; options.titleOnly = true; options.methods = ["text", "fuzzy"]
-                await actual.search(query: "beverly", library: "tv", options: options)
-                precondition(actual.error.isEmpty && actual.results.map(\.id) == ["beverly-hillbillies"])
-                FileHandle.standardOutput.write(Data("Jellyfin provider-filtered title-only beverly in TV Shows: \(actual.results.map(\.id)); error=\(actual.error)\n".utf8))
-            }
             precondition(actual.rows.isEmpty)
-            await actual.loadProvenance()
-            precondition(actual.provenanceError.isEmpty, actual.provenanceError)
-            let arts = actual.provenanceArtwork
-            precondition(!arts.isEmpty && actual.provenanceItems.isEmpty)
-            let portraitIdentities = [("Sacha Goedegebure", "Sacha Goedegebure"), ("Ton Roosendaal", "Ton Roosendaal"), ("Andreas Goralczyk", "Andy Goralczyk"), ("Jan Morgenstern", "Jan Morgenstern")]
-            for (creditName, artworkIdentity) in portraitIdentities {
-                precondition(arts.contains { ($0.id == artworkIdentity || $0.label.contains(artworkIdentity)) && !$0.creator.isEmpty && !$0.license.isEmpty && !$0.licenseUrl.isEmpty && !$0.source.isEmpty }, "Missing licensed portrait for \(creditName): \(artworkIdentity)")
+            let libraries = actual.libraries.filter { $0.id != "all" }
+            for library in libraries {
+                await actual.load(screen: "Library", library: library.id, itemID: nil)
+                precondition(actual.error.isEmpty, actual.error)
+                for _ in 0..<512 {
+                    if actual.itemPage.token.isEmpty { break }
+                    await actual.loadMore(search: false)
+                    precondition(actual.pageError.isEmpty, actual.pageError)
+                }
+                precondition(actual.itemPage.token.isEmpty, "Library exceeded bounded test traversal")
+                precondition(Set(actual.items.map(\.id)).count == actual.items.count)
+                if let item = actual.items.first {
+                    await actual.load(screen: "Library", library: library.id, itemID: item.id)
+                    precondition(actual.error.isEmpty && actual.detail?.id == item.id, actual.error)
+                    if let art = item.value.artwork {
+                        let bytes = try await actual.client!.loadArtwork(url: art.url)
+                        precondition(NSImage(data: bytes) != nil, "Published artwork must decode natively")
+                    }
+                    if origin == "Search", let caps = actual.capabilities {
+                        var options = SearchOptions()
+                        options.reconcile(caps, preferences: actual.preferences)
+                        options.titleOnly = true
+                        await actual.search(query: item.title, library: library.id, options: options)
+                        for _ in 0..<512 {
+                            if actual.searchPage.token.isEmpty { break }
+                            await actual.loadMore(search: true)
+                            precondition(actual.pageError.isEmpty, actual.pageError)
+                        }
+                        precondition(actual.error.isEmpty && actual.searchPage.token.isEmpty, actual.error)
+                        precondition(actual.results.contains { $0.id == item.id }, "Title search must retain the discovered item")
+                    }
+                }
             }
-            let ids = arts.map(\.id)
-            precondition(Set(ids).count == ids.count)
-            precondition(arts.count == 21 && actual.catalogInfo?.notices.count == 7)
-            let logo = arts.first { $0.kind == "logo" }!
-            do {
-                _ = try await actual.client!.loadArtwork(url: "http://127.0.0.1:50051/artwork/00000000-0000-0000-0000-000000000000/revisions/1/native")
-                preconditionFailure("Missing artwork must not succeed")
-            } catch { }
-            actual.invalidate()
-            let bytes = try await actual.client!.loadArtwork(url: logo.url)
-            precondition(bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) && NSImage(data: bytes) != nil)
-            snapshotsNonempty = snapshotsNonempty && !actual.catalogInfo!.retrievedAt.isEmpty
-            FileHandle.standardOutput.write(Data("Core CatalogInfo PNG branding request and native decode passed: \(logo.url), \(bytes.count) bytes, \(actual.catalogInfo!.notices.count) ordered notices, snapshot \(actual.catalogInfo!.retrievedAt)\n".utf8))
-            if baseline.isEmpty { baseline = ids } else { precondition(baseline == ids) }
-            actual.scope = SourceLibraryScope(sourceId: "mock-jellyfin", libraryId: "tv")
-            await actual.load(screen: "Library", library: "tv", itemID: "beverly-hillbillies-s1-e1")
-            precondition(actual.error.isEmpty, actual.error)
-            precondition(actual.detail?.kind == "Episode" && actual.detail?.value.metadataRetrievedAt.isEmpty == false)
-            print("On-demand provenance passed from \(origin)-first: \(arts.count) artwork records, no eager title traversal")
+            print("\(origin)-first source-driven catalog: \(libraries.count) libraries")
         }
-        FileHandle.standardOutput.write(Data("All bounded state, local-settings, artwork failure/recovery, complete attribution and scoped episode checks passed.\n".utf8))
-        precondition(snapshotsNonempty, "CatalogInfo snapshot timestamp must preserve canonical provenance")
+        print("Bounded state, local settings and source-driven catalog checks passed")
     }
 }

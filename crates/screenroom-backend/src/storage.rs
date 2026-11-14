@@ -10,6 +10,9 @@ use aws_sigv4::http_request::{
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt, stream};
 use reqwest::{Method, Url};
+use screenroom_observability::transport::{
+    BodyDirection, RequestKind, RequestObservation, RequestOutcome, TransportObservation,
+};
 use sha2::{Digest, Sha256};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
@@ -50,6 +53,8 @@ pub struct ObjectRead {
     pub body: ObjectByteStream,
 }
 struct ReadState {
+    observation: RequestObservation,
+    observer: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
     upstream: Pin<Box<dyn Stream<Item = std::result::Result<Bytes, reqwest::Error>> + Send>>,
     pending: Bytes,
     received: usize,
@@ -77,6 +82,8 @@ impl VerifiedObject {
 }
 #[derive(Clone)]
 pub struct ObjectStorage {
+    transport_observer: TransportObservation,
+    download_observer: Option<std::sync::Arc<dyn Fn(u64) + Send + Sync>>,
     client: reqwest::Client,
     config: StorageConfig,
     endpoint: Url,
@@ -111,10 +118,24 @@ impl ObjectStorage {
             .build()
             .map_err(|_| Error::Unavailable)?;
         Ok(Self {
+            transport_observer: Default::default(),
+            download_observer: None,
             client,
             config,
             endpoint,
         })
+    }
+    /// Observes consumed response-body chunks, including chunks later rejected by verification.
+    pub fn with_download_observer(
+        mut self,
+        observer: std::sync::Arc<dyn Fn(u64) + Send + Sync>,
+    ) -> Self {
+        self.download_observer = Some(observer);
+        self
+    }
+    pub fn with_transport_observer(mut self, observer: TransportObservation) -> Self {
+        self.transport_observer = observer;
+        self
     }
     fn url(&self, key: &str) -> Result<Url> {
         if key.is_empty()
@@ -144,7 +165,7 @@ impl ObjectStorage {
         key: &str,
         body: Option<Vec<u8>>,
         mime: Option<&str>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<(reqwest::Response, RequestObservation)> {
         let url = self.url(key)?;
         let bytes = body.as_deref().unwrap_or_default();
         let identity = aws_credential_types::Credentials::new(
@@ -178,6 +199,12 @@ impl ObjectStorage {
         let (instructions, _) = sign(signable, &params)
             .map_err(|_| Error::Invalid("S3 signing"))?
             .into_parts();
+        let kind = match method {
+            Method::GET => RequestKind::StorageRead,
+            Method::HEAD => RequestKind::StorageHead,
+            _ => RequestKind::StorageUpload,
+        };
+        let mut observation = self.transport_observer.start(kind);
         let mut request = self.client.request(method, url);
         for (name, value) in instructions.headers() {
             request = request.header(name, value);
@@ -186,13 +213,22 @@ impl ObjectStorage {
             request = request.header(reqwest::header::CONTENT_TYPE, mime);
         }
         if let Some(body) = body {
-            request = request.body(body);
+            request = request
+                .header(reqwest::header::CONTENT_LENGTH, body.len())
+                .body(crate::embedding::observed_upload(body, &observation));
         }
-        let response = request.send().await.map_err(|_| Error::Unavailable)?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) => {
+                observation.finish(RequestOutcome::Failed);
+                return Err(Error::Unavailable);
+            }
+        };
         if !response.status().is_success() {
+            observation.finish(RequestOutcome::Failed);
             return Err(Error::Unavailable);
         }
-        Ok(response)
+        Ok((response, observation))
     }
     pub async fn upload_verified(
         &self,
@@ -201,13 +237,15 @@ impl ObjectStorage {
     ) -> Result<VerifiedObject> {
         let digest = Sha256::digest(image.bytes());
         let key = object_key(source, digest.as_slice());
-        self.request(
-            Method::PUT,
-            &key,
-            Some(image.bytes().to_vec()),
-            Some(image.mime()),
-        )
-        .await?;
+        let (_, mut observation) = self
+            .request(
+                Method::PUT,
+                &key,
+                Some(image.bytes().to_vec()),
+                Some(image.mime()),
+            )
+            .await?;
+        observation.finish(RequestOutcome::Succeeded);
         let location = ObjectLocation {
             bucket: self.config.bucket.clone(),
             object_key: key,
@@ -226,7 +264,7 @@ impl ObjectStorage {
     }
     pub async fn head(&self, object: &ObjectLocation) -> Result<()> {
         self.validate_location(object)?;
-        let response = self
+        let (response, mut observation) = self
             .request(Method::HEAD, &object.object_key, None, None)
             .await?;
         let length = response
@@ -235,8 +273,10 @@ impl ObjectStorage {
             .and_then(|h| h.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok());
         if length != Some(object.byte_length) {
+            observation.finish(RequestOutcome::Failed);
             return Err(Error::Incompatible("S3 object length"));
         }
+        observation.finish(RequestOutcome::Succeeded);
         Ok(())
     }
     /// Bounded download; dropping this future cancels transport. Never returns an S3 URL.
@@ -261,7 +301,7 @@ impl ObjectStorage {
             return Err(Error::Invalid("object read limit"));
         }
         let deadline = tokio::time::Instant::now() + self.config.timeout;
-        let response = self
+        let (response, mut observation) = self
             .request(Method::GET, &object.object_key, None, None)
             .await?;
         let length = response
@@ -277,9 +317,12 @@ impl ObjectStorage {
             || length != Some(object.byte_length)
             || mime != Some(object.mime.as_str())
         {
+            observation.finish(RequestOutcome::Failed);
             return Err(Error::Incompatible("S3 object status, length or MIME"));
         }
         let state = ReadState {
+            observation,
+            observer: self.download_observer.clone(),
             upstream: Box::pin(response.bytes_stream()),
             pending: Bytes::new(),
             received: 0,
@@ -290,44 +333,73 @@ impl ObjectStorage {
             deadline,
         };
         let body = stream::try_unfold(state, |mut state| async move {
-            loop {
-                if state.finished && state.pending.is_empty() {
-                    return Ok(None);
-                }
-                if tokio::time::Instant::now() >= state.deadline {
-                    return Err(Error::Unavailable);
-                }
-                if !state.pending.is_empty() {
-                    let count = state.pending.len().min(64 * 1024);
-                    return Ok(Some((state.pending.split_to(count), state)));
-                }
-                let chunk = tokio::time::timeout_at(state.deadline, state.upstream.next())
-                    .await
-                    .map_err(|_| Error::Unavailable)?
-                    .transpose()
-                    .map_err(|_| Error::Unavailable)?
-                    .ok_or(Error::Incompatible("S3 truncated object"))?;
-                state.received = state
-                    .received
-                    .checked_add(chunk.len())
-                    .ok_or(Error::Incompatible("S3 object length"))?;
-                if state.received > state.expected {
-                    return Err(Error::Incompatible("S3 object length"));
-                }
-                state.digest.update(&chunk);
-                if state.received == state.expected {
-                    let end = tokio::time::timeout_at(state.deadline, state.upstream.next())
-                        .await
-                        .map_err(|_| Error::Unavailable)?;
-                    if end.is_some()
-                        || std::mem::take(&mut state.digest).finalize().as_slice()
-                            != state.expected_digest
-                    {
-                        return Err(Error::Incompatible("S3 object digest or length"));
+            let result = async {
+                loop {
+                    if state.finished && state.pending.is_empty() {
+                        state.observation.finish(RequestOutcome::Succeeded);
+                        return Ok(None);
                     }
-                    state.finished = true;
+                    if tokio::time::Instant::now() >= state.deadline {
+                        return Err(Error::Unavailable);
+                    }
+                    if !state.pending.is_empty() {
+                        let count = state.pending.len().min(64 * 1024);
+                        return Ok(Some(state.pending.split_to(count)));
+                    }
+                    let chunk = tokio::time::timeout_at(state.deadline, state.upstream.next())
+                        .await
+                        .map_err(|_| Error::Unavailable)?
+                        .transpose()
+                        .map_err(|_| Error::Unavailable)?
+                        .ok_or(Error::Incompatible("S3 truncated object"))?;
+                    state
+                        .observation
+                        .body()
+                        .chunk(BodyDirection::DownloadConsumed, chunk.len());
+                    if let Some(observer) = &state.observer {
+                        observer(chunk.len() as u64);
+                    }
+                    state.received = state
+                        .received
+                        .checked_add(chunk.len())
+                        .ok_or(Error::Incompatible("S3 object length"))?;
+                    if state.received > state.expected {
+                        return Err(Error::Incompatible("S3 object length"));
+                    }
+                    state.digest.update(&chunk);
+                    if state.received == state.expected {
+                        let end = tokio::time::timeout_at(state.deadline, state.upstream.next())
+                            .await
+                            .map_err(|_| Error::Unavailable)?;
+                        if let Some(Ok(chunk)) = &end {
+                            state
+                                .observation
+                                .body()
+                                .chunk(BodyDirection::DownloadConsumed, chunk.len());
+                        }
+                        if let (Some(Ok(chunk)), Some(observer)) = (&end, &state.observer) {
+                            observer(chunk.len() as u64);
+                        }
+                        if end.is_some()
+                            || std::mem::take(&mut state.digest).finalize().as_slice()
+                                != state.expected_digest
+                        {
+                            return Err(Error::Incompatible("S3 object digest or length"));
+                        }
+                        state.finished = true;
+                        state.observation.finish(RequestOutcome::Succeeded);
+                    }
+                    state.pending = chunk;
                 }
-                state.pending = chunk;
+            }
+            .await;
+            match result {
+                Ok(Some(chunk)) => Ok(Some((chunk, state))),
+                Ok(None) => Ok(None),
+                Err(error) => {
+                    state.observation.finish(RequestOutcome::Failed);
+                    Err(error)
+                }
             }
         });
         Ok(ObjectRead {

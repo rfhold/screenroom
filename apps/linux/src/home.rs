@@ -10,10 +10,18 @@ use std::{
     sync::Arc,
 };
 
+fn should_resume_search(state: &State) -> bool {
+    state.screen == Screen::Search && state.detail.is_none() && !state.query.is_empty()
+}
+
+#[cfg(test)]
+#[path = "home_artwork_lifecycle_tests.rs"]
+mod artwork_lifecycle_tests;
+
 pub struct App {
     pub state: RefCell<State>,
     pub client: Result<Arc<screenroom_client_core::Client>, screenroom_client_core::ClientError>,
-    pub generation: Cell<u64>,
+    pub generation: crate::paging::Generation,
     pub loading: Cell<bool>,
     pub error: RefCell<Option<String>>,
     settings_warning: RefCell<Option<String>>,
@@ -23,13 +31,26 @@ pub struct App {
     preference_revision: Cell<u64>,
     pub search_task: RefCell<Option<tokio::task::AbortHandle>>,
     load_task: RefCell<Option<tokio::task::AbortHandle>>,
-    credits_work: CreditsWork,
     pub search_results: RefCell<gtk::glib::WeakRef<gtk::Box>>,
+    pub search_count: RefCell<gtk::glib::WeakRef<gtk::Label>>,
+    pub browse_paging: RefCell<crate::paging::Paging>,
+    pub search_paging: RefCell<crate::paging::Paging>,
+    pub browse_grid: RefCell<gtk::glib::WeakRef<gtk::FlowBox>>,
+    pub search_grid: RefCell<gtk::glib::WeakRef<gtk::FlowBox>>,
+    pub browse_controls: RefCell<gtk::glib::WeakRef<gtk::Box>>,
+    pub search_controls: RefCell<gtk::glib::WeakRef<gtk::Box>>,
+    artwork_task: RefCell<Option<tokio::task::AbortHandle>>,
+    artwork_revision: Cell<u64>,
+    pub profile: RefCell<crate::jellyfin::ProfileState>,
+    pub profile_panel: gtk::Box,
+    pub home_dirty: Cell<bool>,
+    home_retry_task: RefCell<Option<tokio::task::AbortHandle>>,
     sidebar: gtk::ScrolledWindow,
     page: gtk::ScrolledWindow,
 }
 
 pub fn view() -> gtk::Box {
+    let (preferences, settings_warning) = crate::settings::load();
     let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     root.add_css_class("screenroom");
     let sidebar = gtk::ScrolledWindow::builder()
@@ -48,18 +69,30 @@ pub fn view() -> gtk::Box {
         page,
         state: RefCell::new(State::default()),
         client: crate::backend::client(),
-        generation: Cell::new(0),
+        generation: crate::paging::Generation::default(),
         loading: Cell::new(true),
         error: RefCell::new(None),
-        settings_warning: RefCell::new(None),
+        settings_warning: RefCell::new(settings_warning),
         settings_notice: column(6),
-        preferences: RefCell::new(crate::settings::load()),
+        preferences: RefCell::new(preferences),
         capabilities: RefCell::default(),
         preference_revision: Cell::new(0),
         search_task: RefCell::default(),
         load_task: RefCell::default(),
-        credits_work: CreditsWork::default(),
         search_results: RefCell::new(gtk::glib::WeakRef::new()),
+        search_count: RefCell::default(),
+        browse_paging: RefCell::default(),
+        search_paging: RefCell::default(),
+        browse_grid: RefCell::default(),
+        search_grid: RefCell::default(),
+        browse_controls: RefCell::default(),
+        search_controls: RefCell::default(),
+        artwork_task: RefCell::default(),
+        artwork_revision: Cell::new(0),
+        profile: RefCell::default(),
+        profile_panel: column(8),
+        home_dirty: Cell::new(false),
+        home_retry_task: RefCell::default(),
     });
     {
         let pref = app.preferences.borrow();
@@ -71,11 +104,6 @@ pub fn view() -> gtk::Box {
                 .unwrap_or_default(),
         );
         state.source = pref.source.clone();
-        state.subtitle = match pref.subtitle_preference.as_str() {
-            "library_tracks" => 1,
-            "transcription" => 2,
-            _ => 0,
-        };
         if let Some(types) = &pref.types {
             state.types = [types.movie, types.series, types.episode];
         }
@@ -89,11 +117,12 @@ pub fn view() -> gtk::Box {
     root.connect_destroy(move |_| {
         app.cancel_load();
         app.cancel_search();
-        app.credits_work.cancel();
+        app.cancel_artwork();
+        app.profile.borrow_mut().cancel();
         if let Ok(client) = &app.client {
             client.cancel_all();
         }
-        app.generation.set(app.generation.get() + 1);
+        app.generation.advance();
     });
     root
 }
@@ -156,11 +185,22 @@ impl App {
         if let Some(task) = self.load_task.borrow_mut().take() {
             task.abort();
         }
+        if let Some(task) = self.home_retry_task.borrow_mut().take() {
+            task.abort();
+        }
     }
     pub fn reload(self: &Rc<Self>) {
+        self.suspend_profile();
         self.cancel_load();
         self.cancel_search();
-        self.generation.set(self.generation.get() + 1);
+        self.cancel_artwork();
+        if self.state.borrow().screen == Screen::Home && self.home_dirty.get() {
+            if let Ok(client) = &self.client {
+                client.invalidate_reads();
+            }
+        }
+        self.browse_paging.replace(crate::paging::Paging::default());
+        self.generation.advance();
         let generation = self.generation.get();
         self.loading.set(true);
         self.error.replace(None);
@@ -185,14 +225,35 @@ impl App {
             let Some(app) = weak.upgrade() else {
                 return;
             };
-            if app.generation.get() != generation {
+            if !app.generation.is_current(generation) {
                 return;
             }
             app.load_task.borrow_mut().take();
             app.loading.set(false);
             match result {
                 Ok(Ok(snapshot)) => {
+                    let state = app.state.borrow();
+                    let ids = if let Some(parent) = state.path.last() {
+                        snapshot.catalog.children.get(parent)
+                    } else {
+                        snapshot.catalog.members.get(&state.library.id())
+                    }
+                    .cloned()
+                    .unwrap_or_default();
+                    let accepted = app.browse_paging.borrow_mut().accept(ids, snapshot.next);
+                    drop(state);
+                    if accepted.is_err() {
+                        app.error.replace(Some(
+                            "Catalog exceeded the item limit. Retry to read the server state."
+                                .into(),
+                        ));
+                        app.render();
+                        return;
+                    }
                     catalog::install(snapshot.catalog);
+                    if app.state.borrow().screen == Screen::Home {
+                        app.home_dirty.set(false);
+                    }
                     crate::assets::install(snapshot.art);
                     app.capabilities.replace(snapshot.capabilities);
                     app.state
@@ -200,17 +261,190 @@ impl App {
                         .apply_capabilities(&app.capabilities.borrow());
                 }
                 Ok(Err(error)) => {
-                    app.error.replace(Some(error.to_string()));
+                    eprintln!("Catalog read failed: {error}");
+                    app.error.replace(Some(
+                        "Catalog could not be loaded. Retry to read the server state.".into(),
+                    ));
                 }
                 Err(error) => {
-                    app.error.replace(Some(error.to_string()));
+                    eprintln!("Catalog task failed: {error}");
+                    app.error.replace(Some(
+                        "Catalog could not be loaded. Retry to read the server state.".into(),
+                    ));
                 }
             }
             app.render();
-            if app.state.borrow().screen == Screen::Search && !app.state.borrow().query.is_empty() {
+            app.request_artwork();
+            if should_resume_search(&app.state.borrow()) {
                 app.request_search();
             }
         });
+    }
+    pub fn cancel_artwork(&self) {
+        self.artwork_revision.set(self.artwork_revision.get() + 1);
+        if let Some(task) = self.artwork_task.borrow_mut().take() {
+            task.abort();
+        }
+    }
+    pub fn request_artwork(self: &Rc<Self>) {
+        self.cancel_artwork();
+        let revision = self.artwork_revision.get();
+        let Ok(client) = self.client.clone() else {
+            return;
+        };
+        let data = crate::catalog::Catalog {
+            items: catalog::catalog(),
+            ..Default::default()
+        };
+        let mut seen = std::collections::HashSet::new();
+        let records = crate::backend::artwork_records(&data)
+            .into_iter()
+            .filter(|r| {
+                let url = catalog::text(r, "file");
+                poster::needs_artwork(url)
+                    && !crate::assets::contains(url)
+                    && seen.insert(url.to_owned())
+            })
+            .collect::<Vec<_>>();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let task = crate::backend::runtime().spawn(crate::backend::operation(async move {
+            for record in records {
+                let art = crate::backend::artwork(client.clone(), record).await?;
+                if sender.send(art).await.is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        }));
+        self.artwork_task.replace(Some(task.abort_handle()));
+        let weak = Rc::downgrade(self);
+        gtk::glib::MainContext::default().spawn_local(async move {
+            while let Some(art) = receiver.recv().await {
+                let Some(app) = weak.upgrade() else {
+                    break;
+                };
+                if app.artwork_revision.get() != revision {
+                    break;
+                }
+                crate::assets::merge(art);
+            }
+        });
+    }
+    pub fn page_controls(self: &Rc<Self>, search: bool) -> gtk::Box {
+        let controls = column(8);
+        controls.append(&label("", "muted"));
+        controls.append(&label("", "muted"));
+        controls.append(&self.button("Load more", move |app| {
+            if search {
+                app.request_search_more();
+            } else {
+                app.load_more();
+            }
+        }));
+        if search {
+            self.search_controls.replace(controls.downgrade());
+        } else {
+            self.browse_controls.replace(controls.downgrade());
+        }
+        self.update_page_controls(search);
+        controls
+    }
+    pub fn update_page_controls(self: &Rc<Self>, search: bool) {
+        let weak = if search {
+            &self.search_controls
+        } else {
+            &self.browse_controls
+        };
+        let Some(controls) = weak.borrow().upgrade() else {
+            return;
+        };
+        let paging = if search {
+            self.search_paging.borrow()
+        } else {
+            self.browse_paging.borrow()
+        };
+        let Some(count) = controls.first_child().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(status) = count.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(button) = status.next_sibling().and_downcast::<gtk::Button>() else {
+            return;
+        };
+        count.set_text(&format!("{} loaded", paging.ids.len()));
+        status.set_text(if paging.failed { "More items could not be loaded. Loaded items are still available." } else if paging.stopped { "Loading stopped because the server returned an invalid continuation or exceeded the page limit." } else { "" });
+        status.set_visible(paging.failed || paging.stopped);
+        button.set_label(if paging.failed {
+            "Retry loading more"
+        } else if paging.busy {
+            "Loading more…"
+        } else {
+            "Load more"
+        });
+        button.set_visible(!paging.next.is_empty());
+    }
+    fn load_more(self: &Rc<Self>) {
+        let Some(token) = self.browse_paging.borrow_mut().begin() else {
+            return;
+        };
+        let generation = self.generation.get();
+        let parent = self.state.borrow().path.last().cloned();
+        let scope = self.scope();
+        let client = self.client.clone();
+        self.update_page_controls(false);
+        let task = crate::backend::runtime()
+            .spawn(async move { crate::backend::item_page(client?, scope, parent, token).await });
+        self.load_task.replace(Some(task.abort_handle()));
+        let weak = Rc::downgrade(self);
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let result = task.await;
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            if !app.generation.is_current(generation) {
+                return;
+            }
+            match result {
+                Ok(Ok(page)) => {
+                    let accepted = app.browse_paging.borrow_mut().accept(
+                        page.items.iter().map(|i| i.id.clone()),
+                        page.next_page_token,
+                    );
+                    if let Ok(ids) = accepted {
+                        let state = app.state.borrow();
+                        catalog::append_page(
+                            &state.library.id(),
+                            state.path.last().map(String::as_str),
+                            ids.clone(),
+                            page.items,
+                        );
+                        drop(state);
+                        app.append_cards(false, &ids);
+                        app.request_artwork();
+                    }
+                }
+                _ => app.browse_paging.borrow_mut().fail(),
+            }
+            app.update_page_controls(false);
+        });
+    }
+    pub fn append_cards(self: &Rc<Self>, search: bool, ids: &[String]) {
+        let weak = if search {
+            &self.search_grid
+        } else {
+            &self.browse_grid
+        };
+        if let Some(grid) = weak.borrow().upgrade() {
+            let items = catalog::catalog();
+            for id in ids {
+                if let Some(index) = items.iter().position(|i| &i.id == id) {
+                    let card = self.card(index, None);
+                    card.set_halign(gtk::Align::Start);
+                    grid.insert(&card, -1);
+                }
+            }
+        }
     }
     pub fn scope(&self) -> screenroom_client_core::SourceLibraryScope {
         screenroom_client_core::SourceLibraryScope {
@@ -224,14 +458,46 @@ impl App {
             library_id: self.state.borrow().library.id(),
         }
     }
-    pub fn save_preferences(self: &Rc<Self>, _subtitle: bool) {
+    pub fn retry_home(self: &Rc<Self>) {
+        if self.home_retry_task.borrow().is_some() {
+            return;
+        }
+        let Ok(client) = self.client.clone() else {
+            return;
+        };
+        let generation = self.generation.get();
+        let scope = self.scope();
+        let task = crate::backend::runtime().spawn(crate::backend::operation(async move {
+            client.invalidate_reads();
+            client.get_home(scope).await
+        }));
+        self.home_retry_task.replace(Some(task.abort_handle()));
+        let weak = Rc::downgrade(self);
+        gtk::glib::MainContext::default().spawn_local(async move {
+            let result = task.await;
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            if !app.generation.is_current(generation) {
+                return;
+            }
+            app.home_retry_task.borrow_mut().take();
+            if let Ok(Ok(rows)) = result {
+                app.home_dirty.set(false);
+                catalog::replace_home(&app.state.borrow().library.id(), rows);
+                let scroll = app.page.vadjustment().value();
+                app.render_page();
+                app.page.vadjustment().set_value(scroll);
+                app.request_artwork();
+            }
+        });
+    }
+    pub fn save_preferences(self: &Rc<Self>) {
         let mut preferences = self.preferences.borrow().clone();
         self.preference_revision
             .set(self.preference_revision.get() + 1);
         {
             let state = self.state.borrow();
-            preferences.subtitle_preference =
-                ["off", "library_tracks", "transcription"][state.subtitle].into();
             preferences.types = Some(screenroom_client_core::SearchTypes {
                 movie: state.types[0],
                 series: state.types[1],
@@ -298,12 +564,15 @@ impl App {
     pub fn navigate(self: &Rc<Self>, screen: Screen, library: Library) {
         self.cancel_search();
         self.state.borrow_mut().navigate(screen, library);
-        self.save_preferences(false);
+        self.save_preferences();
         self.reload();
     }
     fn render_sidebar(self: &Rc<Self>) {
         let state = self.state.borrow();
         let expanded = state.expanded;
+        if !expanded {
+            self.suspend_profile();
+        }
         self.sidebar
             .set_width_request(if expanded { 264 } else { 64 });
         let content = column(6);
@@ -394,7 +663,7 @@ impl App {
                     app.state
                         .borrow_mut()
                         .apply_capabilities(&app.capabilities.borrow());
-                    app.render();
+                    app.reload();
                 } else {
                     app.navigate(screen, target.clone());
                 }
@@ -425,30 +694,6 @@ impl App {
         }
         if expanded {
             content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-            content.append(&label("Subtitles", "muted"));
-            let mut group: Option<gtk::CheckButton> = None;
-            for (i, title) in ["Off", "Library tracks", "Transcription"]
-                .into_iter()
-                .enumerate()
-            {
-                let choice = gtk::CheckButton::with_label(title);
-                if let Some(first) = &group {
-                    choice.set_group(Some(first));
-                } else {
-                    group = Some(choice.clone());
-                }
-                choice.set_active(state.subtitle == i);
-                let weak = Rc::downgrade(self);
-                choice.connect_toggled(move |button| {
-                    if button.is_active() {
-                        if let Some(app) = weak.upgrade() {
-                            app.state.borrow_mut().subtitle = i;
-                            app.save_preferences(true);
-                        }
-                    }
-                });
-                content.append(&choice);
-            }
             content.append(&self.button("Refresh", |app| {
                 app.cancel_load();
                 app.cancel_search();
@@ -457,11 +702,16 @@ impl App {
                 }
                 app.reload();
             }));
+            if let Some(parent) = self.profile_panel.parent().and_downcast::<gtk::Box>() {
+                parent.remove(&self.profile_panel);
+            }
+            content.append(&self.profile_panel);
+            self.render_profile();
+            self.ensure_profile();
         }
         self.sidebar.set_child(Some(&content));
     }
     pub fn render_page(self: &Rc<Self>) {
-        self.credits_work.cancel();
         let content = column(28);
         content.add_css_class("page");
         content.set_margin_top(24);
@@ -504,7 +754,6 @@ impl App {
                 Screen::Search => {
                     drop(state);
                     content.append(&self.search());
-                    content.append(&self.credits());
                     self.page.set_child(Some(&clamp));
                     self.page.vadjustment().set_value(0.0);
                     return;
@@ -521,6 +770,10 @@ impl App {
                     for (title, items) in catalog::home_rows(&state.library.id()) {
                         let section = column(16);
                         section.append(&label(&title, "row-heading"));
+                        if let Some(error) = catalog::home_error(&title) {
+                            section.append(&label(&error, "muted"));
+                            section.append(&self.button("Retry row", |app| app.retry_home()));
+                        }
                         let row = gtk::Box::new(gtk::Orientation::Horizontal, 28);
                         row.add_css_class("poster-row");
                         row.set_margin_top(8);
@@ -577,11 +830,13 @@ impl App {
                         .iter()
                         .filter_map(|id| items.iter().position(|item| &item.id == id))
                         .collect::<Vec<_>>();
-                    content.append(&self.grid(&indices));
+                    let grid = self.grid(&indices);
+                    self.browse_grid.replace(grid.downgrade());
+                    content.append(&grid);
+                    content.append(&self.page_controls(false));
                 }
             }
         }
-        content.append(&self.credits());
         self.page.set_child(Some(&clamp));
         self.page.vadjustment().set_value(0.0);
     }
@@ -628,8 +883,7 @@ impl App {
                     state.detail = None;
                     state.search_origin = false;
                 }
-                app.render();
-                app.request_search();
+                app.reload();
             }));
         }
         if let Some(id) = &state.detail {
@@ -651,6 +905,22 @@ impl App {
     pub fn card(self: &Rc<Self>, index: usize, progress: Option<u8>) -> gtk::Button {
         let items = catalog::catalog();
         let item = &items[index];
+        let state = self.state.borrow();
+        let parent = (state.screen == Screen::Browse)
+            .then(|| state.path.last())
+            .flatten();
+        let season_context = crate::presentation::season_context(
+            item.parent.as_deref(),
+            parent.map(String::as_str),
+            parent.is_some_and(|parent| {
+                items
+                    .iter()
+                    .any(|i| &i.id == parent && i.kind == Kind::Season)
+            }),
+        );
+        drop(state);
+        let episode = (item.kind == Kind::Episode)
+            .then(|| crate::presentation::episode_labels(&item.meta, season_context));
         let id = item.id.clone();
         let button = self.button(&item.title, move |app| {
             app.state.borrow_mut().open(&id, &catalog::catalog());
@@ -661,18 +931,42 @@ impl App {
         let content = column(7);
         content.set_valign(gtk::Align::Start);
         content.set_width_request(160);
-        content.append(&poster::view(item, 160, progress.or(item.progress)));
-        let title = label(&item.title, "card-title");
+        let poster = poster::view_context(
+            item,
+            160,
+            progress.or(item.progress),
+            false,
+            episode.as_ref().map(|labels| labels.heading()),
+        );
+        content.append(&poster);
+        let title = label(
+            episode
+                .as_ref()
+                .map(|l| l.primary.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(if episode.is_some() { "" } else { &item.title }),
+            "card-title",
+        );
         title.set_wrap(true);
         title.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         title.set_lines(2);
         title.set_height_request(36);
         title.set_width_chars(18);
         title.set_max_width_chars(20);
-        content.append(&title);
+        if episode
+            .as_ref()
+            .is_none_or(|labels| !labels.primary.is_empty())
+        {
+            content.append(&title);
+        }
+        if let Some(labels) = &episode {
+            if !labels.number.is_empty() {
+                content.append(&label(&labels.number, "card-meta"));
+            }
+        }
         let meta = label(
             &if item.kind == Kind::Episode {
-                item.meta.clone()
+                item.title.clone()
             } else {
                 format!("{} · {}", item.year, item.kind.label())
             },
@@ -684,8 +978,21 @@ impl App {
         meta.set_height_request(18);
         content.append(&meta);
         button.set_child(Some(&content));
-        labelled_by(&button, &title);
-        accessible_label(&button, &item.title);
+        let accessibility = if let Some(labels) = episode {
+            [
+                labels.heading(),
+                item.title.clone(),
+                item.playback_accessibility(progress.or(item.progress)),
+            ]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+        } else {
+            item.card_accessibility(progress.or(item.progress))
+        };
+        button.reset_relation(gtk::AccessibleRelation::LabelledBy);
+        accessible_label(&button, &accessibility);
         button
     }
     pub fn grid(self: &Rc<Self>, indices: &[usize]) -> gtk::FlowBox {
@@ -711,7 +1018,7 @@ impl App {
         let item = &items[index];
         let detail = column(28);
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 28);
-        let desktop_poster = poster::view(item, 200, item.progress);
+        let desktop_poster = poster::view(item, 200, item.progress, true);
         header.append(&desktop_poster);
         let text = column(16);
         text.set_hexpand(true);
@@ -797,17 +1104,9 @@ impl App {
         let overview = label(&item.overview, "overview");
         overview.set_max_width_chars(90);
         text.append(&overview);
-        for note in item.metadata["notes"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|n| n.as_str())
-        {
-            text.append(&label(note, "muted"));
-        }
         header.append(&text);
         detail.append(&header);
-        let phone_poster = poster::view(item, 160, item.progress);
+        let phone_poster = poster::view(item, 160, item.progress, true);
         let header_weak = header.downgrade();
         let desktop_weak = desktop_poster.downgrade();
         let phone_weak = phone_poster.downgrade();
@@ -906,244 +1205,6 @@ impl App {
             people.append(&line);
             detail.append(&people);
         }
-        let rights = column(12);
-        rights.append(&label("Title rights", "row-heading"));
-        rights.append(&label(catalog::text(&item.rights, "rights"), "card-title"));
-        rights.append(&label(catalog::text(&item.rights, "note"), "muted"));
-        rights.append(&label(catalog::text(&item.rights, "attribution"), "muted"));
-        let links = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        links.append(&gtk::LinkButton::with_label(
-            catalog::text(&item.rights, "source"),
-            "Rights source",
-        ));
-        if !catalog::text(&item.rights, "license").is_empty() {
-            links.append(&gtk::LinkButton::with_label(
-                catalog::text(&item.rights, "license"),
-                "Film license",
-            ));
-        }
-        rights.append(&links);
-        detail.append(&rights);
-        detail.append(&metadata_rights(&item.metadata));
         detail
     }
-    fn credits(self: &Rc<Self>) -> gtk::Expander {
-        let credits = gtk::Expander::new(Some("Data & artwork credits"));
-        let content = column(12);
-        let info = catalog::info();
-        for art in info.branding.iter().filter(|art| art.kind == "logo") {
-            content.append(&poster::fitted_picture(&art.url, &art.label, 88, 32, true));
-        }
-        content.append(&label(
-            &format!("Catalog retrieved {}", info.retrieved_at),
-            "muted",
-        ));
-        let mut section = String::new();
-        for notice in info.notices {
-            if section != notice.section {
-                section = notice.section;
-                content.append(&label(&section, "row-heading"));
-            }
-            content.append(&label(&notice.title, "card-title"));
-            content.append(&label(&notice.text, "muted"));
-            if !notice.link_url.is_empty() {
-                content.append(&gtk::LinkButton::with_label(
-                    &notice.link_url,
-                    &notice.link_label,
-                ));
-            }
-        }
-        for art in catalog::artwork() {
-            content.append(&label(
-                &format!(
-                    "{}\n{}\n{}",
-                    catalog::text(&art, "label"),
-                    catalog::text(&art, "creator"),
-                    catalog::text(&art, "license")
-                ),
-                "muted",
-            ));
-            for (key, title) in [
-                ("licenseUrl", "Artwork license"),
-                ("source", "Source & provenance"),
-            ] {
-                content.append(&gtk::LinkButton::with_label(
-                    catalog::text(&art, key),
-                    title,
-                ));
-            }
-        }
-        for item in catalog::catalog() {
-            content.append(&label(
-                &format!(
-                    "{} · {}\n{}\n{}",
-                    item.title,
-                    catalog::text(&item.rights, "rights"),
-                    catalog::text(&item.rights, "note"),
-                    catalog::text(&item.rights, "attribution")
-                ),
-                "muted",
-            ));
-            content.append(&gtk::LinkButton::with_label(
-                catalog::text(&item.rights, "source"),
-                "Rights source",
-            ));
-            if !catalog::text(&item.rights, "license").is_empty() {
-                content.append(&gtk::LinkButton::with_label(
-                    catalog::text(&item.rights, "license"),
-                    "Film license",
-                ));
-            }
-            content.append(&metadata_rights(&item.metadata));
-            for note in item.metadata["notes"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|n| n.as_str())
-            {
-                content.append(&label(note, "muted"));
-            }
-        }
-        let records = column(12);
-        content.append(&records);
-        let weak = Rc::downgrade(self);
-        let records = records.downgrade();
-        let generation = self.credits_work.generation.get();
-        let started = Rc::new(Cell::new(false));
-        credits.connect_expanded_notify(move |expander| {
-            if !expander.is_expanded() || started.replace(true) { return; }
-            let Some(app) = weak.upgrade() else { return; };
-            if !app.credits_work.current(generation) { return; }
-            let Some(records) = records.upgrade() else { return; };
-            clear(&records);
-            records.append(&label("Loading artwork credits…", "muted"));
-            let client = app.client.clone();
-            // Global attributions are deliberately independent of visited rows and filters.
-            let task = crate::backend::runtime().spawn(async move {
-                crate::backend::artwork_credits(client?, Default::default()).await
-            });
-            app.credits_work.task.replace(Some(task.abort_handle()));
-            let records = records.downgrade();
-            let weak = weak.clone();
-            let started = started.clone();
-            gtk::glib::MainContext::default().spawn_local(async move {
-                let result = task.await;
-                let Some(app) = weak.upgrade() else { return; };
-                if !app.credits_work.current(generation) { return; }
-                let Some(records) = records.upgrade() else { return; };
-                app.credits_work.task.borrow_mut().take();
-                clear(&records);
-                match result {
-                    Ok(Ok(art)) => for record in art {
-                        records.append(&label(&format!("{}\n{}\n{}", catalog::text(&record, "label"), catalog::text(&record, "creator"), catalog::text(&record, "license")), "muted"));
-                        for (key, title) in [("licenseUrl", "Artwork license"), ("source", "Source & provenance")] {
-                            records.append(&gtk::LinkButton::with_label(catalog::text(&record, key), title));
-                        }
-                    },
-                    result => {
-                        started.set(false);
-                        records.append(&label(&format!("Artwork credits unavailable: {result:?}. Close and reopen credits to retry."), "muted"));
-                    },
-                }
-            });
-        });
-        credits.set_child(Some(&content));
-        credits
-    }
-}
-#[derive(Default)]
-struct CreditsWork {
-    generation: Cell<u64>,
-    task: RefCell<Option<tokio::task::AbortHandle>>,
-}
-impl CreditsWork {
-    fn current(&self, generation: u64) -> bool {
-        self.generation.get() == generation
-    }
-    fn cancel(&self) {
-        self.generation.set(self.generation.get() + 1);
-        if let Some(task) = self.task.borrow_mut().take() {
-            task.abort();
-        }
-    }
-}
-impl Drop for CreditsWork {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn page_replacement_aborts_held_credits_continuations_and_invalidates_completion() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let work = CreditsWork::default();
-        let calls = Arc::new(AtomicUsize::new(0));
-        for visit in 0..10 {
-            let generation = work.generation.get();
-            let (entered, held) = tokio::sync::oneshot::channel();
-            let (release, blocked) = tokio::sync::oneshot::channel::<()>();
-            let observed = calls.clone();
-            let task = tokio::spawn(async move {
-                let mut entered = Some(entered);
-                let mut blocked = Some(blocked);
-                crate::backend::paginate(|page| {
-                    observed.fetch_add(1, Ordering::SeqCst);
-                    let held = if page.token.is_empty() {
-                        None
-                    } else {
-                        entered.take().unwrap().send(()).unwrap();
-                        blocked.take()
-                    };
-                    async move {
-                        if let Some(held) = held {
-                            let _ = held.await;
-                        }
-                        Ok((vec![1], "continue".into()))
-                    }
-                })
-                .await
-            });
-            work.task.replace(Some(task.abort_handle()));
-            held.await.unwrap();
-            work.cancel();
-            assert!(
-                !work.current(generation),
-                "detached page must reject completion"
-            );
-            assert!(task.await.unwrap_err().is_cancelled());
-            assert!(
-                release.send(()).is_err(),
-                "held continuation must be dropped"
-            );
-            assert!(work.task.borrow().is_none());
-            assert_eq!(calls.load(Ordering::SeqCst), (visit + 1) * 2);
-        }
-    }
-}
-fn metadata_rights(metadata: &serde_json::Value) -> gtk::Box {
-    let rights = &metadata["rights"];
-    let content = column(6);
-    content.append(&label("Metadata rights", "card-title"));
-    for key in ["label", "note", "attribution"] {
-        let value = catalog::text(rights, key);
-        if !value.is_empty() {
-            content.append(&label(value, "muted"));
-        }
-    }
-    let retrieved = catalog::text(metadata, "metadataRetrievedAt");
-    if !retrieved.is_empty() {
-        content.append(&label(&format!("Metadata retrieved {retrieved}"), "muted"));
-    }
-    for (key, title) in [
-        ("source", "Metadata source"),
-        ("license_url", "Metadata license"),
-    ] {
-        let url = catalog::text(rights, key);
-        if !url.is_empty() {
-            content.append(&gtk::LinkButton::with_label(url, title));
-        }
-    }
-    content
 }

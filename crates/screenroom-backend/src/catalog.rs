@@ -2,6 +2,7 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -59,6 +60,27 @@ pub struct CatalogItem {
     pub metadata: Value,
     pub provenance: Value,
 }
+#[derive(Debug, Clone, FromRow)]
+pub struct ItemContext {
+    pub source_item_id: Uuid,
+    pub parent_kind: Option<String>,
+    pub parent_metadata: Option<Value>,
+    pub grandparent_kind: Option<String>,
+    pub grandparent_metadata: Option<Value>,
+}
+#[derive(Debug, Clone)]
+pub struct CollectionMembershipWrite {
+    pub container_external_id: String,
+    pub member_external_id: String,
+    pub ordinal: Option<i32>,
+    pub observation_receipt_id: Uuid,
+}
+#[derive(Debug, Clone, FromRow)]
+pub struct CollectionMember {
+    #[sqlx(flatten)]
+    pub item: CatalogItem,
+    pub ordinal: Option<i32>,
+}
 const ITEM_COLUMNS: &str = "id AS source_item_id,item_id,public_id,parent_public_id,kind,source_id,source_key,provider,external_id,metadata,provenance";
 
 #[derive(Debug, Clone, FromRow)]
@@ -78,23 +100,6 @@ pub struct Library {
     pub external_id: String,
     pub title: String,
     pub state: String,
-}
-#[derive(Debug, Clone)]
-pub struct SourceInitialization {
-    pub source_key: String,
-    pub provider: String,
-    pub configuration: Value,
-    pub capabilities: Value,
-    pub libraries: Vec<crate::ingest::LibraryWrite>,
-    pub initial_policy: Option<crate::ingest::PolicyWrite>,
-}
-#[derive(Debug, Clone)]
-pub struct InitializedSource {
-    pub source: Source,
-    /// Requested libraries, including their existing operator-controlled state.
-    pub libraries: Vec<Library>,
-    /// Existing policies (at most 1000), or the newly installed initial policy.
-    pub policies: Vec<crate::ingest::Policy>,
 }
 #[derive(Debug, Clone, FromRow)]
 pub struct Credit {
@@ -130,6 +135,95 @@ pub struct CatalogRepository {
     pool: PgPool,
 }
 impl CatalogRepository {
+    /// Same-source, scope-visible canonical ancestors; kind filters apply only to targets.
+    pub async fn item_contexts(
+        &self,
+        scope: &Scope,
+        source_item_ids: &[Uuid],
+    ) -> Result<BTreeMap<Uuid, ItemContext>> {
+        scope.validate()?;
+        if source_item_ids.len() > 200 {
+            return Err(Error::Invalid("item context target batch"));
+        }
+        if source_item_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let sql = format!(
+            r#"{ELIGIBLE}
+            SELECT target.id AS source_item_id, parent.kind AS parent_kind,
+                parent.metadata AS parent_metadata, grandparent.kind AS grandparent_kind,
+                grandparent.metadata AS grandparent_metadata
+            FROM eligible target JOIN catalog.items i ON i.id=target.item_id
+            LEFT JOIN catalog.items p ON p.id=i.parent_id
+            LEFT JOIN LATERAL (SELECT e.* FROM eligible e WHERE e.item_id=p.id AND e.source_id=target.source_id ORDER BY e.id LIMIT 1) parent ON true
+            LEFT JOIN LATERAL (SELECT e.* FROM eligible e WHERE e.item_id=p.parent_id AND e.source_id=target.source_id ORDER BY e.id LIMIT 1) grandparent ON true
+            WHERE target.id=ANY($5) AND (cardinality($6::text[])=0 OR target.kind=ANY($6))"#
+        );
+        let rows: Vec<ItemContext> = sqlx::query_as(&sql)
+            .bind(&scope.source_keys)
+            .bind(&scope.library_ids)
+            .bind(&scope.providers)
+            .bind(Vec::<String>::new())
+            .bind(source_item_ids)
+            .bind(&scope.kinds)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.source_item_id, row))
+            .collect())
+    }
+    /// Worker-only source-qualified membership upserts; parent edges remain unchanged.
+    pub async fn upsert_collection_members(
+        &self,
+        claim: &crate::ingest::Claim,
+        members: &[CollectionMembershipWrite],
+    ) -> Result<()> {
+        if members.len() > 2000 {
+            return Err(Error::Invalid("collection membership bounds"));
+        }
+        let mut tx = self.pool.begin().await?;
+        let (run, _) = crate::ingest::guard(&mut tx, claim).await?;
+        if claim.kind != "ingest" || run.state != "running" {
+            return Err(Error::Stale);
+        }
+        for member in members {
+            write_collection_member(&mut tx, &run, member).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    /// Public-ID keyset order; membership eligibility precedes source precedence.
+    pub async fn collection_members(
+        &self,
+        scope: &Scope,
+        container: &str,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<CollectionMember>> {
+        scope.validate()?;
+        if !(1..=200).contains(&limit)
+            || container.is_empty()
+            || container.len() > 200
+            || after.is_some_and(|id| id.len() > 200)
+        {
+            return Err(Error::Invalid("collection member page"));
+        }
+        let query = format!(
+            "{ELIGIBLE} , members AS (SELECT e.*, cm.ordinal, row_number() OVER(PARTITION BY e.item_id ORDER BY e.source_key,e.source_id,e.id) AS member_precedence FROM eligible e JOIN catalog.collection_members cm ON cm.member_id=e.id AND cm.source_id=e.source_id JOIN eligible c ON c.id=cm.container_id AND c.source_id=cm.source_id WHERE c.public_id=$5 AND c.kind='collection' AND (cardinality($8::text[])=0 OR e.kind=ANY($8))) SELECT {ITEM_COLUMNS},ordinal FROM members WHERE member_precedence=1 AND ($6::text IS NULL OR public_id>$6) ORDER BY public_id LIMIT $7"
+        );
+        Ok(sqlx::query_as(&query)
+            .bind(&scope.source_keys)
+            .bind(&scope.library_ids)
+            .bind(&scope.providers)
+            .bind(Vec::<String>::new())
+            .bind(container)
+            .bind(after)
+            .bind(i64::from(limit))
+            .bind(&scope.kinds)
+            .fetch_all(&self.pool)
+            .await?)
+    }
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -157,113 +251,6 @@ impl CatalogRepository {
             .fetch_one(&self.pool)
             .await?)
     }
-    /// Explicit initialization only: existing source/library configuration and policies are preserved.
-    /// Missing entries are installed atomically; output is ordered by source key and library ID.
-    pub async fn initialize(
-        &self,
-        inputs: &[SourceInitialization],
-    ) -> Result<Vec<InitializedSource>> {
-        if inputs.len() > 32 {
-            return Err(Error::Invalid("initialization source count"));
-        }
-        let mut ordered: Vec<_> = inputs.iter().collect();
-        ordered.sort_by(|a, b| a.source_key.cmp(&b.source_key));
-        let mut seen = std::collections::BTreeSet::new();
-        for input in &ordered {
-            if input.source_key.is_empty()
-                || input.source_key.len() > 200
-                || !seen.insert(&input.source_key)
-                || !matches!(input.provider.as_str(), "jellyfin" | "tmdb")
-                || !input.configuration.is_object()
-                || input.configuration.to_string().len() > 65536
-                || !input.capabilities.is_object()
-                || input.capabilities.to_string().len() > 32768
-                || input.libraries.len() > 100
-            {
-                return Err(Error::Invalid("source initialization"));
-            }
-            let mut public = std::collections::BTreeSet::new();
-            let mut external = std::collections::BTreeSet::new();
-            for library in &input.libraries {
-                if library.public_id.is_empty()
-                    || library.public_id == "all"
-                    || library.public_id.len() > 200
-                    || library.external_id.is_empty()
-                    || library.external_id.len() > 200
-                    || library.title.len() > 1000
-                    || !public.insert(&library.public_id)
-                    || !external.insert(&library.external_id)
-                {
-                    return Err(Error::Invalid("initialization library"));
-                }
-            }
-            if let Some(policy) = &input.initial_policy {
-                policy.validate()?;
-            }
-        }
-        let mut tx = self.pool.begin().await?;
-        let mut output = Vec::with_capacity(inputs.len());
-        for input in ordered {
-            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,78590213))")
-                .bind(&input.source_key)
-                .execute(&mut *tx)
-                .await?;
-            sqlx::query("INSERT INTO catalog.sources(source_key,provider,configuration,capabilities) VALUES($1,$2,$3,$4) ON CONFLICT(source_key) DO NOTHING")
-                .bind(&input.source_key).bind(&input.provider).bind(&input.configuration).bind(&input.capabilities).execute(&mut *tx).await?;
-            let source: Source = sqlx::query_as(
-                "SELECT * FROM catalog.sources WHERE source_key=$1 FOR NO KEY UPDATE",
-            )
-            .bind(&input.source_key)
-            .fetch_one(&mut *tx)
-            .await?;
-            if source.provider != input.provider {
-                return Err(Error::Invalid("initialization provider mismatch"));
-            }
-            for library in &input.libraries {
-                sqlx::query("INSERT INTO catalog.libraries(source_id,public_id,external_id,title) VALUES($1,$2,$3,$4) ON CONFLICT(source_id,external_id) DO NOTHING")
-                    .bind(source.id).bind(&library.public_id).bind(&library.external_id).bind(&library.title).execute(&mut *tx).await?;
-            }
-            let mut policies: Vec<crate::ingest::Policy> = sqlx::query_as(
-                "SELECT * FROM ingest.policies WHERE source_id=$1 ORDER BY id LIMIT 1000",
-            )
-            .bind(source.id)
-            .fetch_all(&mut *tx)
-            .await?;
-            if policies.is_empty()
-                && let Some(policy) = &input.initial_policy
-            {
-                policies.push(crate::ingest::insert_policy(&mut tx, source.id, policy).await?);
-            }
-            let libraries = sqlx::query_as(
-                "SELECT * FROM catalog.libraries WHERE source_id=$1 AND external_id=ANY($2) ORDER BY public_id,external_id",
-            )
-            .bind(source.id)
-            .bind(input.libraries.iter().map(|l| &l.external_id).collect::<Vec<_>>())
-            .fetch_all(&mut *tx)
-            .await?;
-            output.push(InitializedSource {
-                source,
-                libraries,
-                policies,
-            });
-        }
-        tx.commit().await?;
-        Ok(output)
-    }
-
-    pub async fn configure_source(
-        &self,
-        key: &str,
-        provider: &str,
-        configuration: &Value,
-        capabilities: &Value,
-    ) -> Result<Source> {
-        if key.is_empty() || key.len() > 200 || !matches!(provider, "jellyfin" | "tmdb") {
-            return Err(Error::Invalid("source"));
-        }
-        Ok(sqlx::query_as("INSERT INTO catalog.sources(source_key,provider,configuration,capabilities) VALUES($1,$2,$3,$4) ON CONFLICT(source_key) DO UPDATE SET configuration=EXCLUDED.configuration,capabilities=EXCLUDED.capabilities RETURNING *")
-            .bind(key).bind(provider).bind(configuration).bind(capabilities).fetch_one(&self.pool).await?)
-    }
     pub async fn set_source_state(&self, source: Uuid, enabled: bool) -> Result<()> {
         sqlx::query("UPDATE catalog.sources SET state=$2 WHERE id=$1")
             .bind(source)
@@ -278,23 +265,6 @@ impl CatalogRepository {
                 .fetch_all(&self.pool)
                 .await?,
         )
-    }
-    pub async fn configure_library(
-        &self,
-        source: Uuid,
-        public_id: &str,
-        external_id: &str,
-        title: &str,
-    ) -> Result<Library> {
-        if public_id.is_empty()
-            || public_id == "all"
-            || public_id.len() > 200
-            || external_id.is_empty()
-        {
-            return Err(Error::Invalid("library"));
-        }
-        Ok(sqlx::query_as("INSERT INTO catalog.libraries(source_id,public_id,external_id,title) VALUES($1,$2,$3,$4) ON CONFLICT(source_id,external_id) DO UPDATE SET title=EXCLUDED.title,public_id=EXCLUDED.public_id RETURNING *")
-            .bind(source).bind(public_id).bind(external_id).bind(title).fetch_one(&self.pool).await?)
     }
     pub async fn libraries(&self, scope: &Scope) -> Result<Vec<Library>> {
         scope.validate()?;
@@ -465,6 +435,38 @@ pub struct ItemWrite {
     pub document_version: i32,
 }
 
+pub(crate) async fn write_collection_member(
+    tx: &mut Transaction<'_, Postgres>,
+    run: &crate::ingest::Run,
+    member: &CollectionMembershipWrite,
+) -> Result<()> {
+    if [&member.container_external_id, &member.member_external_id]
+        .iter()
+        .any(|id| id.is_empty() || id.len() > 200)
+        || member.ordinal.is_some_and(|ordinal| ordinal < 0)
+    {
+        return Err(Error::Invalid("collection membership"));
+    }
+    let selected = crate::ingest::selected_library_ids(&run.selection_snapshot)?;
+    let n = sqlx::query("INSERT INTO catalog.collection_members(source_id,container_id,member_id,ordinal,observed_run_id,observation_receipt_id) SELECT c.source_id,c.id,m.id,$4,$5,$7 FROM catalog.source_items c JOIN catalog.items ci ON ci.id=c.item_id JOIN catalog.source_items m ON m.source_id=c.source_id WHERE c.source_id=$1 AND c.external_id=$2 AND m.external_id=$3 AND c.state='enabled' AND m.state='enabled' AND ci.kind='collection' AND ci.parent_id IS NULL AND c.id<>m.id AND EXISTS(SELECT FROM catalog.library_items li JOIN catalog.libraries l ON l.id=li.library_id WHERE li.source_item_id=c.id AND li.state='enabled' AND l.state='enabled' AND l.public_id=ANY($6)) AND EXISTS(SELECT FROM catalog.library_items li JOIN catalog.libraries l ON l.id=li.library_id WHERE li.source_item_id=m.id AND li.state='enabled' AND l.state='enabled' AND l.public_id=ANY($6)) AND EXISTS(SELECT FROM ingest.request_receipts r WHERE r.id=$7 AND r.run_id=$5 AND r.operation='collection' AND r.outcome='success' AND r.is_request) AND NOT EXISTS(SELECT FROM ingest.request_receipts prior WHERE prior.run_id=$5 AND prior.operation='collection' AND NOT prior.is_request AND prior.operation_key='membership:'||c.id::text||':'||m.id::text) ON CONFLICT(container_id,member_id) DO UPDATE SET ordinal=EXCLUDED.ordinal,observed_run_id=EXCLUDED.observed_run_id,observation_receipt_id=EXCLUDED.observation_receipt_id")
+        .bind(run.source_id).bind(&member.container_external_id).bind(&member.member_external_id)
+        .bind(member.ordinal).bind(run.id).bind(selected).bind(member.observation_receipt_id).execute(&mut **tx).await?.rows_affected();
+    if n != 1 {
+        let repeated:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM ingest.request_receipts r JOIN catalog.source_items c ON c.source_id=$2 AND c.external_id=$3 JOIN catalog.source_items m ON m.source_id=c.source_id AND m.external_id=$4 WHERE r.run_id=$1 AND r.operation='collection' AND NOT r.is_request AND r.operation_key='membership:'||c.id::text||':'||m.id::text)")
+            .bind(run.id).bind(run.source_id).bind(&member.container_external_id).bind(&member.member_external_id).fetch_one(&mut **tx).await?;
+        if repeated {
+            return Err(Error::Invalid("repeated collection member"));
+        }
+        return Err(Error::Invalid("collection endpoints outside run scope"));
+    }
+    let observed = sqlx::query("INSERT INTO ingest.request_receipts(run_id,job_id,fence,operation,outcome,is_request,operation_key) SELECT j.scope_id,j.id,j.fence,'collection','success',false,'membership:'||c.id::text||':'||m.id::text FROM queue.jobs j JOIN catalog.source_items c ON c.source_id=$2 AND c.external_id=$3 JOIN catalog.source_items m ON m.source_id=c.source_id AND m.external_id=$4 WHERE j.scope_id=$1 AND j.kind='ingest' AND j.state='leased' ON CONFLICT(run_id,operation,operation_key) WHERE operation_key IS NOT NULL DO NOTHING")
+        .bind(run.id).bind(run.source_id).bind(&member.container_external_id).bind(&member.member_external_id).execute(&mut **tx).await?.rows_affected();
+    if observed != 1 {
+        return Err(Error::Invalid("repeated collection member"));
+    }
+    Ok(())
+}
+
 pub(crate) async fn write_item(
     tx: &mut Transaction<'_, Postgres>,
     source: Uuid,
@@ -538,8 +540,10 @@ pub(crate) async fn write_item(
             .execute(&mut **tx)
             .await?;
     }
-    let hash = crate::embedding::input_hash(&item.document);
-    sqlx::query("INSERT INTO search.documents(source_item_id,document_version,content_hash,text,title) VALUES($1,$2,$3,$4,$5) ON CONFLICT(source_item_id) DO UPDATE SET document_version=EXCLUDED.document_version,content_hash=EXCLUDED.content_hash,text=EXCLUDED.text,title=EXCLUDED.title,updated_at=now()")
-        .bind(id).bind(item.document_version).bind(hash.as_slice()).bind(&item.document).bind(&item.document_title).execute(&mut **tx).await?;
+    if item.kind != "collection" {
+        let hash = crate::embedding::input_hash(&item.document);
+        sqlx::query("INSERT INTO search.documents(source_item_id,document_version,content_hash,text,title) VALUES($1,$2,$3,$4,$5) ON CONFLICT(source_item_id) DO UPDATE SET document_version=EXCLUDED.document_version,content_hash=EXCLUDED.content_hash,text=EXCLUDED.text,title=EXCLUDED.title,updated_at=now()")
+            .bind(id).bind(item.document_version).bind(hash.as_slice()).bind(&item.document).bind(&item.document_title).execute(&mut **tx).await?;
+    }
     Ok(id)
 }

@@ -1,8 +1,9 @@
 <script lang="ts">
   import type { Library } from '../core/models';
-  import { defaultMethods } from '../core/search';
+  import JellyfinProfile from './JellyfinProfile.svelte';
+  import { operatorConfig } from '../core/operator-config';
   import { href, libraryHref, type Location } from '../core/navigation';
-  let { location, libraries, expanded = $bindable(false), subtitle = 'Off', setSubtitle, refresh }: { location: Location; libraries: Library[]; expanded: boolean; subtitle: string; setSubtitle: (value: string) => void; refresh: () => void } = $props();
+   let { location, libraries, expanded = $bindable(false), refresh }: { location: Location; libraries: Library[]; expanded: boolean; refresh: () => void } = $props();
   const searchHref = $derived(href(location, { screen: 'search', query: '', types: undefined, title: undefined }));
 </script>
 
@@ -14,16 +15,14 @@
     <nav aria-label="Main menu">
       <a href="/" aria-label="Home" aria-current={location.screen === 'home' ? 'page' : undefined}><span class="icon" aria-hidden="true">⌂</span><span class="label">Home</span></a>
       <a href={searchHref} aria-label="Search titles" aria-current={location.screen === 'search' ? 'page' : undefined}><span class="icon" aria-hidden="true">⌕</span><span class="label">Search titles</span></a>
+      {#if operatorConfig.enabled}<a href="/?screen=maintenance" aria-label="Maintenance" aria-current={location.screen === 'maintenance' ? 'page' : undefined}><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m4 20 8-8m-5-8 3 3-3 3-3-3a6 6 0 0 0 8 7l6 6a2 2 0 0 0 3-3l-6-6a6 6 0 0 0-8-7Z" /></svg></span><span class="label">Maintenance</span></a>{/if}
       {#if expanded}<h2>Libraries</h2>{/if}
       {#each libraries as library}
         <a href={libraryHref(library, location.sourceId)} aria-label={library.title} aria-current={location.screen === 'browse' && location.library.id === library.id ? 'page' : undefined}><span class="icon" aria-hidden="true">▤</span><span class="label">{library.title}</span></a>
       {/each}
     </nav>
     {#if expanded}
-      <fieldset><legend>Subtitles</legend>
-        {#each ['Off', 'Library tracks', 'Transcription'] as choice}<label><input type="radio" name="subtitles" value={choice} checked={subtitle === choice} onchange={() => setSubtitle(choice)} />{choice}</label>{/each}
-      </fieldset>
-      <p class="help">Playback unavailable.</p>
+      <JellyfinProfile onChanged={refresh} />
       <div class="actions"><button onclick={refresh}>Refresh</button></div>
     {/if}
   </div>
@@ -41,12 +40,8 @@
   .icon { width: 20px; flex: 0 0 20px; text-align: center; font-size: 18px; }
   .label { display: none; }
   .expanded .label { display: inline; }
-  h2, legend { color: var(--muted); font-size: 12px; font-weight: 500; }
+   h2 { color: var(--muted); font-size: 12px; font-weight: 500; }
   h2 { margin: 20px 10px 6px; }
-  fieldset { border: 0; border-top: 1px solid var(--border); padding: 16px 0 0; margin: 24px 0 0; }
-  legend { padding: 0 8px 0 0; }
-  label { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 8px 0; }
-  .help { font-size: 11px; color: var(--muted); }
   .actions { display: grid; gap: 8px; margin-top: 20px; }
   @media (max-width: 600px) {
     aside, aside.expanded { position: static; align-self: stretch; height: auto; overflow: visible; width: 100%; min-width: 0; border-right: 0; border-bottom: 1px solid var(--border); padding: 12px 16px; }

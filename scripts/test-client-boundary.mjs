@@ -49,6 +49,13 @@ const platforms = {
   linux: ['apps/linux/src/view.rs', 'apps/linux/data/brand/logo.svg', 'include_bytes!("../data/artwork/tmdb.svg")'],
   web: ['apps/web/src/View.svelte', 'apps/web/static/brand/logo.svg', '<img src="/artwork/tmdb.svg" />'],
 };
+for (const [platform, [code]] of Object.entries(platforms)) {
+  test(`${platform}: global footers are rejected without banning per-item metadata`, async t => {
+    const result = await fixture(t, { [code]: 'ProviderAttribution(); provider_attribution(); "provider.attribution"' });
+    assert.ok(result.violations.some(v => v.rule === 'client-footer'));
+    assert.deepEqual(inspectSource(code, 'record.providers; "Imdb"; "Tmdb"; "source_supplied"; record.titleRights; getCatalogInfo()'), []);
+  });
+}
 for (const [platform, [code, image, loader]] of Object.entries(platforms)) {
   test(`${platform}: bundled logos and direct image paths fail`, async t => {
     const result = await fixture(t, { [code]: loader, [image]: 'image' });
@@ -116,6 +123,31 @@ test('retired remote preferences, mock profiles and private APIs fail public cli
     assert.ok(inspectSource('apps/web/src/client.ts', text).length > 0, text);
   }
   assert.deepEqual(inspectSource('apps/web/src/client.ts', 'const user_id = settings.user_id; const scope = { source_id: "mock-jellyfin", library_id: "movies" }; default_settings(); validate_settings(value);'), []);
+});
+
+test('separate operator capability has typed native/WASM parity without private RPC or backend imports', async () => {
+  const root = fileURLToPath(new URL('../', import.meta.url));
+  const [native, wasm, models, ts, publicModels] = await Promise.all(['operator.rs', 'operator_wasm.rs', 'operator_models.rs', 'operator-models.ts', 'models.rs'].map(name => readFile(path.join(root, 'crates/screenroom-client-core/src', name), 'utf8')));
+  for (const source of [native, wasm, models, ts]) assert.doesNotMatch(source, /screenroom_backend|sqlx|screenroom_proto|ingestion_service_client|playback_state_service_client/);
+  for (const source of [native, wasm]) {
+    for (const method of ['health', 'sources', 'libraries', 'discover_connection', 'save_connection', 'connections', 'indexing_runs', 'indexing_candidates', 'indexing_policies', 'indexing_configure', 'indexing_progress', 'indexing_start', 'indexing_run_status', 'indexing_execution', 'indexing_pause', 'indexing_resume', 'indexing_cancel', 'indexing_jobs', 'indexing_attempts', 'indexing_redrives', 'indexing_redrive', 'indexing_queue']) assert.match(source, new RegExp(`pub async fn ${method}\\b`));
+    assert.doesNotMatch(source, /pub async fn (policies|runs|run_status|candidates|status|configure|preview|start|pause|resume|cancel)\b/);
+    for (const method of ['new', 'configuration', 'configuration_namespace', 'cancel_all']) assert.match(source, new RegExp(`pub fn ${method}\\b`));
+  }
+  for (const name of [...models.matchAll(/pub (?:struct|enum) (Operator\w+)/g)].map(match => match[1])) {
+    assert.match(ts, new RegExp(`(?:interface|type) ${name}\\b`));
+    assert.doesNotMatch(publicModels, new RegExp(`\\b${name}\\b`));
+  }
+  assert.match(ts, /policy_version: bigint/);
+  assert.match(wasm, /serialize_large_number_types_as_bigints\(true\)/);
+  assert.match(native, /retry\(reqwest::retry::never\(\)\)/);
+  assert.match(wasm, /\("redirect", "error"\.into\(\)\)/);
+  for (const source of [models, ts]) assert.doesNotMatch(source, /\bOperator(?:Selection|WorkBudget|Configuration|ConfigureRequest|PreviewRequest|Preview|Status|Policy|PolicyPage)\b|\btrigger\s*:/);
+  for (const name of ['OperatorDiscoverConnectionRequest', 'OperatorSaveConnectionRequest']) {
+    const prefix = models.slice(0, models.indexOf(`pub struct ${name} `));
+    assert.equal([...prefix.matchAll(/#\[derive\(([^)]*)\)\]/g)].at(-1)?.[1], 'Clone, Deserialize');
+    assert.match(models, new RegExp(`impl std::fmt::Debug for ${name}\\b[\\s\\S]*?REDACTED`));
+  }
 });
 
 test('canonical generated DTOs and native/WASM RPC surfaces stay public-only and in parity', async () => {

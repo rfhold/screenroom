@@ -37,15 +37,14 @@ fn read_config(reader: impl Read) -> Result<Vec<u8>, Box<dyn std::error::Error>>
 struct User {
     id: Uuid,
     display_name: String,
-    #[serde(default)]
-    links: Vec<Link>,
+    #[serde(default, rename = "links", deserialize_with = "unsupported_links")]
+    _links: (),
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Link {
-    source_id: String,
-    jellyfin_user_id: String,
+fn unsupported_links<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Error> {
+    Err(serde::de::Error::custom(
+        "user configuration links are unsupported; select a validated Jellyfin profile through the public user service",
+    ))
 }
 
 #[tokio::main]
@@ -62,36 +61,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("duplicate bootstrap user".into());
         }
         bounded(&user.display_name)?;
-        let mut sources = std::collections::BTreeSet::new();
-        for link in &user.links {
-            bounded(&link.source_id)?;
-            bounded(&link.jellyfin_user_id)?;
-            if !sources.insert(&link.source_id) {
-                return Err("duplicate bootstrap source".into());
-            }
-        }
     }
     let repository =
         Repository::new(db::connect_service(&ServiceDatabaseConfig::from_env()?).await?);
     repository.ready().await?;
     for user in users {
         if create_missing {
-            let links: Vec<_> = user
-                .links
-                .into_iter()
-                .map(|link| (link.source_id, link.jellyfin_user_id))
-                .collect();
             repository
-                .create_missing_user(user.id, &user.display_name, &links)
+                .create_missing_user(user.id, &user.display_name)
                 .await?;
             continue;
         }
         repository.init_user(user.id, &user.display_name).await?;
-        for link in user.links {
-            repository
-                .set_link(user.id, &link.source_id, &link.jellyfin_user_id)
-                .await?;
-        }
     }
     Ok(())
 }

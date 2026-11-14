@@ -2,7 +2,6 @@ use crate::{
     UserService,
     repository::{bounded, uuid},
 };
-use screenroom_catalog_adapter::{Coverage, JELLYFIN_SOURCE, MOVIES_LIBRARY, TV_LIBRARY};
 use screenroom_proto::{common::v1::SourceLibraryScope, user::internal::v1::*};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,8 +52,38 @@ fn offset(cursor: &str, binding: &[u8], size: usize, total: usize) -> Result<usi
     Ok(offset)
 }
 
+fn live_snapshot(
+    page: &screenroom_catalog_adapter::jellyfin::Page<
+        screenroom_catalog_adapter::jellyfin::Progress,
+    >,
+) -> Result<String, Status> {
+    let items: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| {
+            (
+                &item.external_item_id,
+                item.position_seconds,
+                item.runtime_seconds,
+                item.played,
+                &item.updated_at,
+            )
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&(page.offset, page.next_offset, page.reported_total, items))
+        .map_err(|_| Status::internal("progress snapshot encoding failed"))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 impl UserService {
     pub async fn progress(
+        &self,
+        request: GetContinueWatchingRequest,
+    ) -> Result<GetContinueWatchingResponse, Status> {
+        crate::profiles::deadline(self.progress_inner(request)).await
+    }
+
+    async fn progress_inner(
         &self,
         request: GetContinueWatchingRequest,
     ) -> Result<GetContinueWatchingResponse, Status> {
@@ -66,89 +95,138 @@ impl UserService {
             _ => return Err(Status::invalid_argument("page size exceeds 200")),
         };
         self.repository.user(id).await?;
+        let revision = self.repository.revision(id).await?;
         let mut entries = BTreeMap::new();
         let mut snapshots = Vec::new();
+        let mut links = BTreeMap::new();
+        let mut pages = 0usize;
+        let mut count = 0usize;
         for (source, libraries) in &scopes {
             let Some(external) = self.repository.link(id, source).await? else {
                 continue;
             };
-            if source != JELLYFIN_SOURCE {
-                return Err(Status::failed_precondition(
-                    "linked source has no progress adapter",
-                ));
-            }
-            let libraries: Vec<_> = if libraries.is_empty() {
-                vec![MOVIES_LIBRARY.into(), TV_LIBRARY.into()]
-            } else {
-                libraries.iter().cloned().collect()
-            };
-            let mut cursor = None;
-            let mut seen = BTreeSet::new();
-            let mut complete = false;
-            for _ in 0..16 {
-                let page = self
-                    .adapters
-                    .continue_watching(&external, &libraries, 100, cursor.as_deref())
-                    .map_err(|error| match error {
-                        screenroom_catalog_adapter::Error::InvalidScope => {
-                            Status::invalid_argument("unsupported progress library")
-                        }
-                        _ => Status::unavailable("progress provider unavailable"),
-                    })?;
-                if page.coverage == Coverage::Partial {
-                    return Err(Status::unavailable("incomplete progress provider response"));
-                }
-                snapshots.push((source.clone(), external.clone(), page.evidence.snapshot));
-                for item in page.items {
-                    if item.reference.source != *source || item.reference.external_id.is_empty() {
-                        return Err(Status::unavailable(
-                            "incompatible progress provider reference",
-                        ));
-                    }
-                    let timestamp =
-                        screenroom_backend::chrono::DateTime::parse_from_rfc3339(&item.updated_at)
-                            .map_err(|_| {
-                                Status::unavailable("invalid progress provider timestamp")
-                            })?;
-                    let entry = ContinueWatchingEntry {
-                        source_id: source.clone(),
-                        external_item_id: item.reference.external_id,
-                        position_seconds: item.position_seconds,
-                        duration_seconds: item.runtime_seconds,
-                        progress_percent: if item.runtime_seconds == 0 {
-                            0
-                        } else {
-                            ((u128::from(item.position_seconds) * 100
-                                / u128::from(item.runtime_seconds))
-                            .min(100)) as u32
-                        },
-                        updated_at: timestamp.to_utc().to_rfc3339(),
-                    };
-                    let key = (entry.source_id.clone(), entry.external_item_id.clone());
-                    if let Some((previous, _)) = entries.get(&key) {
-                        if previous != &entry {
-                            return Err(Status::unavailable(
-                                "conflicting progress provider duplicate",
+            links.insert(source.clone(), external.clone());
+            {
+                let provider = self
+                    .connections
+                    .connect(source)
+                    .await
+                    .map_err(|_| Status::unavailable("progress provider unavailable"))?;
+                provider
+                    .validate_profile(&external)
+                    .await
+                    .map_err(|_| Status::unavailable("progress profile unavailable"))?;
+                let discovered = provider
+                    .libraries()
+                    .await
+                    .map_err(|_| Status::unavailable("progress libraries unavailable"))?;
+                let libraries: Vec<_> = discovered
+                    .into_iter()
+                    .filter(|library| libraries.is_empty() || libraries.contains(&library.id))
+                    .map(|library| library.external_id)
+                    .collect();
+                let mut verification = Vec::new();
+                for library in libraries {
+                    let mut cursor = 0;
+                    let mut total = None;
+                    loop {
+                        pages += 1;
+                        if pages > 512 {
+                            return Err(Status::resource_exhausted(
+                                "progress page budget exceeded",
                             ));
                         }
-                    } else {
-                        entries.insert(key, (entry, timestamp));
+                        let page = provider
+                            .resume_page(&external, &library, cursor, 100)
+                            .await
+                            .map_err(|_| Status::unavailable("progress provider unavailable"))?;
+                        if total.is_some_and(|total| total != page.reported_total) {
+                            return Err(Status::unavailable("progress snapshot changed"));
+                        }
+                        total = Some(page.reported_total);
+                        let snapshot = live_snapshot(&page)?;
+                        snapshots.push((source.clone(), external.clone(), snapshot.clone()));
+                        verification.push((library.clone(), cursor, snapshot));
+                        count += page.items.len();
+                        if count > 10_000 {
+                            return Err(Status::resource_exhausted(
+                                "progress entry budget exceeded",
+                            ));
+                        }
+                        for item in page.items {
+                            if item.played {
+                                continue;
+                            }
+                            let updated = item
+                                .updated_at
+                                .ok_or_else(|| Status::unavailable("invalid progress timestamp"))?;
+                            let timestamp =
+                                screenroom_backend::chrono::DateTime::parse_from_rfc3339(&updated)
+                                    .map_err(|_| {
+                                        Status::unavailable("invalid progress timestamp")
+                                    })?;
+                            let duration = item.runtime_seconds.unwrap_or(0);
+                            let entry = ContinueWatchingEntry {
+                                source_id: source.clone(),
+                                external_item_id: item.external_item_id,
+                                position_seconds: item.position_seconds,
+                                duration_seconds: duration,
+                                progress_percent: if duration == 0 {
+                                    0
+                                } else {
+                                    ((u128::from(item.position_seconds) * 100
+                                        / u128::from(duration))
+                                    .min(100)) as u32
+                                },
+                                updated_at: timestamp.to_utc().to_rfc3339(),
+                            };
+                            let key = (source.clone(), entry.external_item_id.clone());
+                            if let Some((previous, _)) = entries.get(&key) {
+                                if previous != &entry {
+                                    return Err(Status::unavailable(
+                                        "conflicting progress provider duplicate",
+                                    ));
+                                }
+                            } else {
+                                entries.insert(key, (entry, timestamp));
+                            }
+                        }
+                        match page.next_offset {
+                            Some(next) if next > cursor => cursor = next,
+                            Some(_) => return Err(Status::unavailable("progress cursor loop")),
+                            None => break,
+                        }
                     }
                 }
-                match page.next_cursor {
-                    Some(next) if seen.insert(next.clone()) => cursor = Some(next),
-                    Some(_) => return Err(Status::unavailable("progress provider cursor loop")),
-                    None => {
-                        complete = true;
-                        break;
+                // Offset pages have no authoritative revision; reject an observed changing traversal.
+                for (library, cursor, snapshot) in verification {
+                    pages += 1;
+                    if pages > 512 {
+                        return Err(Status::resource_exhausted("progress page budget exceeded"));
+                    }
+                    let page = provider
+                        .resume_page(&external, &library, cursor, 100)
+                        .await
+                        .map_err(|_| Status::unavailable("progress provider unavailable"))?;
+                    count += page.items.len();
+                    if count > 10_000 {
+                        return Err(Status::resource_exhausted("progress entry budget exceeded"));
+                    }
+                    if live_snapshot(&page)? != snapshot {
+                        return Err(Status::unavailable("progress snapshot changed"));
                     }
                 }
+                continue;
             }
-            if !complete {
-                return Err(Status::resource_exhausted(
-                    "progress provider page budget exceeded",
-                ));
+        }
+        self.repository.user(id).await?;
+        for source in scopes.keys() {
+            if self.repository.link(id, source).await?.as_ref() != links.get(source) {
+                return Err(Status::aborted("profile link changed during progress read"));
             }
+        }
+        if self.repository.revision(id).await? != revision {
+            return Err(Status::aborted("profile link changed during progress read"));
         }
         let mut entries: Vec<_> = entries.into_values().collect();
         entries.sort_by(|(a, ta), (b, tb)| {
@@ -170,8 +248,16 @@ impl UserService {
                 )
             })
             .collect();
-        let binding = serde_json::to_vec(&(id.to_string(), scopes, size, snapshots, state))
-            .map_err(|_| Status::internal("progress snapshot encoding failed"))?;
+        let binding = serde_json::to_vec(&(
+            id.to_string(),
+            revision,
+            scopes,
+            size,
+            links,
+            snapshots,
+            state,
+        ))
+        .map_err(|_| Status::internal("progress snapshot encoding failed"))?;
         let start = offset(&request.page_token, &binding, size, entries.len())?;
         let end = (start + size).min(entries.len());
         Ok(GetContinueWatchingResponse {
@@ -190,7 +276,7 @@ mod tests {
     use super::*;
     fn scope(library: &str) -> SourceLibraryScope {
         SourceLibraryScope {
-            source_id: JELLYFIN_SOURCE.into(),
+            source_id: "owned-source".into(),
             library_id: library.into(),
         }
     }
@@ -200,7 +286,7 @@ mod tests {
             normalize(&[scope("movies"), scope("tv"), scope("movies")]).unwrap(),
             normalize(&[scope("tv"), scope("movies")]).unwrap()
         );
-        assert!(normalize(&[scope("movies"), scope("")]).unwrap()[JELLYFIN_SOURCE].is_empty());
+        assert!(normalize(&[scope("movies"), scope("")]).unwrap()["owned-source"].is_empty());
         assert!(normalize(&[]).is_err());
         assert!(normalize(&vec![scope("tv"); 33]).is_err());
     }

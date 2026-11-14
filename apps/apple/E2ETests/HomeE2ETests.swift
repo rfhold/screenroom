@@ -3,495 +3,316 @@ import CoreGraphics
 
 final class HomeE2ETests: XCTestCase {
     @MainActor
+    private func configuredApp(showcase: Bool = false) throws -> XCUIApplication {
+        let env = ProcessInfo.processInfo.environment
+        let endpoint = try XCTUnwrap(env["SCREENROOM_API_ENDPOINT"], "Supply the configured backend endpoint")
+        let user = try XCTUnwrap(env["SCREENROOM_USER_ID"], "Supply the installation's local user selector")
+        XCTAssertFalse(endpoint.isEmpty)
+        XCTAssertFalse(user.isEmpty)
+        let app = XCUIApplication()
+        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = endpoint
+        app.launchEnvironment["SCREENROOM_USER_ID"] = user
+        app.launchEnvironment["SCREENROOM_E2E_SETTINGS_NAMESPACE"] = "apple-e2e-\(UUID().uuidString)"
+        app.launchEnvironment["SCREENROOM_API_PAGE_SIZE"] = showcase ? "24" : "1"
+        continueAfterFailure = false
+        return app
+    }
+
+    @MainActor
     func testHomeCatalogAndNavigation() throws {
-        try homeCatalogAndNavigation(captures: false)
+        try journey(captures: false)
     }
 
     @MainActor
     func testHappyPathShowcase() throws {
-        try homeCatalogAndNavigation(captures: true)
+        try journey(captures: true)
     }
 
     @MainActor
-    private func homeCatalogAndNavigation(captures: Bool) throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        configure(app, pageSize: captures ? "100" : "1")
+    private func journey(captures: Bool) throws {
+        let app = try configuredApp(showcase: captures)
         app.launch()
-
-        let content = [("page.title", "Home"), ("home.row.0", "Continue watching")]
-        for (identifier, label) in content {
-            let element = app.staticTexts[identifier]
-            XCTAssertTrue(element.waitForExistence(timeout: 10), identifier)
-            #if os(macOS)
-            let text = element.label.isEmpty ? element.value as? String : element.label
-            XCTAssertEqual(text, label)
-            #else
-            XCTAssertEqual(element.label, label)
-            #endif
-            XCTAssertTrue(element.isHittable, "Not visible: \(identifier)")
-        }
-
-        XCTAssertTrue(app.buttons["card.big-buck-bunny"].firstMatch.waitForExistence(timeout: 5))
-        let posterReady = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Licensed core artwork ready"), object: app.buttons["card.big-buck-bunny"].firstMatch)
-        XCTAssertEqual(XCTWaiter.wait(for: [posterReady], timeout: 10), .completed)
-        XCTAssertTrue(app.buttons["sidebar.toggle"].isHittable)
-
-        if captures { capture(app, flow: "home") }
-
+        assertHeading(app, "Home")
+        XCTAssertTrue(firstCard(app).waitForExistence(timeout: 10), "Showcase requires a nonempty server-defined Home row")
+        XCTAssertTrue(app.buttons["sidebar.toggle"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["core.error"].exists)
+        if captures { capture(app, "home") }
         activate(app.buttons["sidebar.toggle"])
         XCTAssertEqual(app.buttons["sidebar.toggle"].label, "Collapse sidebar")
-        XCTAssertTrue(app.buttons["menu.Movies"].exists)
-        XCTAssertEqual(app.buttons["menu.Movies"].label, "Movies")
-        XCTAssertTrue(app.windows.firstMatch.frame.contains(app.buttons["menu.Movies"].frame))
-        XCTAssertTrue(app.buttons["sidebar.toggle"].isHittable)
-        XCTAssertTrue(app.windows.firstMatch.frame.contains(app.buttons["sidebar.toggle"].frame))
         XCTAssertFalse(app.buttons["Log out"].exists)
         XCTAssertFalse(app.buttons["Continue"].exists)
-        #if os(tvOS)
-        XCTAssertEqual(app.buttons["sidebar.subtitles"].value as? String, "Off; Collapsed")
-        XCTAssertFalse(app.buttons["subtitle.Off"].exists)
-        XCTAssertEqual(app.buttons["menu.Home"].value as? String, "Selected")
-        focus(app.buttons["menu.Movies"])
-        XCTAssertTrue(app.buttons["menu.Movies"].hasFocus)
-        XCTAssertEqual(app.buttons["menu.Movies"].value as? String, "Not selected")
-        assertHeading(app, "Home")
-        for title in ["Refresh"] {
-            XCTAssertTrue(app.windows.firstMatch.frame.contains(app.buttons[title].frame))
+        if captures { capture(app, "sidebar") }
+        let libraries = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'menu.' AND identifier != 'menu.Home' AND identifier != 'menu.Search titles' AND identifier != 'menu.Jellyfin profile' AND identifier != 'menu.All libraries'"))
+        XCTAssertTrue(libraries.firstMatch.waitForExistence(timeout: 10), "This journey requires an indexed real library; use empty-state tests before setup")
+        var libraryTitle = ""
+        let card = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'card.' AND label MATCHES %@", ".+, [0-9]{1,4}(, (Watched|Playback progress [0-9]+%))*")).firstMatch
+        for library in libraries.allElementsBoundByIndex.prefix(8) {
+            libraryTitle = library.label
+            activate(library)
+            assertHeading(app, libraryTitle)
+            waitForPage(app)
+            if card.exists { break }
         }
+        if app.buttons["sidebar.toggle"].label == "Collapse sidebar" { activate(app.buttons["sidebar.toggle"]) }
+        XCTAssertTrue(card.exists, "Showcase requires a year-labelled movie card within the first page of one of the first eight libraries")
+        if captures { capture(app, "library") }
+        let cardID = card.identifier
+        activate(card)
+        XCTAssertTrue(app.buttons["breadcrumb.\(String(cardID.dropFirst(5)))"].waitForExistence(timeout: 10))
+        let title = text(app.staticTexts["page.title"])
+        XCTAssertFalse(title.isEmpty)
+        XCTAssertTrue(app.buttons["breadcrumb.\(String(cardID.dropFirst(5)))"].exists)
+        XCTAssertFalse(app.buttons["Play"].exists)
+        XCTAssertFalse(app.buttons["Resume"].exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "artwork.loading").firstMatch.waitForNonExistence(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "artwork.error").firstMatch.exists)
+        if captures { capture(app, "detail") }
+        #if os(tvOS)
+        XCUIRemote.shared.press(.menu)
+        assertHeading(app, libraryTitle)
+        XCTAssertTrue(app.buttons[cardID].waitForExistence(timeout: 10))
         #else
-        XCTAssertTrue(app.buttons["Off"].exists)
-        #endif
-        if captures { capture(app, flow: "sidebar") }
-        #if os(tvOS)
-        activate(app.buttons["menu.Movies"])
-        #endif
-        activate(app.buttons["sidebar.toggle"])
-        XCTAssertEqual(app.buttons["sidebar.toggle"].label, "Expand sidebar")
-        #if !os(tvOS)
-        activate(app.buttons["menu.Movies"])
-        #endif
-        assertHeading(app, "Movies")
-        XCTAssertTrue(app.buttons["card.nosferatu"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["card.nosferatu"].isHittable)
-        XCTAssertEqual(app.buttons["card.nosferatu"].value as? String, "Designed placeholder; poster not included")
-        if captures { capture(app, flow: "library") }
-        activate(app.buttons["card.big-buck-bunny"])
-        assertHeading(app, "Big Buck Bunny")
-        XCTAssertTrue(app.buttons["breadcrumb.big-buck-bunny"].exists)
-        XCTAssertFalse(app.staticTexts["metadata.disclosure"].exists)
-        XCTAssertFalse(app.buttons["Play"].exists)
-        if captures {
-            XCTAssertTrue(app.staticTexts["Cast"].waitForExistence(timeout: 5))
-            XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "artwork.loading").firstMatch.waitForNonExistence(timeout: 10))
-            XCTAssertFalse(app.descendants(matching: .any).matching(identifier: "artwork.error").firstMatch.exists)
-            XCTAssertFalse(app.buttons["Resume"].exists)
-            capture(app, flow: "detail")
-            #if os(tvOS)
-            focus(app.buttons["navigation.back"])
-            XCUIRemote.shared.press(.left)
-            XCTAssertTrue(app.buttons["sidebar.toggle"].hasFocus)
-            activate(app.buttons["sidebar.toggle"])
-            #endif
-            activate(app.buttons["menu.Home"])
-            showcaseSearch(app)
-            return
-        }
-        #if os(tvOS)
-        focus(app.buttons["navigation.back"])
-        XCUIRemote.shared.press(.left)
-        XCTAssertTrue(app.buttons["sidebar.toggle"].hasFocus)
-        XCTAssertEqual(app.buttons["menu.Movies"].value as? String, "Selected")
-        XCUIRemote.shared.press(.right)
-        XCTAssertFalse(app.buttons["sidebar.toggle"].hasFocus)
-        assertHeading(app, "Big Buck Bunny")
-        #endif
         activate(app.buttons["breadcrumb.root"])
-        activate(app.buttons["card.nosferatu"])
-        assertHeading(app, "Nosferatu")
-        XCTAssertTrue(app.buttons["breadcrumb.nosferatu"].exists)
-        XCTAssertTrue(app.staticTexts["Cast"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["metadata.info"].exists)
-        activate(app.buttons["metadata.info"])
-        XCTAssertTrue(app.staticTexts["metadata.disclosure"].exists)
-        activate(app.buttons["metadata.info"])
-        XCTAssertFalse(app.buttons["Play"].exists)
-        XCTAssertFalse(app.buttons["Resume"].exists)
-
-        #if os(tvOS)
-        activate(app.buttons["sidebar.toggle"])
         #endif
-        activate(app.buttons["menu.TV Shows"])
-        activate(app.buttons["card.beverly-hillbillies"])
-        activate(app.buttons["card.beverly-hillbillies-s1"])
-        activate(app.buttons["metadata.info"])
-        let missingRating = app.staticTexts["metadata.disclosure"]
-        let missingRatingText = missingRating.label.isEmpty ? missingRating.value as? String ?? "" : missingRating.label
-        XCTAssertTrue(missingRatingText.contains("Vote count not available"))
-        XCTAssertFalse(missingRatingText.contains("0 votes"))
-        XCTAssertTrue(missingRatingText.contains("6.1/10"))
-        activate(app.buttons["metadata.info"])
-        activate(app.buttons["card.beverly-hillbillies-s1-e1"])
-        XCTAssertTrue(app.staticTexts["page.title"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["Play"].exists)
-        XCTAssertFalse(app.buttons["Resume"].exists)
-        activate(app.buttons["breadcrumb.root"])
-        XCTAssertTrue(app.buttons["card.beverly-hillbillies"].waitForExistence(timeout: 5))
+        #if os(tvOS)
+        if app.buttons["sidebar.toggle"].label == "Expand sidebar" { activate(app.buttons["sidebar.toggle"]) }
+        #endif
         activate(app.buttons["menu.Search titles"])
         #if os(tvOS)
-        activate(app.buttons["sidebar.toggle"])
+        if app.buttons["sidebar.toggle"].label == "Collapse sidebar" { activate(app.buttons["sidebar.toggle"]) }
         #endif
-        XCTAssertTrue(app.textFields["search.query"].waitForExistence(timeout: 5))
-        assertStatus(app, "Enter a title to search TV Shows.")
-        XCTAssertFalse(app.buttons["search.type.Movie"].exists)
-        XCTAssertFalse(app.buttons["search.source.TMDB"].exists)
+        assertStatus(app, "Enter a title to search \(libraryTitle).")
         activate(app.buttons["search.options"])
-        XCTAssertTrue(app.buttons["Title only"].waitForExistence(timeout: 5))
-        #if os(tvOS)
-        for method in ["Text", "Fuzzy", "Semantic"] {
-            XCTAssertEqual(app.buttons["search.method.\(method)"].value as? String, "Selected")
-        }
-        activate(app.buttons["search.source.Jellyfin"])
-        assertStatus(app, "Enter a title to search TV Shows.")
-        XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
-        activate(app.buttons["search.source.TMDB"])
-        #endif
         activate(app.buttons["Title only"])
-        XCTAssertFalse(app.buttons["Semantic"].isEnabled)
+        XCTAssertEqual(app.buttons["search.method.Semantic"].value as? String, "Not selected")
         activate(app.buttons["search.options"])
-        #if !os(tvOS)
         activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("beverly\n")
-        XCTAssertTrue(app.buttons["card.beverly-hillbillies"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["card.beverly-hillbillies"].isHittable)
-        assertStatus(app, "1 result in TV Shows")
-        #if os(iOS)
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        app.textFields["search.query"].typeText(title + "\n")
+        #if os(tvOS)
+        if app.keyboards.firstMatch.exists { XCUIRemote.shared.press(.menu) }
         #endif
-        activate(app.buttons["card.beverly-hillbillies"])
+        waitForPage(app)
+        for _ in 0..<3 {
+            if app.buttons[cardID].exists { break }
+            let more = app.buttons["catalog.loadMore"]
+            if !more.exists { break }
+            activate(more)
+            waitForContinuation(app)
+        }
+        XCTAssertTrue(app.buttons[cardID].waitForExistence(timeout: 10), "The selected real item must appear within the first four scoped title-search pages")
+        if captures { capture(app, "search") }
+        activate(app.buttons[cardID])
+        #if os(tvOS)
+        XCTAssertTrue(app.buttons["breadcrumb.\(String(cardID.dropFirst(5)))"].waitForExistence(timeout: 10))
+        XCUIRemote.shared.press(.menu)
+        XCTAssertTrue(app.textFields["search.query"].waitForExistence(timeout: 10))
+        #else
         activate(app.buttons["breadcrumb.root"])
-        XCTAssertEqual(app.textFields["search.query"].value as? String, "beverly")
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.source.Jellyfin"])
-        XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
-        assertStatus(app, "1 result in TV Shows")
-        activate(app.buttons["search.options"])
-        XCTAssertTrue(app.buttons["card.beverly-hillbillies"].waitForExistence(timeout: 10))
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.source.TMDB"])
-        XCTAssertEqual(app.buttons["Title only"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.method.Text"].value as? String, "Selected")
-        activate(app.buttons["search.options"])
-        activate(app.buttons["Clear query"])
-        XCTAssertFalse(app.buttons["card.beverly-hillbillies"].exists)
-        activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("zzzzzzz")
-        let noMatches = NSPredicate(format: "label CONTAINS %@ OR value CONTAINS %@", "No matches", "No matches")
-        XCTAssertTrue(app.staticTexts.matching(noMatches).firstMatch.waitForExistence(timeout: 5))
-        activate(app.buttons["Clear query"])
         #endif
-        activate(app.buttons["sidebar.toggle"])
-        activate(app.buttons["Refresh"])
-        XCTAssertTrue(app.staticTexts["refresh.status"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["Catalog refreshed from core."].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["Log out"].exists)
-        XCTAssertFalse(app.buttons["Continue"].exists)
+        XCTAssertEqual(app.textFields["search.query"].value as? String, title)
+        activate(app.buttons["Clear query"])
+        assertStatus(app, "Enter a title to search \(libraryTitle).")
+        XCTAssertFalse(app.buttons[cardID].exists)
+    }
+
+    @MainActor
+    func testFreshSearchAndHomeScope() throws {
+        let app = try configuredApp(showcase: true)
+        app.launch()
+        assertHeading(app, "Home")
+        activate(app.buttons["menu.Search titles"])
+        assertStatus(app, "Enter a title to search All libraries.")
+        activate(app.buttons["search.options"])
+        activate(app.buttons["Title only"])
+        XCTAssertFalse(app.buttons["search.method.Semantic"].isEnabled)
         activate(app.buttons["menu.Home"])
+        activate(app.buttons["menu.Search titles"])
+        assertStatus(app, "Enter a title to search All libraries.")
+        XCTAssertFalse(app.buttons["Clear query"].exists)
+        if app.buttons["sidebar.toggle"].label == "Expand sidebar" { activate(app.buttons["sidebar.toggle"]) }
+        let libraries = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'menu.' AND identifier != 'menu.Home' AND identifier != 'menu.Search titles' AND identifier != 'menu.Jellyfin profile' AND identifier != 'menu.All libraries'"))
+        var seriesID = ""
+        discovery: for library in libraries.allElementsBoundByIndex.prefix(8) {
+            activate(library)
+            waitForPage(app)
+            let candidates = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'card.'")).allElementsBoundByIndex.prefix(3).map(\.identifier)
+            for candidate in candidates {
+                activate(app.buttons[candidate])
+                XCTAssertTrue(app.buttons["breadcrumb.\(String(candidate.dropFirst(5)))"].waitForExistence(timeout: 10))
+                XCTAssertTrue(app.staticTexts["page.title"].waitForExistence(timeout: 10))
+                XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "core.loading").firstMatch.waitForNonExistence(timeout: 15))
+                let series = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH 'Series · ' OR value BEGINSWITH 'Series · '")).firstMatch
+                let count = app.staticTexts["catalog.loadedCount"]
+                if series.exists && count.exists && (Int(text(count).split(separator: " ").first ?? "") ?? 0) > 0 {
+                    seriesID = String(candidate.dropFirst(5))
+                    break discovery
+                }
+                activate(library)
+                waitForPage(app)
+            }
+        }
+        XCTAssertFalse(seriesID.isEmpty, "Hierarchy regression requires a series among three first-page candidates in eight libraries")
+        if app.buttons["sidebar.toggle"].label == "Collapse sidebar" { activate(app.buttons["sidebar.toggle"]) }
+        let season = boundedFirstChild(app)
+        let seasonID = String(season.identifier.dropFirst(5))
+        activate(season)
+        let episode = boundedFirstChild(app)
+        XCTAssertTrue(episode.waitForExistence(timeout: 10), "The discovered season must contain an episode")
+        activate(episode)
+        XCTAssertTrue(app.buttons["breadcrumb.\(seriesID)"].exists)
+        XCTAssertTrue(app.buttons["breadcrumb.\(seasonID)"].exists)
+        XCTAssertFalse(app.buttons["Play"].exists)
+        XCTAssertFalse(app.buttons["Resume"].exists)
+        activate(app.buttons["breadcrumb.\(seasonID)"])
+        XCTAssertTrue(firstCard(app).waitForExistence(timeout: 10))
+    }
+
+    @MainActor
+    func testSearchPaginationAndPreferencesRoundTrip() throws {
+        let app = try configuredApp()
+        app.launch()
+        assertHeading(app, "Home")
         activate(app.buttons["sidebar.toggle"])
-        XCTAssertTrue(app.staticTexts["home.row.0"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["sidebar.subtitles"].exists)
+        XCTAssertFalse(app.buttons["subtitle.Library tracks"].exists)
+        app.terminate()
+        app.launch()
+        assertHeading(app, "Home")
+        activate(app.buttons["sidebar.toggle"])
+        XCTAssertFalse(app.buttons["sidebar.subtitles"].exists)
+        XCTAssertFalse(app.buttons["subtitle.Library tracks"].exists)
+        activate(app.buttons["Refresh"])
+        XCTAssertTrue(app.staticTexts["Catalog refreshed from core."].waitForExistence(timeout: 10))
+        // Continuations, duplicate IDs and traversal limits are checked against discovered library data.
+        app.terminate()
+        try journey(captures: false)
+    }
+
+    @MainActor
+    func testCoreUnavailableAndRetry() throws {
+        let app = try configuredApp()
+        let endpoint = app.launchEnvironment["SCREENROOM_API_ENDPOINT"]
+        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = "http://127.0.0.1:1"
+        app.launch()
+        for attempt in 0..<2 {
+            XCTAssertTrue(app.staticTexts["core.error"].waitForExistence(timeout: 10))
+            XCTAssertFalse(firstCard(app).exists)
+            if attempt == 0 { activate(app.buttons["core.retry"]) }
+        }
+        app.terminate()
+        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = endpoint
+        app.launch()
+        assertHeading(app, "Home")
+        XCTAssertTrue(app.staticTexts["core.error"].waitForNonExistence(timeout: 10))
     }
 
     #if os(tvOS)
     @MainActor
     func testSidebarRemoteControls() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        configure(app)
+        let app = try configuredApp()
         app.launch()
         activate(app.buttons["sidebar.toggle"])
-        for choice in ["Library tracks", "Transcription", "Off"] {
-            activate(app.buttons["sidebar.subtitles"])
-            for option in ["Off", "Library tracks", "Transcription"] {
-                XCTAssertTrue(app.buttons["subtitle.\(option)"].exists)
-            }
-            activate(app.buttons["subtitle.\(choice)"])
-            XCTAssertEqual(app.buttons["sidebar.subtitles"].value as? String, "\(choice); Collapsed")
-            XCTAssertFalse(app.buttons["subtitle.Off"].exists)
-        }
+        XCTAssertFalse(app.buttons["sidebar.subtitles"].exists)
+        XCTAssertFalse(app.buttons["subtitle.Off"].exists)
         activate(app.buttons["Refresh"])
         XCTAssertTrue(app.staticTexts["Catalog refreshed from core."].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["Log out"].exists)
-        XCTAssertFalse(app.buttons["Continue"].exists)
-        assertHeading(app, "Home")
         focus(app.buttons["menu.Home"])
         XCTAssertEqual(app.buttons["menu.Home"].value as? String, "Selected")
         XCUIRemote.shared.press(.right)
         XCTAssertFalse(app.buttons["menu.Home"].hasFocus)
         XCUIRemote.shared.press(.left)
-        let returnedFocus = app.buttons.matching(NSPredicate(format: "hasFocus == true")).firstMatch
-        XCTAssertTrue(returnedFocus.identifier.hasPrefix("menu.") || returnedFocus.identifier == "sidebar.toggle")
-        XCTAssertEqual(app.buttons["menu.Home"].value as? String, "Selected")
-        assertHeading(app, "Home")
+        let focused = app.buttons.matching(NSPredicate(format: "hasFocus == true")).firstMatch
+        XCTAssertTrue(focused.identifier.hasPrefix("menu.") || focused.identifier == "sidebar.toggle")
     }
     #endif
 
-    @MainActor
-    private func showcaseSearch(_ app: XCUIApplication) {
-        activate(app.buttons["menu.Search titles"])
-        if app.buttons["sidebar.toggle"].label == "Collapse sidebar" { activate(app.buttons["sidebar.toggle"]) }
-        assertStatus(app, "Enter a title to search All libraries.")
-        XCTAssertFalse(app.buttons["search.type.Movie"].exists)
-        activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.source.All catalogs"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
-        activate(app.buttons["Title only"])
-        XCTAssertEqual(app.buttons["search.method.Semantic"].value as? String, "Not selected")
-        activate(app.buttons["search.options"])
-        activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("Bunny\n")
-        #if os(tvOS)
-        if app.keyboards.firstMatch.exists { XCUIRemote.shared.press(.menu) }
-        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5))
-        #endif
-        XCTAssertTrue(app.buttons["card.big-buck-bunny"].waitForExistence(timeout: 5))
-        let artwork = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Licensed core artwork ready"), object: app.buttons["card.big-buck-bunny"].firstMatch)
-        XCTAssertEqual(XCTWaiter.wait(for: [artwork], timeout: 10), .completed)
-        assertStatus(app, "1 result in All libraries")
-        XCTAssertFalse(app.buttons["search.source.TMDB"].exists)
-        #if os(iOS) || os(tvOS)
-        XCTAssertFalse(app.keyboards.firstMatch.exists)
-        #endif
-        capture(app, flow: "search")
+    @MainActor private func firstCard(_ app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'card.'")).firstMatch
     }
-
-    @MainActor
-    func testFreshSearchAndHomeScope() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        configure(app)
-        app.launch()
-        activate(app.buttons["menu.TV Shows"])
-        activate(app.buttons["card.beverly-hillbillies"])
-        activate(app.buttons["card.beverly-hillbillies-s1"])
-        activate(app.buttons["menu.Search titles"])
-        assertStatus(app, "Enter a title to search TV Shows.")
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.type.Movie"])
-        activate(app.buttons["search.method.Text"])
-        activate(app.buttons["Title only"])
-        activate(app.buttons["search.source.Jellyfin"])
-        #if !os(tvOS)
-        activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("zzzzzzz")
-        #endif
-        activate(app.buttons["menu.Search titles"])
-        assertFreshSearch(app, scope: "TV Shows", titleOnly: true, methods: ["Fuzzy"])
-        activate(app.buttons["search.method.Text"])
-        activate(app.buttons["Title only"])
-        activate(app.buttons["menu.Search titles"])
-        assertFreshSearch(app, scope: "TV Shows", titleOnly: false, methods: ["Text", "Fuzzy"])
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.back"])
-        XCTAssertTrue(app.buttons["card.beverly-hillbillies-s1-e1"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["breadcrumb.beverly-hillbillies-s1"].exists)
-        activate(app.buttons["menu.Home"])
-        activate(app.buttons["menu.Search titles"])
-        assertStatus(app, "Enter a title to search All libraries.")
-        activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.source.Jellyfin"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
-        #if !os(tvOS)
-        activate(app.buttons["search.source.All catalogs"])
-        activate(app.buttons["search.type.Movie"])
-        activate(app.buttons["search.options"])
-        activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("nosferatu\n")
-        XCTAssertTrue(app.buttons["card.nosferatu"].waitForExistence(timeout: 5))
-        activate(app.buttons["Clear query"])
-        #endif
+    @MainActor private func text(_ element: XCUIElement) -> String {
+        element.label.isEmpty ? element.value as? String ?? "" : element.label
     }
-
-    @MainActor
-    private func configure(_ app: XCUIApplication, pageSize: String = "1") {
-        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = ProcessInfo.processInfo.environment["SCREENROOM_API_ENDPOINT"] ?? "http://127.0.0.1:50051"
-        app.launchEnvironment["SCREENROOM_USER_ID"] = ProcessInfo.processInfo.environment["SCREENROOM_USER_ID"] ?? "00000000-0000-0000-0000-000000000001"
-        app.launchEnvironment["SCREENROOM_E2E_SETTINGS_NAMESPACE"] = "apple-e2e-\(UUID().uuidString)"
-        app.launchEnvironment["SCREENROOM_API_PAGE_SIZE"] = pageSize
-    }
-
-    @MainActor
-    func testCoreUnavailableAndRetry() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        configure(app)
-        let healthyEndpoint = app.launchEnvironment["SCREENROOM_API_ENDPOINT"]
-        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = "http://127.0.0.1:1"
-        app.launch()
-        XCTAssertTrue(app.staticTexts["core.error"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.staticTexts["home.row.0"].exists)
-        XCTAssertFalse(app.buttons["card.big-buck-bunny"].exists)
-        activate(app.buttons["core.retry"])
-        XCTAssertTrue(app.staticTexts["core.error"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.staticTexts["home.row.0"].exists)
-        XCTAssertFalse(app.buttons["card.big-buck-bunny"].exists)
-        app.terminate()
-        app.launchEnvironment["SCREENROOM_API_ENDPOINT"] = healthyEndpoint
-        app.launch()
-        XCTAssertTrue(app.staticTexts["home.row.0"].waitForExistence(timeout: 10))
-        assertHeading(app, "Home")
-        let poster = app.buttons["card.big-buck-bunny"].firstMatch
-        XCTAssertTrue(poster.waitForExistence(timeout: 5))
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Licensed core artwork ready"), object: poster)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
-        XCTAssertFalse(app.staticTexts["core.error"].exists)
-    }
-
-    @MainActor
-    func testSearchPaginationAndPreferencesRoundTrip() throws {
-        continueAfterFailure = false
-        let app = XCUIApplication()
-        configure(app)
-        app.launch()
-        activate(app.buttons["menu.Search titles"])
-        activate(app.textFields["search.query"])
-        app.textFields["search.query"].typeText("Bunny\n")
-        #if os(tvOS)
-        if app.keyboards.firstMatch.exists { XCUIRemote.shared.press(.menu) }
-        #endif
-        let complete = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "11 results in All libraries", "11 results in All libraries"), object: app.staticTexts["search.status"])
-        XCTAssertEqual(XCTWaiter.wait(for: [complete], timeout: 10), .completed)
-        activate(app.buttons["sidebar.toggle"])
-        activate(app.buttons["Refresh"])
-        XCTAssertTrue(app.staticTexts["Catalog refreshed from core."].waitForExistence(timeout: 10))
-        let refreshed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", "11 results in All libraries", "11 results in All libraries"), object: app.staticTexts["search.status"])
-        XCTAssertEqual(XCTWaiter.wait(for: [refreshed], timeout: 10), .completed)
-        XCTAssertEqual(app.textFields["search.query"].value as? String, "Bunny")
-        activate(app.buttons["search.options"])
-        activate(app.buttons["search.type.Movie"])
-        activate(app.buttons["search.type.Episode"])
-        activate(app.buttons["search.source.TMDB"])
-        activate(app.buttons["Title only"])
-        activate(app.buttons["search.method.Text"])
-        activate(app.buttons["menu.TV Shows"])
-        assertHeading(app, "TV Shows")
-        app.terminate()
-        app.launch()
-        assertHeading(app, "TV Shows")
-        activate(app.buttons["menu.Search titles"])
-        activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
-        XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Not selected")
-        XCTAssertEqual(app.buttons["Title only"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.method.Semantic"].value as? String, "Not selected")
-        XCTAssertEqual(app.buttons["search.method.Text"].value as? String, "Not selected")
-        XCTAssertEqual(app.buttons["search.method.Fuzzy"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.source.TMDB"].value as? String, "Selected")
-        activate(app.buttons["sidebar.toggle"])
-        #if os(tvOS)
-        activate(app.buttons["sidebar.subtitles"])
-        #endif
-        activate(app.buttons["subtitle.Library tracks"])
-        #if os(tvOS)
-        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Library tracks; Collapsed"), object: app.buttons["sidebar.subtitles"])
-        #else
-        let saved = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@", "Selected"), object: app.buttons["subtitle.Library tracks"])
-        #endif
-        XCTAssertEqual(XCTWaiter.wait(for: [saved], timeout: 5), .completed)
-        app.terminate()
-        app.launch()
-        activate(app.buttons["sidebar.toggle"])
-        #if os(tvOS)
-        XCTAssertEqual(app.buttons["sidebar.subtitles"].value as? String, "Library tracks; Collapsed")
-        #else
-        XCTAssertEqual(app.buttons["subtitle.Library tracks"].value as? String, "Selected")
-        #endif
-    }
-
-    @MainActor
-    private func assertHeading(_ app: XCUIApplication, _ expected: String) {
+    @MainActor private func assertHeading(_ app: XCUIApplication, _ expected: String) {
         let title = app.staticTexts["page.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
-        #if os(macOS)
-        XCTAssertEqual(title.label.isEmpty ? title.value as? String : title.label, expected)
-        #else
-        XCTAssertEqual(title.label, expected)
-        #endif
+        XCTAssertTrue(title.waitForExistence(timeout: 10))
+        XCTAssertEqual(text(title), expected)
         XCTAssertTrue(title.isHittable)
     }
-
-    @MainActor
-    private func capture(_ app: XCUIApplication, flow: String) {
-        #if os(macOS)
-        let screenshot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
-        #else
-        let toggle = app.buttons["sidebar.toggle"]
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: toggle)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
-        XCTAssertTrue(toggle.isHittable)
-        XCTAssertTrue(app.windows.firstMatch.frame.contains(toggle.frame))
-        let image = app.screenshot()
-        XCTAssertTrue(hasVisibleGlyph(image, frame: toggle.frame, screen: app.frame), "Sidebar glyph is blank in \(flow)")
-        let screenshot = XCTAttachment(screenshot: image)
-        #endif
-        screenshot.name = "\(flow)-success"
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
-    }
-
-    #if !os(macOS)
-    private func hasVisibleGlyph(_ screenshot: XCUIScreenshot, frame: CGRect, screen: CGRect) -> Bool {
-        guard let image = screenshot.image.cgImage else { return false }
-        let scale = CGFloat(image.width) / screen.width
-        let center = frame.insetBy(dx: frame.width * 0.2, dy: frame.height * 0.2)
-        let rect = CGRect(x: (center.minX - screen.minX) * scale, y: (center.minY - screen.minY) * scale, width: center.width * scale, height: center.height * scale)
-        guard let crop = image.cropping(to: rect) else { return false }
-        var pixels = [UInt8](repeating: 0, count: crop.width * crop.height * 4)
-        return pixels.withUnsafeMutableBytes { bytes in
-            guard let context = CGContext(data: bytes.baseAddress, width: crop.width, height: crop.height, bitsPerComponent: 8, bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-            context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
-            let data = bytes.bindMemory(to: UInt8.self)
-            return stride(from: 0, to: data.count, by: 4).filter { data[$0] > 180 && data[$0 + 1] > 180 && data[$0 + 2] > 180 }.count >= 8
-        }
-    }
-    #endif
-
-    @MainActor
-    private func assertFreshSearch(_ app: XCUIApplication, scope: String, titleOnly: Bool, methods: Set<String>) {
-        assertStatus(app, "Enter a title to search \(scope).")
-        XCTAssertFalse(app.buttons["Clear query"].exists)
-        XCTAssertFalse(app.buttons["card.beverly-hillbillies"].exists)
-        XCTAssertFalse(app.buttons["search.method.Text"].exists)
-        XCTAssertFalse(app.buttons["search.type.Episode"].exists)
-        activate(app.buttons["search.options"])
-        XCTAssertEqual(app.buttons["search.type.Episode"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["search.type.Movie"].value as? String, "Not selected")
-        XCTAssertEqual(app.buttons["search.type.Series"].value as? String, "Selected")
-        XCTAssertEqual(app.buttons["Title only"].value as? String, titleOnly ? "Selected" : "Not selected")
-        for method in ["Text", "Fuzzy", "Semantic"] {
-            XCTAssertEqual(app.buttons["search.method.\(method)"].value as? String, methods.contains(method) ? "Selected" : "Not selected")
-        }
-    }
-
-    @MainActor
-    private func assertStatus(_ app: XCUIApplication, _ expected: String) {
+    @MainActor private func assertStatus(_ app: XCUIApplication, _ expected: String) {
         let status = app.staticTexts["search.status"]
-        XCTAssertTrue(status.waitForExistence(timeout: 5))
+        XCTAssertTrue(status.waitForExistence(timeout: 10))
         let settled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@ OR value == %@", expected, expected), object: status)
         XCTAssertEqual(XCTWaiter.wait(for: [settled], timeout: 10), .completed)
-        #if os(macOS)
-        XCTAssertEqual(status.label.isEmpty ? status.value as? String : status.label, expected)
-        #else
-        XCTAssertEqual(status.label, expected)
-        #endif
     }
-
-    @MainActor
-    private func activate(_ element: XCUIElement) {
-        XCTAssertTrue(element.waitForExistence(timeout: 5))
+    @MainActor private func waitForPage(_ app: XCUIApplication) {
+        if app.textFields["search.query"].exists {
+            let field = app.textFields["search.query"]
+            let value = field.value as? String ?? ""
+            let query = (value == field.placeholderValue ? "" : value).trimmingCharacters(in: .whitespacesAndNewlines)
+            let pattern = query.isEmpty ? "Enter a title to search .+" : "([0-9]+ results? in .+|No matches in .+)"
+            let settled = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "exists == true AND (label MATCHES %@ OR value MATCHES %@)", pattern, pattern),
+                object: app.staticTexts["search.status"]
+            )
+            guard XCTWaiter.wait(for: [settled], timeout: 15) == .completed else {
+                XCTFail("Initial search did not reach a loaded result or empty state")
+                return
+            }
+        } else {
+            guard app.staticTexts["catalog.loadedCount"].waitForExistence(timeout: 15) else {
+                XCTFail("Initial catalog page did not publish its loaded count")
+                return
+            }
+        }
+        guard app.descendants(matching: .any).matching(identifier: "core.loading").firstMatch.waitForNonExistence(timeout: 15) else {
+            XCTFail("Initial catalog read did not finish")
+            return
+        }
+        XCTAssertFalse(app.staticTexts["core.error"].exists, "A failed read is not a loaded page")
+        XCTAssertFalse(app.staticTexts["catalog.pageError"].exists)
+    }
+    @MainActor private func waitForContinuation(_ app: XCUIApplication) {
+        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false OR enabled == true"), object: app.buttons["catalog.loadMore"])
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 15), .completed)
+        XCTAssertFalse(app.staticTexts["core.error"].exists)
+        XCTAssertFalse(app.staticTexts["catalog.pageError"].exists)
+    }
+    @MainActor private func boundedFirstChild(_ app: XCUIApplication) -> XCUIElement {
+        waitForPage(app)
+        for _ in 0..<3 {
+            for _ in 0..<6 {
+                if firstCard(app).exists { return firstCard(app) }
+                #if os(tvOS)
+                XCUIRemote.shared.press(.down)
+                #else
+                app.swipeUp()
+                #endif
+            }
+            if firstCard(app).exists { return firstCard(app) }
+            if !app.buttons["catalog.loadMore"].exists { break }
+            activate(app.buttons["catalog.loadMore"])
+            waitForContinuation(app)
+        }
+        XCTAssertTrue(firstCard(app).exists, "Hierarchy requires a child within four scoped pages")
+        return firstCard(app)
+    }
+    @MainActor private func capture(_ app: XCUIApplication, _ flow: String) {
+        let toggle = app.buttons["sidebar.toggle"]
+        XCTAssertTrue(toggle.isHittable)
+        XCTAssertTrue(app.windows.firstMatch.frame.contains(toggle.frame))
+        #if os(macOS)
+        let shot = XCTAttachment(screenshot: app.windows.firstMatch.screenshot())
+        #else
+        let image = app.screenshot()
+        XCTAssertTrue(hasVisibleGlyph(image, frame: toggle.frame, screen: app.frame), "Sidebar glyph is blank in \(flow)")
+        let shot = XCTAttachment(screenshot: image)
+        #endif
+        shot.name = "\(flow)-success"
+        shot.lifetime = .keepAlways
+        add(shot)
+    }
+    @MainActor private func activate(_ element: XCUIElement) {
+        XCTAssertTrue(element.exists || element.waitForExistence(timeout: 10))
         #if os(tvOS)
         focus(element)
         XCUIRemote.shared.press(.select)
@@ -509,22 +330,20 @@ final class HomeE2ETests: XCTestCase {
         element.tap()
         #endif
     }
-
     #if os(tvOS)
-    @MainActor
-    private func focus(_ element: XCUIElement) {
+    @MainActor private func focus(_ element: XCUIElement) {
         let app = XCUIApplication()
         var previousKey: String?
         var previousHorizontal = false
-        for _ in 0..<35 {
-            if element.hasFocus { break }
+        for _ in 0..<60 {
+            if element.hasFocus { return }
             let focused = app.descendants(matching: .any).matching(NSPredicate(format: "hasFocus == true")).firstMatch
             guard focused.exists || focused.waitForExistence(timeout: 1) else { XCUIRemote.shared.press(.right); continue }
             let dx = element.frame.midX - focused.frame.midX
             let dy = element.frame.midY - focused.frame.midY
-            let sidebarIDs = ["sidebar.toggle", "Off", "Library tracks", "Transcription", "Refresh"]
-            let targetSidebar = element.identifier.hasPrefix("menu.") || element.identifier.hasPrefix("sidebar.") || element.identifier.hasPrefix("subtitle.") || sidebarIDs.contains(element.identifier) || sidebarIDs.contains(element.label)
-            let focusedSidebar = focused.identifier.hasPrefix("menu.") || focused.identifier.hasPrefix("sidebar.") || focused.identifier.hasPrefix("subtitle.") || sidebarIDs.contains(focused.identifier) || sidebarIDs.contains(focused.label)
+            let sidebarIDs = ["sidebar.toggle", "Refresh"]
+            let targetSidebar = element.identifier.hasPrefix("menu.") || element.identifier.hasPrefix("sidebar.") || sidebarIDs.contains(element.identifier) || sidebarIDs.contains(element.label)
+            let focusedSidebar = focused.identifier.hasPrefix("menu.") || focused.identifier.hasPrefix("sidebar.") || sidebarIDs.contains(focused.identifier) || sidebarIDs.contains(focused.label)
             var horizontal = targetSidebar != focusedSidebar || (!targetSidebar && abs(dy) <= 30)
             let focusKey = focused.identifier.isEmpty ? focused.label : focused.identifier
             if previousKey == focusKey && previousHorizontal == horizontal { horizontal.toggle() }
@@ -534,7 +353,23 @@ final class HomeE2ETests: XCTestCase {
             if horizontal { XCUIRemote.shared.press(dx > 0 ? .right : .left) }
             else { XCUIRemote.shared.press(dy > 0 ? .down : .up) }
         }
-        XCTAssertTrue(element.hasFocus, "Remote could not focus \(element)")
+        XCTFail("Remote could not focus \(element.identifier)")
+    }
+    #endif
+    #if !os(macOS)
+    private func hasVisibleGlyph(_ screenshot: XCUIScreenshot, frame: CGRect, screen: CGRect) -> Bool {
+        guard let image = screenshot.image.cgImage else { return false }
+        let scale = CGFloat(image.width) / screen.width
+        let center = frame.insetBy(dx: frame.width * 0.2, dy: frame.height * 0.2)
+        let rect = CGRect(x: (center.minX - screen.minX) * scale, y: (center.minY - screen.minY) * scale, width: center.width * scale, height: center.height * scale)
+        guard let crop = image.cropping(to: rect) else { return false }
+        var pixels = [UInt8](repeating: 0, count: crop.width * crop.height * 4)
+        return pixels.withUnsafeMutableBytes { bytes in
+            guard let context = CGContext(data: bytes.baseAddress, width: crop.width, height: crop.height, bitsPerComponent: 8, bytesPerRow: crop.width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+            let data = bytes.bindMemory(to: UInt8.self)
+            return stride(from: 0, to: data.count, by: 4).filter { data[$0] > 180 && data[$0 + 1] > 180 && data[$0 + 2] > 180 }.count >= 8
+        }
     }
     #endif
 }

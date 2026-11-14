@@ -5,11 +5,6 @@ pub mod catalog {
     pub mod v1 {
         include!("generated/screenroom/catalog/v1/screenroom.catalog.v1.rs");
     }
-    pub mod operator {
-        pub mod v1 {
-            include!("generated/screenroom/catalog/operator/v1/screenroom.catalog.operator.v1.rs");
-        }
-    }
 }
 pub mod common {
     pub mod v1 {
@@ -23,11 +18,6 @@ pub mod user {
     pub mod internal {
         pub mod v1 {
             include!("generated/screenroom/user/internal/v1/screenroom.user.internal.v1.rs");
-        }
-    }
-    pub mod operator {
-        pub mod v1 {
-            include!("generated/screenroom/user/operator/v1/screenroom.user.operator.v1.rs");
         }
     }
 }

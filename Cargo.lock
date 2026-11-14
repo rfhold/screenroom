@@ -2463,6 +2463,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -2743,9 +2744,13 @@ dependencies = [
  "futures-util",
  "hex",
  "image",
+ "libc",
  "pgvector",
  "reqwest 0.12.28",
  "roxmltree",
+ "screenroom-catalog-adapter",
+ "screenroom-observability",
+ "screenroom-queue",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2786,8 +2791,13 @@ dependencies = [
 name = "screenroom-catalog-adapter"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "reqwest 0.12.28",
+ "screenroom-observability",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]
@@ -2812,6 +2822,22 @@ dependencies = [
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+]
+
+[[package]]
+name = "screenroom-index-operator"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "screenroom-backend",
+ "screenroom-observability",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
+ "tower",
+ "uuid",
 ]
 
 [[package]]
@@ -2896,6 +2922,7 @@ version = "0.1.0"
 dependencies = [
  "reqwest 0.12.28",
  "screenroom-backend",
+ "screenroom-catalog",
  "screenroom-catalog-adapter",
  "screenroom-observability",
  "screenroom-proto",

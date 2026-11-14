@@ -9,7 +9,7 @@ class CatalogPresentationTest {
         val rating = Rating("archive", 4.5, 5.0, null, "date")
         assertEquals(ProviderPresentation("Archive · 4.5/5", "https://archive.example/item"), ProviderReference("Archive", "Available", "https://archive.example/item").presentation(rating, "4.5/5"))
         assertEquals(ProviderPresentation("Library: Ready", null), ProviderReference("Library", "Ready", "").presentation(rating, "4.5/5"))
-        assertEquals(ProviderPresentation("TMDB · 4.5/5", "https://example.com"), ProviderReference("TMDB", "Listed", "https://example.com").presentation(rating.copy(provider = "tmdb"), "4.5/5"))
+        assertEquals(ProviderPresentation("Provider · 4.5/5", "https://example.com"), ProviderReference("Provider", "Listed", "https://example.com").presentation(rating.copy(provider = "provider"), "4.5/5"))
         assertNull(ProviderReference("Other", "Linked", "javascript:alert(1)").presentation(null, "—").url)
     }
     @Test fun libraryIdentityAndOrderDoNotDependOnEnglishTitles() {
@@ -50,9 +50,23 @@ class CatalogPresentationTest {
         val rating = Rating("Archive", 4.5, 5.0, null, "server-rating-date")
         val runtime = org.screenroom.core.Runtime(90u, 80u, 100u, "Edition varies", "1m 30s")
         val provider = ProviderReference("Archive", "Available", "https://archive.example/item")
-        val item = Item("opaque", "Server title", "Movie", null, 2020u, "Server subtitle", "Server overview", listOf("tag"), listOf("#123abc", "#abcdef"), "date", 4u, rights, rights, null, rating, runtime, listOf(provider), 20u, listOf("Server provenance"), "metadata-date")
+        val poster = Artwork("poster", "https://archive.example/poster.png", "Poster", "Poster artist", "Poster CC BY", "https://archive.example/poster-source", "https://archive.example/poster-license", "poster")
+        val item = Item("opaque", "Server title", "Movie", null, 2020u, "Server subtitle", "Server overview", listOf("tag"), listOf("#123abc", "#abcdef"), "date", 4u, rights, rights, poster, rating, runtime, listOf(provider), 20u, listOf("Server provenance"), "metadata-date", null)
         val title = item.ui()
+        listOf(null, false, true, false, null, true).forEach { watched ->
+            val presentation = item.copy(watched = watched, progressPercent = 100u).ui()
+            assertEquals(watched == true, presentation.watched)
+            assertEquals(watched == true, presentation.cardAccessibility.contains("Watched"))
+            assertTrue(presentation.playbackAccessibility.contains("Playback progress 100%"))
+            assertSame(poster, presentation.artwork)
+            assertEquals(item.id, presentation.id)
+        }
+        assertEquals("Watched", item.copy(watched = true, progressPercent = null).ui().playbackAccessibility)
         assertSame(item, title.record)
+        assertSame(poster, title.artwork)
+        assertNotEquals(title.rights!!.attribution, title.artwork!!.creator)
+        assertNotEquals(title.rights!!.licenseUrl, title.artwork!!.licenseUrl)
+        assertEquals("https://archive.example/poster-source", title.artwork!!.source)
         assertEquals(0xff123abc, title.ink)
         assertEquals(0xffabcdef, title.light)
         assertEquals(rating, title.record.rating)
@@ -65,15 +79,16 @@ class CatalogPresentationTest {
         listOf("", "javascript:alert(1)", "https://user:secret@example.com", "not a URL").forEach { assertFalse(validLink(it)) }
     }
 
-    @Test fun globalInfoPreservesUnvisitedArtworkAndOrderedNotices() {
-        val logo = Artwork("brand", "https://mock.example/art/brand.png", "Server brand", "Creator", "License", "https://source.example", "https://license.example", "logo")
-        val unvisited = logo.copy(id = "unvisited", kind = "portrait")
-        val notices = listOf(CatalogNotice("z", "legal", "Last alphabetically", "First on server", "", ""), CatalogNotice("a", "art", "Second", "Second on server", "Source", "https://source.example"))
-        val info = CatalogInfo(notices, "catalog-date", listOf(logo))
-        val page = org.screenroom.core.ArtworkPage(listOf(logo, unvisited), "")
-        assertEquals(listOf("brand", "unvisited"), page.artwork.map { it.id })
-        assertEquals(listOf("z", "a"), info.notices.map { it.id })
-        assertEquals("brand", info.branding.single { it.kind == "logo" }.id)
-        assertEquals("catalog-date", info.retrievedAt)
+    @Test fun sourceSelectionReconcilesAgainstCapabilitiesBeforeRequests() {
+        val caps = SearchCapabilities(listOf("text"), listOf("Movie"), listOf("all", "jellyfin"), "", 160u)
+        assertEquals("all", caps.allowedSource("tmdb"))
+        assertEquals("all", caps.allowedSource("removed-source"))
+        assertEquals("jellyfin", caps.allowedSource("jellyfin"))
+        assertEquals("jellyfin", caps.copy(sources = listOf("jellyfin")).allowedSource("all"))
+        assertEquals("", caps.copy(sources = emptyList()).allowedSource("tmdb"))
+        for (provider in listOf("Imdb", "Tmdb")) {
+            assertEquals(ProviderPresentation("$provider: source_supplied", "https://example.test/item"),
+                ProviderReference(provider, "source_supplied", "https://example.test/item").presentation(null, "—"))
+        }
     }
 }

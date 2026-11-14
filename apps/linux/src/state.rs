@@ -31,7 +31,6 @@ pub struct State {
     pub path: Vec<String>,
     pub detail: Option<String>,
     pub expanded: bool,
-    pub subtitle: usize,
     pub query: String,
     pub search_pending: bool,
     pub query_debouncing: bool,
@@ -54,7 +53,6 @@ impl Default for State {
             path: vec![],
             detail: None,
             expanded: false,
-            subtitle: 0,
             query: String::new(),
             search_pending: false,
             query_debouncing: false,
@@ -309,7 +307,7 @@ mod tests {
     #[test]
     fn query_debounce_and_network_pending_are_distinct() {
         let mut state = State::default();
-        let revision = state.edit_query("Bunny".into());
+        let revision = state.edit_query("query".into());
         state.toggle_type(2);
         assert!(state.query_debouncing);
         assert!(state.settle_query(revision));
@@ -322,9 +320,9 @@ mod tests {
         use crate::catalog::rating_labels;
         use serde_json::json;
         let (score, info) = rating_labels(
-            &json!({"rating":6.1,"ratingProvider":"TMDB","ratingScale":10,"votes":null,"retrievedAt":"2026-11-07"}),
+            &json!({"rating":6.1,"ratingProvider":"Provider","ratingScale":10,"votes":null,"retrievedAt":"2026-11-07"}),
         );
-        assert_eq!(score, "TMDB 6.1/10");
+        assert_eq!(score, "Provider 6.1/10");
         assert_eq!(info, "Vote count unavailable · Snapshot 2026-11-07");
     }
     #[test]
@@ -332,9 +330,11 @@ mod tests {
         use crate::catalog::rating_labels;
         use serde_json::json;
         assert_eq!(
-            rating_labels(&json!({"rating":0,"ratingProvider":"TMDB","ratingScale":10,"votes":0}))
-                .0,
-            "TMDB · Unrated"
+            rating_labels(
+                &json!({"rating":0,"ratingProvider":"Provider","ratingScale":10,"votes":0})
+            )
+            .0,
+            "Provider · Unrated"
         );
         assert!(
             rating_labels(&json!({"rating":0,"votes":0}))

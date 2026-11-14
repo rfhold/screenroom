@@ -92,8 +92,8 @@ cleanup() {
     wait "$pid" 2>/dev/null || true
   done
   if [ "$backend_owned" = 1 ] && [ -f "$run/backend-owned" ]; then
-    docker compose -p "${SCREENROOM_BACKEND_PROJECT:-screenroom-e2e}" logs --no-color >"$run/backend-containers.log" 2>&1 || true
-    if ! bash scripts/backend.sh down >"$run/backend-down.log" 2>&1; then
+    docker compose -p "${SCREENROOM_BACKEND_PROJECT:-screenroom-local}" logs --no-color >"$run/backend-containers.log" 2>&1 || true
+    if ! bash scripts/backend.sh down --owner-file "$run/backend-owned" >"$run/backend-down.log" 2>&1; then
       echo "Owned backend teardown failed; see $run/backend-down.log" >&2
       [ "$status" -ne 0 ] || status=1
     fi
@@ -189,7 +189,6 @@ export SCREENROOM_E2E_PROFILE_PREFIX="run-$(basename "$run")"
 export SCREENROOM_API_ENDPOINT=${SCREENROOM_API_ENDPOINT:-${SCREENROOM_E2E_API_ENDPOINT:-http://127.0.0.1:${SCREENROOM_BACKEND_PORT:-50051}}}
 [ -z "${SCREENROOM_E2E_API_ENDPOINT:-}" ] || [ "$SCREENROOM_API_ENDPOINT" = "$SCREENROOM_E2E_API_ENDPOINT" ] || { echo 'Backend endpoint aliases must match.' >&2; exit 2; }
 export SCREENROOM_E2E_API_ENDPOINT=$SCREENROOM_API_ENDPOINT
-export SCREENROOM_USER_ID=${SCREENROOM_USER_ID:-00000000-0000-0000-0000-000000000001}
 case "${SCREENROOM_BACKEND_ATTACH:-0}" in
   1) prepare backend bash scripts/backend.sh wait ;;
   0)
@@ -201,7 +200,10 @@ case "${SCREENROOM_BACKEND_ATTACH:-0}" in
     prepare backend bash scripts/backend.sh up --owner-file "$run/backend-owned" ;;
   *) echo 'SCREENROOM_BACKEND_ATTACH must be 0 or 1.' >&2; exit 2 ;;
 esac
-export SCREENROOM_BACKEND_DESCRIPTOR="$PWD/build/backend-runtime/${SCREENROOM_BACKEND_PROJECT:-screenroom-e2e}/descriptor.json"
+export SCREENROOM_BACKEND_DESCRIPTOR="$PWD/build/backend-runtime/${SCREENROOM_BACKEND_PROJECT:-screenroom-local}/descriptor.json"
+actual_user=$(node -e 'const d=JSON.parse(require("fs").readFileSync(process.env.SCREENROOM_BACKEND_DESCRIPTOR));if(d.ready!==true||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(d.userID))throw Error("Installation user selector missing");console.log(d.userID)')
+[ -z "${SCREENROOM_USER_ID:-}" ] || [ "$SCREENROOM_USER_ID" = "$actual_user" ] || { echo 'User selector must match the installation descriptor.' >&2; exit 2; }
+export SCREENROOM_USER_ID=$actual_user
 cp "$SCREENROOM_BACKEND_DESCRIPTOR" "$run/backend-instance.json"
 export SCREENROOM_BACKEND_INSTANCE_ID=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.env.SCREENROOM_BACKEND_DESCRIPTOR)).instanceID)')
 for family in $families; do cp "$SCREENROOM_BACKEND_DESCRIPTOR" "$run/$family-instance.json"; done

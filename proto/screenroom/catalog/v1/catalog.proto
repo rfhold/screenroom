@@ -101,6 +101,8 @@ message Item {
   optional uint32 progress_percent = 18;
   repeated string provenance_notes = 19;
   string metadata_retrieved_at = 20;
+  // Explicit personal observation for the selected user and displayed source; absent is unknown.
+  optional bool watched = 21;
 }
 message Page {
   // Zero selects 50; maximum 200. Tokens are opaque and bound to request scope.
@@ -115,6 +117,16 @@ message HomeRow {
   string id = 1;
   string title = 2;
   repeated Item items = 3;
+  // Absent on a successful read, including a genuinely empty row. Progress read
+  // failures return an empty Continue Watching row with this error while other
+  // catalog rows remain available; they do not fail the entire GetHome call.
+  HomeRowReadError read_error = 4;
+}
+message HomeRowReadError {
+  // Stable machine-readable code: progress_unavailable for progress read failure.
+  string code = 1;
+  // Sanitized user-facing message; never upstream bodies, URLs, or credentials.
+  string message = 2;
 }
 message GetHomeRequest {
   string library_id = 1;
@@ -186,7 +198,7 @@ message SearchRequest {
   string library_id = 2;
   screenroom.common.v1.SearchTypes types = 3;
   screenroom.common.v1.SearchMethods methods = 4;
-  // Provider choice: all, tmdb, or jellyfin; not an installation source ID.
+  // Provider choice: all or jellyfin; not an installation source ID.
   string source = 5;
   Page page = 6;
   string source_id = 7;

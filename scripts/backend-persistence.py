@@ -27,21 +27,20 @@ def literal(value):
 
 def main():
     backend.run(['bash', 'scripts/backend.sh', 'wait'])
-    selector = "('00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002')"
+    selected = str(uuid.UUID(backend.installation_user()))
+    selector = f"('{selected}')"
     users = json.loads(backend.sql(f"SELECT json_agg(t) FROM identity.users t WHERE id IN {selector}"))
     links = json.loads(backend.sql(f"SELECT coalesce(json_agg(t),'[]') FROM identity.jellyfin_user_links t WHERE user_id IN {selector}"))
-    assert len(users) == 2
+    assert len(users) == 1
     recovery = backend.RUNTIME / f'operator-restore-{uuid.uuid4()}.json'
     recovery.write_text(json.dumps(dict(users=users, links=links)))
     os.chmod(recovery, 0o600)
     original = snapshot()
-    bootstrap = {name: (backend.RUNTIME / name).read_bytes() for name in ('installation.json', 'users.json')}
+    bootstrap = {name: (backend.RUNTIME / name).read_bytes() for name in ('local-user.json', 'users.json')}
     identity = (backend.RUNTIME / 'identity.json').read_text()
     try:
-        backend.sql("BEGIN; UPDATE identity.users SET display_name='Alice operator edit',updated_at=now() WHERE id='00000000-0000-0000-0000-000000000001'; UPDATE identity.users SET state='disabled',updated_at=now() WHERE id='00000000-0000-0000-0000-000000000002'; UPDATE identity.jellyfin_user_links SET jellyfin_user_id='mock-jellyfin-bob',updated_at=now() WHERE user_id='00000000-0000-0000-0000-000000000001' AND source_id='mock-jellyfin'; DELETE FROM identity.jellyfin_user_links WHERE user_id='00000000-0000-0000-0000-000000000002'; COMMIT;")
-        assert backend.sql("SELECT count(*) FROM identity.users WHERE (id='00000000-0000-0000-0000-000000000001' AND display_name='Alice operator edit') OR (id='00000000-0000-0000-0000-000000000002' AND state='disabled')") == '2'
-        assert backend.sql("SELECT count(*) FROM identity.jellyfin_user_links WHERE user_id='00000000-0000-0000-0000-000000000001' AND source_id='mock-jellyfin' AND jellyfin_user_id='mock-jellyfin-bob'") == '1'
-        assert backend.sql("SELECT count(*) FROM identity.jellyfin_user_links WHERE user_id='00000000-0000-0000-0000-000000000002'") == '0'
+        backend.sql(f"UPDATE identity.users SET display_name='Operator persistence check',updated_at=now() WHERE id='{selected}'")
+        assert backend.sql(f"SELECT count(*) FROM identity.users WHERE id='{selected}' AND display_name='Operator persistence check'") == '1'
         before = snapshot()
         backend.compose('run', '--rm', '--no-deps', 'user', 'screenroom-user-init', '--create-missing', '/runtime/users.json')
         assert before == snapshot(), 'repeated bootstrap overwrote operator state'
@@ -55,7 +54,7 @@ def main():
         assert bootstrap == {name: (backend.RUNTIME / name).read_bytes() for name in bootstrap}
     finally:
         backend.compose('up', '-d', '--wait', 'postgres')
-        backend.sql(f"BEGIN; INSERT INTO identity.users SELECT * FROM json_populate_recordset(NULL::identity.users,{literal(users)}) ON CONFLICT(id) DO UPDATE SET display_name=EXCLUDED.display_name,state=EXCLUDED.state,created_at=EXCLUDED.created_at,updated_at=EXCLUDED.updated_at; DELETE FROM identity.jellyfin_user_links WHERE user_id IN {selector}; INSERT INTO identity.jellyfin_user_links SELECT * FROM json_populate_recordset(NULL::identity.jellyfin_user_links,{literal(links)}); COMMIT;")
+        backend.sql(f"UPDATE identity.users target SET display_name=original.display_name,updated_at=original.updated_at FROM json_populate_recordset(NULL::identity.users,{literal(users)}) original WHERE target.id=original.id")
         assert original == snapshot(), f'explicit operator restore differs; preserve {recovery}'
         recovery.unlink()
     backend.run(['bash', 'scripts/backend.sh', 'wait'])

@@ -1,9 +1,10 @@
-import init, { Client, default_settings, validate_settings, type ClientSettings, type SourceLibraryScope, type ClientFailure, type Item as CoreItem, type Credit, type Artwork as CoreArtwork, type MediaLibrary, type SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
+import init, { Client, default_settings, normalize_saved_settings, validate_settings, type ClientSettings, type SourceLibraryScope, type ClientFailure, type Item as CoreItem, type Credit, type Artwork as CoreArtwork, type MediaLibrary, type SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
 import wasmUrl from '../../../../../target/client-core/wasm/screenroom_client_core_bg.wasm?url';
 import type { Item, Artwork, PersonCredit, Rights } from './models';
 import { collectPages } from './pagination';
 import { writable } from 'svelte/store';
 import { MetadataOperation } from './operation.mjs';
+import { createArtworkLoader } from './artwork';
 
 let initialized: Promise<unknown> | undefined;
 let instance: Promise<Client> | undefined;
@@ -29,6 +30,7 @@ export const artwork = (a: CoreArtwork | null): Artwork | undefined => a ? { ...
 export const credit = (c: Credit): PersonCredit => ({ id: c.id, name: c.name, role: c.role, artwork: artwork(c.artwork) });
 export function item(record: CoreItem): Item {
   const value: Item = { id: record.id, title: record.title, kind: record.kind as Item['kind'], year: record.year, parent: record.parent_id ?? undefined, meta: record.subtitle, overview: record.overview, tags: record.tags.join(' '), colors: record.colors, addedOrder: record.added_order, releaseDate: record.release_date, progress: record.progress_percent ?? undefined, rights: rights(record.title_rights), metadataRights: rights(record.metadata_rights), provenanceNotes: record.provenance_notes, metadataRetrievedAt: record.metadata_retrieved_at, artwork: artwork(record.artwork), cast: [], crew: [], rating: record.rating ? { provider: record.rating.provider, value: record.rating.value, scale: record.rating.scale, count: record.rating.votes, retrievedAt: record.rating.retrieved_at } : undefined, providers: record.provider_references };
+  value.watched = record.watched ?? null;
   records.set(value.id, value);
   return value;
 }
@@ -66,7 +68,7 @@ export async function loadSettings(operation = new MetadataOperation()): Promise
   let raw: string | null = null;
   try { raw = localStorage.getItem(key); }
   catch { settingsWarning.set(persistenceWarning); }
-  try { if (raw) settings = validate_settings(JSON.parse(raw)); }
+   try { if (raw) settings = normalize_saved_settings(JSON.parse(raw)); }
   catch { settings = defaults(); }
   operation.check();
   settingsCache.set(key, settings);
@@ -90,24 +92,5 @@ export function saveSettings(change: Partial<ClientSettings>, active = () => tru
   return budget.read(() => write);
 }
 
-const images = new Map<string, { promise: Promise<string>; refs: number; url?: string }>();
-export function acquireArtwork(url: string): { loaded: Promise<string>; release: () => void } {
-  let entry = images.get(url);
-  if (!entry) {
-    entry = { refs: 0, promise: Promise.resolve('') };
-    const current = entry;
-    entry.promise = client().then(c => c.load_artwork(url)).then(bytes => {
-      const data = new Uint8Array(bytes.length); data.set(bytes);
-      const type = data[0] === 0x89 ? 'image/png' : data[0] === 0xff ? 'image/jpeg' : 'image/svg+xml';
-      current.url = URL.createObjectURL(new Blob([data], { type }));
-      return current.url;
-    });
-    images.set(url, entry);
-  }
-  entry.refs++;
-  return { loaded: entry.promise, release: () => {
-    if (!entry || --entry.refs > 0) return;
-    images.delete(url);
-    void entry.promise.then(value => URL.revokeObjectURL(value), () => {});
-  } };
-}
+let artworkClient: Promise<Client> | undefined;
+export const acquireArtwork = createArtworkLoader(url => (artworkClient ??= newClient()).then(c => c.load_artwork(url)));

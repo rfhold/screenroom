@@ -24,7 +24,6 @@ func externalURL(_ value: String) -> URL? {
 func choiceLabel(_ value: String) -> String {
     switch value {
     case "all": "All catalogs"
-    case "tmdb": "TMDB"
     case "jellyfin": "Jellyfin"
     case "text": "Text"
     case "fuzzy": "Fuzzy"
@@ -58,6 +57,28 @@ struct CatalogItem: Identifiable, Hashable {
     var light: String { value.colors.last ?? "707070" }
     var parent: String? { value.parentId }
     var progress: Double? { value.progressPercent.map(Double.init) }
+    var watched: Bool { value.watched == true }
+    var playbackAccessibility: String {
+        ([watched ? "Watched" : nil, value.progressPercent.map { "Playback progress \($0)%" }].compactMap { $0 }).joined(separator: ", ")
+    }
+    var cardAccessibility: String { [title, kind, meta, playbackAccessibility].filter { !$0.isEmpty }.joined(separator: ", ") }
+    func labels(seasonContext: Bool = false) -> CardLabels {
+        guard kind == "Episode" else { return CardLabels(primary: title, number: "", subtitle: kind == "Movie" ? String(year) : meta) }
+        let pattern = #"^(?:(.+) · )?S(\d+)\s*E(\d+)(?: · .*)?$"#
+        let trimmed = meta.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)) else {
+            return CardLabels(primary: "Episode", number: "", subtitle: title)
+        }
+        let text = trimmed as NSString
+        func part(_ n: Int) -> String { match.range(at: n).location == NSNotFound ? "" : text.substring(with: match.range(at: n)) }
+        func padded(_ value: String) -> String { value.count < 2 ? "0" + value : value }
+        let episode = "E" + padded(part(3))
+        return CardLabels(primary: seasonContext ? "" : part(1), number: seasonContext ? episode : "S" + padded(part(2)) + ":" + episode, subtitle: title)
+    }
+    func isSeasonChild(of parent: CatalogItem?) -> Bool {
+        parent?.kind == "Season" && kind == "Episode" && self.parent == parent?.id
+    }
     var rights: String { [value.titleRights?.label, value.titleRights?.note].compactMap { $0 }.joined(separator: " · ") }
     var rightsSource: String { value.titleRights?.source ?? "" }
     var attribution: String? { value.titleRights?.attribution }
@@ -66,6 +87,232 @@ struct CatalogItem: Identifiable, Hashable {
     var record: MetadataRecord? {
         guard value.rating != nil || !value.providerReferences.isEmpty else { return nil }
         return MetadataRecord(date: value.releaseDate, rating: value.rating, providers: value.providerReferences, retrievedAt: value.metadataRetrievedAt)
+    }
+}
+
+struct CardLabels: Equatable {
+    let primary: String
+    let number: String
+    let subtitle: String
+    var heading: String { [primary, number].filter { !$0.isEmpty }.joined(separator: " · ") }
+}
+
+func loadedItemCount(_ count: Int) -> String { "\(count) \(count == 1 ? "item" : "items") loaded" }
+
+func homeRowError(_ code: String) -> String {
+    code == "progress_unavailable"
+        ? "Continue Watching is unavailable. Jellyfin progress could not be read. Other catalog rows remain available."
+        : "This row could not be loaded. Other catalog rows remain available."
+}
+
+struct ItemPagination {
+    var token = ""
+    var seen: Set<String> = []
+    var pages = 0
+    mutating func append(_ batch: [Item], next: String, to values: [CatalogItem]) throws -> [CatalogItem] {
+        guard pages < 512, values.count + batch.count <= 10000,
+              next.isEmpty || !seen.contains(next) else { throw CocoaError(.fileReadCorruptFile) }
+        var ids = Set(values.map(\.id))
+        let appended = batch.filter { ids.insert($0.id).inserted }.map(CatalogItem.init)
+        pages += 1
+        if !next.isEmpty { seen.insert(next) }
+        token = next
+        return values + appended
+    }
+}
+
+@MainActor
+final class ArtworkLoader {
+    private struct Job {
+        let fetch: @Sendable () async throws -> Data
+        var waiters: [UUID: CheckedContinuation<Data, Error>]
+        var task: Task<Void, Never>?
+    }
+    private var jobs: [String: Job] = [:]
+    private var queue: [String] = []
+    private var active = 0
+    private var cache: [String: Data] = [:]
+    private var cacheOrder: [String] = []
+    private var cacheBytes = 0
+    private(set) var peakActive = 0
+
+    func load(key: String, fetch: @escaping @Sendable () async throws -> Data) async throws -> Data {
+        try Task.checkCancellation()
+        if let data = cache[key] { return data }
+        if let task = jobs[key]?.task, task.isCancelled {
+            await task.value
+            try Task.checkCancellation()
+            return try await load(key: key, fetch: fetch)
+        }
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled { continuation.resume(throwing: CancellationError()); return }
+                if jobs[key] != nil { jobs[key]!.waiters[id] = continuation }
+                else {
+                    jobs[key] = Job(fetch: fetch, waiters: [id: continuation])
+                    queue.append(key)
+                }
+                pump()
+            }
+        } onCancel: {
+            Task { @MainActor in self.cancel(key: key, id: id) }
+        }
+    }
+
+    private func cancel(key: String, id: UUID) {
+        guard var job = jobs[key], let waiter = job.waiters.removeValue(forKey: id) else { return }
+        waiter.resume(throwing: CancellationError())
+        jobs[key] = job
+        if job.waiters.isEmpty {
+            if let task = job.task { task.cancel() }
+            else { jobs.removeValue(forKey: key); queue.removeAll { $0 == key } }
+        }
+    }
+
+    private func pump() {
+        while active < 8, !queue.isEmpty {
+            let key = queue.removeFirst()
+            guard let job = jobs[key] else { continue }
+            active += 1; peakActive = max(peakActive, active)
+            jobs[key]!.task = Task {
+                let result: Result<Data, Error>
+                do { result = .success(try await job.fetch()) }
+                catch { result = .failure(error) }
+                finish(key: key, result: result)
+            }
+        }
+    }
+
+    private func finish(key: String, result: Result<Data, Error>) {
+        guard let job = jobs.removeValue(forKey: key) else { return }
+        active -= 1
+        if case let .success(data) = result, !job.waiters.isEmpty, data.count <= 32 * 1024 * 1024 {
+            cache[key] = data; cacheOrder.append(key); cacheBytes += data.count
+            while cacheOrder.count > 128 || cacheBytes > 32 * 1024 * 1024 {
+                let oldest = cacheOrder.removeFirst()
+                cacheBytes -= cache.removeValue(forKey: oldest)?.count ?? 0
+            }
+        }
+        for waiter in job.waiters.values { waiter.resume(with: result) }
+        pump()
+    }
+}
+
+@MainActor @Observable
+final class JellyfinProfileStore {
+    var sources: [JellyfinSource] = []
+    var profiles: [JellyfinProfile] = []
+    var source = ""
+    var selected = ""
+    var link: JellyfinLink?
+    var known = false
+    var busy = false
+    var error = ""
+    var status = ""
+    var revision = 0
+    private var pendingReconciliation = false
+    private var writeInFlight = false
+    private var generation = 0
+    func deactivate() {
+        generation += 1
+        busy = false
+        known = false
+    }
+    var currentProfile: String {
+        guard known else { return "Not confirmed" }
+        guard let link else { return "Not linked" }
+        return profiles.first { $0.id == link.jellyfinUserId }?.displayName ?? "Linked profile unavailable in choices"
+    }
+
+    private func collect<T: Sendable>(_ fetch: @escaping @MainActor @Sendable (Page) async throws -> ([T], String), id: (T) -> String) async throws -> [T] {
+        let budget = OperationBudget(.seconds(120))
+        var values: [T] = []; var token = ""; var tokens: Set<String> = []; var ids: Set<String> = []
+        for _ in 0..<512 {
+            let page = Page(size: 100, token: token)
+            let (batch, next) = try await budget.run { try await fetch(page) }
+            guard values.count + batch.count <= 10000 else { throw CocoaError(.fileReadTooLarge) }
+            values += batch.filter { ids.insert(id($0)).inserted }
+            if next.isEmpty { return values }
+            guard tokens.insert(next).inserted else { throw CocoaError(.fileReadCorruptFile) }
+            token = next
+        }
+        throw CocoaError(.fileReadTooLarge)
+    }
+
+    func load(client: Client?, target: String? = nil) async {
+        guard !busy, !Task.isCancelled else { return }
+        generation += 1
+        let current = generation
+        busy = true; known = false; error = ""; status = ""; profiles = []
+        defer { if current == generation { busy = false } }
+        do {
+            guard let client else { throw CocoaError(.fileReadUnknown) }
+            guard !writeInFlight else {
+                self.error = "A previous profile change is still settling. Retry reads server state only."
+                return
+            }
+            client.invalidateReads()
+            let values = try await collect({ page in
+                let result = try await client.listJellyfinSources(page: page)
+                return (result.sources, result.nextPageToken)
+            }, id: { $0.id })
+            try Task.checkCancellation()
+            guard current == generation else { return }
+            sources = values
+            let wanted = target ?? source
+            source = values.contains { $0.id == wanted } ? wanted : values.first?.id ?? ""
+            guard !source.isEmpty else { return }
+            let requested = source
+            let choices = try await collect({ page in
+                let result = try await client.listJellyfinProfiles(sourceId: requested, page: page)
+                return (result.profiles, result.nextPageToken)
+            }, id: { $0.id })
+            let mapping = try await OperationBudget(.seconds(120)).run { try await client.getJellyfinLink(sourceId: requested) }
+            try Task.checkCancellation()
+            guard current == generation else { return }
+            profiles = choices; link = mapping; selected = mapping?.jellyfinUserId ?? choices.first?.id ?? ""; known = true
+            if pendingReconciliation { pendingReconciliation = false; revision += 1 }
+        } catch {
+            if !Task.isCancelled && current == generation { self.error = "Unable to read Jellyfin profile settings. Retry to read the server state." }
+        }
+    }
+
+    func change(client: Client?, profile: String?) async {
+        guard let client, known, !busy, !source.isEmpty, !Task.isCancelled else { return }
+        if let profile, !profiles.contains(where: { $0.id == profile }) { return }
+        generation += 1
+        let current = generation
+        busy = true; known = false; error = ""; status = ""
+        pendingReconciliation = true
+        let requested = source
+        defer { if current == generation { busy = false } }
+        var ambiguous = false
+        var validReturn = false
+        writeInFlight = true
+        do {
+            if let profile {
+                let returned = try await client.setJellyfinLink(sourceId: requested, jellyfinUserId: profile)
+                validReturn = returned.sourceId == requested && returned.jellyfinUserId == profile
+            } else { validReturn = try await client.clearJellyfinLink(sourceId: requested) == requested }
+        } catch { ambiguous = true }
+        writeInFlight = false
+        // A failed write is ambiguous: only a fresh read may reconcile it.
+        guard current == generation, !Task.isCancelled else { return }
+        client.invalidateReads()
+        do {
+            let mapping = try await OperationBudget(.seconds(120)).run { try await client.getJellyfinLink(sourceId: requested) }
+            try Task.checkCancellation()
+            guard current == generation else { return }
+            link = mapping; known = true; selected = mapping?.jellyfinUserId ?? profiles.first?.id ?? ""
+            let confirmed = profile == nil ? mapping == nil : mapping?.sourceId == requested && mapping?.jellyfinUserId == profile
+            if confirmed && (ambiguous || validReturn) {
+                status = ambiguous ? "Server state checked: profile change is saved." : "Profile change saved on the server."
+            } else { error = "The requested change was not confirmed. Current server state is shown; choose a profile before trying again." }
+            pendingReconciliation = false; revision += 1
+        } catch {
+            if current == generation && !Task.isCancelled { self.error = "Profile change could not be confirmed. Retry reads server state only; the change will not be repeated." }
+        }
     }
 }
 
@@ -107,8 +354,6 @@ private struct StoredSettings: Codable {
     let fuzzy: Bool
     let semantic: Bool
     let titleOnly: Bool
-    let subtitle: String
-
     init(_ value: ClientSettings) {
         version = 1
         sourceID = value.scope?.sourceId ?? ""; libraryID = value.scope?.libraryId ?? ""
@@ -116,12 +361,11 @@ private struct StoredSettings: Codable {
         movie = value.types?.movie ?? false; series = value.types?.series ?? false; episode = value.types?.episode ?? false
         text = value.methods?.text ?? false; fuzzy = value.methods?.fuzzy ?? false
         semantic = value.methods?.semantic ?? false; titleOnly = value.methods?.titleOnly ?? false
-        subtitle = value.subtitlePreference
     }
 
     func validated() throws -> ClientSettings {
         guard version == 1, text || fuzzy, !titleOnly || !semantic else { throw CocoaError(.coderReadCorrupt) }
-        return try validateSettings(settings: ClientSettings(scope: SourceLibraryScope(sourceId: sourceID, libraryId: libraryID), source: source, types: SearchTypes(movie: movie, series: series, episode: episode), methods: SearchMethods(titleOnly: titleOnly, text: text, fuzzy: fuzzy, semantic: semantic), subtitlePreference: subtitle))
+        return try normalizeSavedSettings(settings: ClientSettings(scope: SourceLibraryScope(sourceId: sourceID, libraryId: libraryID), source: source, types: SearchTypes(movie: movie, series: series, episode: episode), methods: SearchMethods(titleOnly: titleOnly, text: text, fuzzy: fuzzy, semantic: semantic)))
     }
 }
 
@@ -183,6 +427,9 @@ private struct SettingsFile {
 @MainActor @Observable
 final class CatalogStore {
     let client: Client?
+    let profileClient: Client?
+    let jellyfinProfile = JellyfinProfileStore()
+    let artworkLoader = ArtworkLoader()
     let pageSize: UInt32
     var libraries: [MediaLibrary] = []
     var rows: [HomeRow] = []
@@ -193,18 +440,19 @@ final class CatalogStore {
     var detail: CatalogItem?
     var preferences: ClientSettings?
     var capabilities: SearchCapabilities?
-    var catalogInfo: CatalogInfo?
     var error = ""
     var loading = false
     var loadedArtwork: Set<String> = []
     var failedArtwork: Set<String> = []
     var artworkRevision = 0
-    var provenanceItems: [CatalogItem] = []
-    var provenanceArtwork: [Artwork] = []
-    var provenanceLoading = false
-    var provenanceError = ""
     var searchDegradation = ""
     var effectiveSearchMethods: SearchMethods?
+    var pageError = ""
+    var pageLoading = false
+    var itemPage = ItemPagination()
+    var searchPage = ItemPagination()
+    private var pageGeneration = 0
+    private var searchRequest: SearchRequest?
     var persistenceWarning = ""
     var scope = SourceLibraryScope(sourceId: "", libraryId: "")
     private var settingsFile: SettingsFile?
@@ -216,9 +464,9 @@ final class CatalogStore {
     }
     private var loadContext: LoadContext?
     private var librarySourceID: String?
-    private var provenanceGeneration = 0
     private var generation = 0
     private var searchGeneration = 0
+    private var homeProfileRevision = 0
     private var configurationError = ""
 
     private static func validateEndpoint(_ endpoint: String) throws {
@@ -246,8 +494,13 @@ final class CatalogStore {
         do {
             let endpoint = config("SCREENROOM_API_ENDPOINT", "http://127.0.0.1:50051")
             try Self.validateEndpoint(endpoint)
-            client = try Client(config: ClientConfig(endpoint: endpoint, userId: config("SCREENROOM_USER_ID", ""), timeoutMs: 5000))
-        } catch { client = nil; configurationError = error.localizedDescription; self.error = configurationError }
+            let context = ClientConfig(endpoint: endpoint, userId: config("SCREENROOM_USER_ID", ""), timeoutMs: 5000)
+            let reads = try Client(config: context)
+            // Core mutation settlement invalidates reads on its owning client.
+            let profiles = try Client(config: context)
+            client = reads
+            profileClient = profiles
+        } catch { client = nil; profileClient = nil; configurationError = error.localizedDescription; self.error = configurationError }
         preferences = defaultSettings()
         let namespace = config("SCREENROOM_E2E_SETTINGS_NAMESPACE", "default")
         do {
@@ -263,11 +516,18 @@ final class CatalogStore {
         scope = preferences?.scope ?? SourceLibraryScope(sourceId: "", libraryId: "")
     }
 
-    init(client: Client, pageSize: UInt32 = 100, operationTimeout: Duration = .seconds(120)) {
+    init(client: Client, profileClient: Client? = nil, pageSize: UInt32 = 100, operationTimeout: Duration = .seconds(120), settingsURL: URL? = nil, settingsWriter: ((Data, URL) throws -> Void)? = nil) {
+        precondition(profileClient == nil || profileClient !== client)
         self.client = client
+        self.profileClient = profileClient
         self.pageSize = pageSize
         self.operationTimeout = operationTimeout
         preferences = defaultSettings()
+        if let settingsURL {
+            do {
+                settingsFile = try SettingsFile(namespace: ProcessInfo.processInfo.environment["SCREENROOM_E2E_SETTINGS_NAMESPACE"] ?? "default", url: settingsURL, write: settingsWriter)
+            } catch { persistenceWarning = "Settings could not be loaded or saved: \(error.localizedDescription)" }
+        }
     }
 
     func libraryTitle(_ id: String) -> String { id == "all" || id.isEmpty ? "All libraries" : libraries.first { $0.id == id }?.title ?? "Library" }
@@ -297,6 +557,9 @@ final class CatalogStore {
     func load(screen: String, library: String, itemID: String?, forceBootstrap: Bool = false) async {
         let budget = OperationBudget(operationTimeout)
         generation += 1
+        searchGeneration += 1
+        pageGeneration += 1
+        pageLoading = false; pageError = ""; itemPage = ItemPagination(); searchPage = ItemPagination(); searchRequest = nil
         let current = generation
         let requestedScope = SourceLibraryScope(sourceId: scope.sourceId, libraryId: library == "all" ? "" : library)
         let context = LoadContext(screen: screen, scope: requestedScope, itemID: itemID)
@@ -330,28 +593,26 @@ final class CatalogStore {
                     let result = try await client.listCredits(itemId: itemID, page: page, scope: requestedScope)
                     return (result.credits, result.nextPageToken)
                 }
-                let descendants = try await collect(budget) { page in
-                    let result = try await client.listChildren(parentId: itemID, page: page, scope: requestedScope)
-                    return (result.items, result.nextPageToken)
-                }
-                let mapped = descendants.map(CatalogItem.init)
+                let descendants = try await budget.run { try await client.listChildren(parentId: itemID, page: Page(size: self.pageSize, token: ""), scope: requestedScope) }
                 try budget.check()
                 guard current == generation else { return }
+                let mapped = try itemPage.append(descendants.items, next: descendants.nextPageToken, to: [])
                 detail = CatalogItem(value: item); credits = people; children = mapped
             } else if screen == "Home" {
+                try budget.check()
+                guard current == generation else { return }
+                let profileRevision = jellyfinProfile.revision
+                if homeProfileRevision != profileRevision { client.invalidateReads() }
                 let values = try await budget.run { try await client.getHome(scope: requestedScope) }
                 try budget.check()
                 guard current == generation else { return }
                 rows = values
+                homeProfileRevision = profileRevision
             } else if screen == "Library" {
-                let values = try await collect(budget) { page in
-                    let result = try await client.listLibraryItems(scope: requestedScope, page: page)
-                    return (result.items, result.nextPageToken)
-                }
-                let mapped = values.map(CatalogItem.init)
+                let values = try await budget.run { try await client.listLibraryItems(scope: requestedScope, page: Page(size: self.pageSize, token: "")) }
                 try budget.check()
                 guard current == generation else { return }
-                items = mapped
+                items = try itemPage.append(values.items, next: values.nextPageToken, to: [])
             }
         } catch {
             if !Task.isCancelled && current == generation { self.error = "Unable to load: \(error.localizedDescription)" }
@@ -359,33 +620,11 @@ final class CatalogStore {
         if current == generation { loading = false }
     }
 
-    func loadProvenance() async {
-        let budget = OperationBudget(operationTimeout)
-        provenanceGeneration += 1
-        let current = provenanceGeneration
-        provenanceLoading = true; provenanceError = ""
-        provenanceItems = []; provenanceArtwork = []
-        defer { if current == provenanceGeneration { provenanceLoading = false } }
-        guard let client else { provenanceError = configurationError; return }
-        do {
-            let info = try await budget.run { try await client.getCatalogInfo() }
-            try Task.checkCancellation()
-            let artwork = try await collect(budget) { page in
-                let result = try await client.listArtwork(scope: SourceLibraryScope(sourceId: "", libraryId: ""), page: page)
-                return (result.artwork, result.nextPageToken)
-            }
-            try budget.check()
-            guard current == provenanceGeneration else { return }
-            catalogInfo = info
-            provenanceArtwork = artwork
-        } catch {
-            if !Task.isCancelled && current == provenanceGeneration { provenanceError = "Unable to load credits: \(error.localizedDescription)" }
-        }
-    }
-
     func search(query: String, library: String, options: SearchOptions) async {
         let budget = OperationBudget(operationTimeout)
         searchGeneration += 1
+        pageGeneration += 1
+        pageLoading = false; pageError = ""; searchPage = ItemPagination(); searchRequest = nil
         let current = searchGeneration
         results = []
         searchDegradation = ""; effectiveSearchMethods = nil
@@ -393,27 +632,69 @@ final class CatalogStore {
         let requestedScope = SourceLibraryScope(sourceId: scope.sourceId, libraryId: library == "all" ? "" : library)
         do {
             try await budget.run { try await Task.sleep(for: .milliseconds(350)) }
-            var degradation = ""
-            var effective: SearchMethods?
-            let values = try await collect(budget) { page in
-                let result = try await client.search(request: SearchRequest(query: query, libraryId: requestedScope.libraryId, types: options.coreTypes, methods: options.coreMethods, source: options.source, page: page, sourceId: requestedScope.sourceId))
-                if !result.degradationReason.isEmpty { degradation = result.degradationReason }
-                effective = result.effectiveMethods
-                return (result.items, result.nextPageToken)
-            }
-            let mapped = values.map(CatalogItem.init)
+            let request = SearchRequest(query: query, libraryId: requestedScope.libraryId, types: options.coreTypes, methods: options.coreMethods, source: options.source, page: Page(size: pageSize, token: ""), sourceId: requestedScope.sourceId)
+            let values = try await budget.run { try await client.search(request: request) }
             try budget.check()
             guard current == searchGeneration else { return }
-            results = mapped; searchDegradation = degradation; effectiveSearchMethods = effective; error = ""
+            results = try searchPage.append(values.items, next: values.nextPageToken, to: [])
+            searchRequest = request; searchDegradation = values.degradationReason; effectiveSearchMethods = values.effectiveMethods; error = ""
         } catch {
             if !Task.isCancelled && current == searchGeneration { self.error = "Search unavailable: \(error.localizedDescription)" }
         }
     }
 
-    func save(options: SearchOptions, library: String, subtitle: String) {
-        let value = ClientSettings(scope: SourceLibraryScope(sourceId: scope.sourceId, libraryId: library == "all" ? "" : library), source: options.source, types: options.coreTypes, methods: options.coreMethods, subtitlePreference: subtitle)
+    func loadMore(search: Bool = false) async {
+        guard !pageLoading, let client, !(search ? searchPage.token : itemPage.token).isEmpty else { return }
+        let current = pageGeneration
+        let context = loadContext
+        let requestedScope = scope
+        let token = search ? searchPage.token : itemPage.token
+        pageLoading = true; pageError = ""
+        let budget = OperationBudget(operationTimeout)
         do {
-            let saved = try StoredSettings(value).validated()
+            if search, var request = searchRequest {
+                request.page = Page(size: pageSize, token: token)
+                let sent = request
+                let page = try await budget.run { try await client.search(request: sent) }
+                try budget.check()
+                guard current == pageGeneration else { return }
+                results = try searchPage.append(page.items, next: page.nextPageToken, to: results)
+                if !page.degradationReason.isEmpty { searchDegradation = page.degradationReason }
+                effectiveSearchMethods = page.effectiveMethods
+            } else if let context {
+                let page = try await budget.run {
+                    if let id = context.itemID { return try await client.listChildren(parentId: id, page: Page(size: self.pageSize, token: token), scope: requestedScope) }
+                    return try await client.listLibraryItems(scope: requestedScope, page: Page(size: self.pageSize, token: token))
+                }
+                try budget.check()
+                guard current == pageGeneration else { return }
+                if context.itemID != nil { children = try itemPage.append(page.items, next: page.nextPageToken, to: children) }
+                else { items = try itemPage.append(page.items, next: page.nextPageToken, to: items) }
+            }
+        } catch {
+            if !Task.isCancelled && current == pageGeneration { pageError = "More items could not be loaded. Your current items are still available." }
+        }
+        if current == pageGeneration { pageLoading = false }
+    }
+
+    func retryHomeRows() async {
+        guard let client else { return }
+        let current = generation
+        let requestedScope = scope
+        client.invalidateReads()
+        do {
+            let values = try await OperationBudget(operationTimeout).run { try await client.getHome(scope: requestedScope) }
+            guard current == generation, !Task.isCancelled else { return }
+            rows = values
+        } catch {
+            // Keep existing rows, including their sanitized retry state.
+        }
+    }
+
+    func save(options: SearchOptions, library: String) {
+        let value = ClientSettings(scope: SourceLibraryScope(sourceId: scope.sourceId, libraryId: library == "all" ? "" : library), source: options.source, types: options.coreTypes, methods: options.coreMethods)
+        do {
+            let saved = try validateSettings(settings: value)
             preferences = saved
             retrySettingsSave()
         } catch { persistenceWarning = "Settings not saved: \(error.localizedDescription)" }

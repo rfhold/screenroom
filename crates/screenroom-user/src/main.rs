@@ -43,12 +43,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let telemetry = Telemetry::init("screenroom-user", TelemetryConfig::from_env()?)?;
     let result = async {
         let pool = screenroom_backend::db::connect_service(&screenroom_backend::config::ServiceDatabaseConfig::from_env()?).await?;
+        let connections=screenroom_backend::connections::ConnectionRepository::from_env(pool.clone())?;
         let repository = screenroom_user::repository::Repository::new(pool);
         repository.ready().await?;
-        let fixture_root = std::env::var("SCREENROOM_FIXTURE_ROOT").unwrap_or_else(|_| "fixtures/catalog".into());
         let service = screenroom_user::UserService {
             repository,
-            adapters: std::sync::Arc::new(screenroom_catalog_adapter::MockAdapters::load(fixture_root, Default::default())?),
+            connections,
         };
         let private_address = std::env::var("SCREENROOM_USER_PRIVATE_LISTEN").unwrap_or_else(|_| "127.0.0.1:50063".into()).parse::<std::net::SocketAddr>()?;
         let listener = tokio::net::TcpListener::bind(address).await?;
@@ -57,15 +57,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (stop, _) = tokio::sync::watch::channel(false);
         let mut public_stop = stop.subscribe();
         let mut private_stop = stop.subscribe();
+        let watched = tokio::spawn(service.clone().run_watched_sync(stop.subscribe()));
         let signal = async { shutdown_signal().await; let _ = stop.send(true); };
         let public = screenroom_user::serve(service.clone(), listener, async move { let _ = public_stop.changed().await; }, origins);
         let private = screenroom_user::serve_private(service, private_listener, async move { let _ = private_stop.changed().await; });
         tokio::pin!(public, private);
-        tokio::select! {
-            _ = signal => { tokio::try_join!(&mut public, &mut private)?; }
-            result = &mut public => { result?; let _ = stop.send(true); private.await?; }
-            result = &mut private => { result?; let _ = stop.send(true); public.await?; }
-        }
+        let serving = tokio::select! {
+            _ = signal => { tokio::try_join!(&mut public, &mut private).map(|_| ()) }
+            result = &mut public => { let _ = stop.send(true); let other = private.await; result.and(other) }
+            result = &mut private => { let _ = stop.send(true); let other = public.await; result.and(other) }
+        };
+        let _ = stop.send(true);
+        watched.await?;
+        serving?;
         Ok::<_, Box<dyn std::error::Error>>(())
     }.await;
     let shutdown = telemetry.shutdown();

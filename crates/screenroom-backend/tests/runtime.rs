@@ -10,6 +10,688 @@ use sqlx::{
     postgres::PgPoolOptions,
 };
 use std::borrow::Cow;
+mod support;
+use support::{CatalogRepository, IngestRepository, PolicyWrite};
+#[path = "support/image.rs"]
+mod neutral_image;
+
+#[tokio::test]
+#[ignore = "requires explicitly configured disposable PostgreSQL 18 + pgvector admin URL"]
+async fn postgres_item_context_scope_and_source_ownership() {
+    let url = std::env::var("SCREENROOM_TEST_DATABASE_URL").unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    let (name, pool) = database(&admin, &url).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let catalog_pool = runtime_pool(&pool, "screenroom_catalog").await;
+    let catalog = CatalogRepository::new(catalog_pool.clone());
+    let operator = IngestRepository::new(catalog_pool.clone());
+    let worker_pool = runtime_pool(&pool, "screenroom_worker").await;
+    let ingest = IngestRepository::new(worker_pool.clone());
+    let source = catalog
+        .configure_source("context", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    let library = catalog
+        .configure_library(source.id, "context-library", "context-library", "Context")
+        .await
+        .unwrap();
+    let policy = operator
+        .create_policy(
+            source.id,
+            &policy(json!({"library_ids":["context-library"]})),
+        )
+        .await
+        .unwrap();
+    operator.start_run(policy.id).await.unwrap();
+    let claim = ingest.claim("context", 60).await.unwrap().unwrap();
+    let mut season = item("context-season", "season", "context-library", "season");
+    season.parent_public_id = Some("context-series".into());
+    season.metadata["index"] = json!(2);
+    let mut episode = item("context-episode", "episode", "context-library", "episode");
+    episode.parent_public_id = Some("context-season".into());
+    episode.metadata["index"] = json!(5);
+    ingest
+        .commit_fixture_page(
+            &claim,
+            &page(
+                vec![
+                    item("context-series", "series", "context-library", "series"),
+                    season,
+                    episode,
+                ],
+                Completion::Complete {
+                    evidence: json!({}),
+                },
+                json!({}),
+            ),
+        )
+        .await
+        .unwrap();
+    let base = Scope {
+        source_keys: vec![source.source_key.clone()],
+        ..Scope::default()
+    };
+    let episode = catalog
+        .get(&base, "context-episode")
+        .await
+        .unwrap()
+        .unwrap();
+    let season = catalog.get(&base, "context-season").await.unwrap().unwrap();
+    let series = catalog.get(&base, "context-series").await.unwrap().unwrap();
+    let scope = Scope {
+        kinds: vec!["episode".into()],
+        ..base.clone()
+    };
+    let ids = [episode.source_item_id];
+    let contexts = catalog.item_contexts(&scope, &ids).await.unwrap();
+    assert_eq!(
+        contexts[&ids[0]].parent_metadata.as_ref().unwrap()["index"],
+        2
+    );
+    assert_eq!(
+        contexts[&ids[0]].grandparent_metadata.as_ref().unwrap()["title"],
+        "context-series"
+    );
+    assert!(catalog.item_contexts(&scope, &[]).await.unwrap().is_empty());
+    assert!(catalog.item_contexts(&scope, &[ids[0]; 201]).await.is_err());
+    for excluded in [
+        Scope {
+            source_keys: vec!["other".into()],
+            ..scope.clone()
+        },
+        Scope {
+            providers: vec!["unsupported".into()],
+            ..scope.clone()
+        },
+        Scope {
+            library_ids: vec!["other".into()],
+            ..scope.clone()
+        },
+        Scope {
+            kinds: vec!["movie".into()],
+            ..scope.clone()
+        },
+    ] {
+        assert!(
+            catalog
+                .item_contexts(&excluded, &ids)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let other = catalog
+        .configure_source("other-context", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalog.source_items(source_id,item_id,external_id,metadata,content_hash) VALUES($1,$2,'foreign-series','{\"title\":\"Wrong series\"}',decode(repeat('00',32),'hex'))")
+        .bind(other.id).bind(series.item_id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE catalog.source_items SET state='absent' WHERE id=$1")
+        .bind(series.source_item_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let across = Scope {
+        kinds: vec!["episode".into()],
+        ..Scope::default()
+    };
+    assert!(
+        catalog.item_contexts(&across, &ids).await.unwrap()[&ids[0]]
+            .grandparent_metadata
+            .is_none()
+    );
+    sqlx::query("UPDATE catalog.source_items SET state='enabled' WHERE id=$1")
+        .bind(series.source_item_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalog.library_items SET state='absent' WHERE source_item_id=$1")
+        .bind(season.source_item_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let scoped_library = Scope {
+        library_ids: vec![library.public_id],
+        ..scope.clone()
+    };
+    assert!(
+        catalog.item_contexts(&scoped_library, &ids).await.unwrap()[&ids[0]]
+            .parent_metadata
+            .is_none()
+    );
+    sqlx::query("UPDATE catalog.library_items SET state='enabled' WHERE source_item_id=$1")
+        .bind(season.source_item_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalog.sources SET state='disabled' WHERE id=$1")
+        .bind(source.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        catalog
+            .item_contexts(&scope, &ids)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    catalog_pool.close().await;
+    worker_pool.close().await;
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly configured disposable PostgreSQL 18 + pgvector admin URL"]
+async fn postgres_primary_artwork_kind_precedence() {
+    let url = std::env::var("SCREENROOM_TEST_DATABASE_URL").unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    let (name, pool) = database(&admin, &url).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let worker_pool = runtime_pool(&pool, "screenroom_worker").await;
+    let catalog_pool = runtime_pool(&pool, "screenroom_catalog").await;
+    let catalog = CatalogRepository::new(catalog_pool.clone());
+    let operator = IngestRepository::new(catalog_pool.clone());
+    let ingest = IngestRepository::new(worker_pool.clone());
+    let publisher = MediaRepository::new(worker_pool.clone());
+    let media = MediaRepository::new(catalog_pool.clone());
+    let source = catalog
+        .configure_source(
+            "art-ranking",
+            "jellyfin",
+            &json!({"branding_artwork_ids":["brand"]}),
+            &json!({}),
+        )
+        .await
+        .unwrap();
+    catalog
+        .configure_library(source.id, "art-library", "art-library", "Art")
+        .await
+        .unwrap();
+    let policy = operator
+        .create_policy(source.id, &policy(json!({"library_ids":["art-library"]})))
+        .await
+        .unwrap();
+    operator.start_run(policy.id).await.unwrap();
+    let claim = ingest.claim("art-ranking", 60).await.unwrap().unwrap();
+    let mut first = page(
+        ["movie", "series", "collection"]
+            .into_iter()
+            .map(|kind| item(kind, kind, "art-library", kind))
+            .collect(),
+        Completion::Complete {
+            evidence: json!({}),
+        },
+        json!({}),
+    );
+    let mut season = item("season", "season", "art-library", "season");
+    season.parent_public_id = Some("series".into());
+    let mut episode = item("episode", "episode", "art-library", "episode");
+    episode.parent_public_id = Some("season".into());
+    let mut direct = item("direct", "episode", "art-library", "direct");
+    direct.parent_public_id = Some("series".into());
+    first.items.extend([season, episode, direct]);
+    for (target, kind) in [("season", "poster"), ("episode", "thumbnail")] {
+        first
+            .artwork_inputs
+            .push(artwork_input(ArtworkReferenceInput {
+                source_artwork_id: format!("{target}-own"),
+                kind: kind.into(),
+                rights: json!({}),
+                item_external_id: Some(target.into()),
+                person_external_id: None,
+                role: "poster".into(),
+                ordinal: 0,
+            }));
+    }
+    for target in ["movie", "series", "collection"] {
+        for (key, kind) in [
+            ("a-logo", "logo"),
+            ("b-backdrop", "backdrop"),
+            ("c-thumbnail", "thumbnail"),
+            ("y-poster", "poster"),
+            ("z-poster", "poster"),
+        ] {
+            first
+                .artwork_inputs
+                .push(artwork_input(ArtworkReferenceInput {
+                    source_artwork_id: format!("{target}-{key}"),
+                    kind: kind.into(),
+                    rights: json!({}),
+                    item_external_id: Some(target.into()),
+                    person_external_id: None,
+                    role: "primary".into(),
+                    ordinal: 0,
+                }));
+        }
+    }
+    for key in ["brand", "person"] {
+        first
+            .artwork_inputs
+            .push(artwork_input(ArtworkReferenceInput {
+                source_artwork_id: key.into(),
+                kind: "logo".into(),
+                rights: json!({}),
+                item_external_id: None,
+                person_external_id: (key == "person").then(|| "person1".into()),
+                role: "primary".into(),
+                ordinal: 0,
+            }));
+    }
+    ingest.commit_fixture_page(&claim, &first).await.unwrap();
+    let object = verified_object(source.id).await;
+    for _ in 0..first.artwork_inputs.len() {
+        let claim = ingest.claim("art-publish", 60).await.unwrap().unwrap();
+        publisher.publish(&claim, &object).await.unwrap();
+    }
+    let scope = Scope {
+        source_keys: vec![source.source_key.clone()],
+        ..Scope::default()
+    };
+    let mut ids = Vec::new();
+    for kind in ["movie", "series", "collection"] {
+        ids.push(
+            catalog
+                .get(&scope, kind)
+                .await
+                .unwrap()
+                .unwrap()
+                .source_item_id,
+        );
+    }
+    let assert_kind = async |kind: &str| {
+        let selected = media.primary_item_artwork(&scope, &ids).await.unwrap();
+        assert_eq!(selected.len(), 3);
+        for art in selected.values() {
+            assert_eq!(art.kind, kind);
+            if kind == "poster" {
+                assert!(art.source_artwork_id.ends_with("y-poster"));
+            }
+        }
+    };
+    assert_kind("poster").await;
+    episode_card_artwork(&catalog, &media, &pool, &scope).await;
+    for excluded in [
+        Scope {
+            source_keys: vec!["other".into()],
+            ..Scope::default()
+        },
+        Scope {
+            library_ids: vec!["other".into()],
+            ..scope.clone()
+        },
+        Scope {
+            providers: vec!["unsupported".into()],
+            ..scope.clone()
+        },
+        Scope {
+            kinds: vec!["episode".into()],
+            ..scope.clone()
+        },
+    ] {
+        assert!(
+            media
+                .primary_item_artwork(&excluded, &ids)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for (kind, next) in [
+        ("poster", "thumbnail"),
+        ("thumbnail", "backdrop"),
+        ("backdrop", "logo"),
+    ] {
+        sqlx::query("UPDATE media.artwork SET state='absent' WHERE source_id=$1 AND kind=$2")
+            .bind(source.id)
+            .bind(kind)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_kind(next).await;
+    }
+    sqlx::query("UPDATE media.artwork SET state='enabled' WHERE source_id=$1")
+        .bind(source.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE media.artwork_generations SET state='pending' WHERE source_id=$1 AND kind='poster'",
+    )
+    .bind(source.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_kind("thumbnail").await;
+    sqlx::query("UPDATE media.artwork_generations SET state='published' WHERE source_id=$1")
+        .bind(source.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A published label alone cannot bypass required-variant completeness.
+    sqlx::query("DELETE FROM media.variants WHERE artwork_id IN (SELECT id FROM media.artwork WHERE source_id=$1 AND kind='poster')").bind(source.id).execute(&pool).await.unwrap();
+    assert_kind("thumbnail").await;
+    let person = catalog.credits(&scope, "movie", None, 100).await.unwrap()[0].person_id;
+    assert_eq!(
+        media.person_artwork(&scope, &[person]).await.unwrap()[&person].source_artwork_id,
+        "person"
+    );
+    assert_eq!(
+        media.branding(&scope, 8).await.unwrap()[0].source_artwork_id,
+        "brand"
+    );
+    sqlx::query("UPDATE catalog.sources SET state='disabled' WHERE id=$1")
+        .bind(source.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        media
+            .primary_item_artwork(&scope, &ids)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        media
+            .person_artwork(&scope, &[person])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(media.branding(&scope, 8).await.unwrap().is_empty());
+    worker_pool.close().await;
+    catalog_pool.close().await;
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+async fn episode_card_artwork(
+    catalog: &CatalogRepository,
+    media: &MediaRepository,
+    pool: &PgPool,
+    scope: &Scope,
+) {
+    let episode = catalog.get(scope, "episode").await.unwrap().unwrap();
+    let season = catalog.get(scope, "season").await.unwrap().unwrap();
+    let series = catalog.get(scope, "series").await.unwrap().unwrap();
+    let direct = catalog.get(scope, "direct").await.unwrap().unwrap();
+    let scope = Scope {
+        kinds: vec!["episode".into()],
+        ..scope.clone()
+    };
+    let ids = [episode.source_item_id, direct.source_item_id];
+    let selected = media.card_item_artwork(&scope, &ids, None).await.unwrap();
+    assert_eq!(selected[&ids[0]].source_artwork_id, "season-own");
+    assert_eq!(selected[&ids[1]].source_artwork_id, "series-y-poster");
+    let own = media
+        .card_item_artwork(&scope, &ids, Some(season.item_id))
+        .await
+        .unwrap();
+    assert_eq!(own[&ids[0]].source_artwork_id, "episode-own");
+    assert_eq!(own[&ids[1]].source_artwork_id, "series-y-poster");
+    assert_eq!(
+        media
+            .card_item_artwork(&scope, &ids, Some(series.item_id))
+            .await
+            .unwrap()[&ids[0]]
+            .source_artwork_id,
+        "season-own"
+    );
+    assert!(
+        media
+            .card_item_artwork(&scope, &[], None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        media
+            .card_item_artwork(&scope, &[ids[0]; 201], None)
+            .await
+            .is_err()
+    );
+    for excluded in [
+        Scope {
+            source_keys: vec!["other".into()],
+            ..scope.clone()
+        },
+        Scope {
+            library_ids: vec!["other".into()],
+            ..scope.clone()
+        },
+        Scope {
+            providers: vec!["unsupported".into()],
+            ..scope.clone()
+        },
+        Scope {
+            kinds: vec!["movie".into()],
+            ..scope.clone()
+        },
+    ] {
+        assert!(
+            media
+                .card_item_artwork(&excluded, &ids, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let other_library = catalog
+        .configure_library(
+            episode.source_id,
+            "ancestor-only",
+            "ancestor-only",
+            "Ancestors",
+        )
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO catalog.library_items(library_id,source_item_id,source_id,last_seen_run_id) SELECT $1,source_item_id,source_id,last_seen_run_id FROM catalog.library_items WHERE source_item_id=$2")
+        .bind(other_library.id).bind(season.source_item_id).execute(pool).await.unwrap();
+    sqlx::query("UPDATE catalog.library_items SET state='absent' WHERE source_item_id=$1 AND library_id<>$2")
+        .bind(season.source_item_id).bind(other_library.id).execute(pool).await.unwrap();
+    let library_scope = Scope {
+        library_ids: vec!["art-library".into()],
+        ..scope.clone()
+    };
+    assert_eq!(
+        media
+            .card_item_artwork(&library_scope, &ids, None)
+            .await
+            .unwrap()[&ids[0]]
+            .source_artwork_id,
+        "series-y-poster"
+    );
+    assert_eq!(
+        media.card_item_artwork(&scope, &ids, None).await.unwrap()[&ids[0]].source_artwork_id,
+        "season-own"
+    );
+    sqlx::query("UPDATE catalog.library_items SET state='enabled' WHERE source_item_id=$1")
+        .bind(season.source_item_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE catalog.libraries SET state='disabled' WHERE id=$1")
+        .bind(other_library.id)
+        .execute(pool)
+        .await
+        .unwrap();
+    // Ineligible ancestors and non-posters must not mask the series poster.
+    for statement in [
+        "UPDATE catalog.source_items SET state='absent' WHERE id=$1",
+        "UPDATE catalog.library_items SET state='absent' WHERE source_item_id=$1",
+    ] {
+        sqlx::query(statement)
+            .bind(season.source_item_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            media.card_item_artwork(&scope, &ids, None).await.unwrap()[&ids[0]].source_artwork_id,
+            "series-y-poster"
+        );
+        sqlx::query("UPDATE catalog.source_items SET state='enabled' WHERE id=$1")
+            .bind(season.source_item_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE catalog.library_items SET state='enabled' WHERE source_item_id=$1")
+            .bind(season.source_item_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    for statement in [
+        "UPDATE media.artwork SET state='absent' WHERE id=$1",
+        "UPDATE media.artwork SET kind='thumbnail' WHERE id=$1",
+        "UPDATE media.artwork_generations SET state='pending' WHERE artwork_id=$1",
+        "UPDATE media.artwork_generations SET manifest='{\"version\":1,\"variants\":[{\"variant\":\"native\",\"sha256\":[]}]}' WHERE artwork_id=$1",
+        "UPDATE media.objects SET state='absent' WHERE id IN (SELECT object_id FROM media.variants WHERE artwork_id=$1)",
+    ] {
+        let art = selected[&ids[0]].id;
+        sqlx::query(statement)
+            .bind(art)
+            .execute(pool)
+            .await
+            .unwrap();
+        // Objects can be shared across artworks, so readiness uses a separate assertion below.
+        if !statement.contains("media.objects") {
+            assert_eq!(
+                media.card_item_artwork(&scope, &ids, None).await.unwrap()[&ids[0]]
+                    .source_artwork_id,
+                "series-y-poster"
+            );
+        } else {
+            assert!(
+                media
+                    .card_item_artwork(&scope, &ids, None)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        sqlx::query("UPDATE media.artwork SET kind='poster',state='enabled' WHERE id=$1")
+            .bind(art)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media.artwork_generations SET state='published' WHERE artwork_id=$1")
+            .bind(art)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE media.artwork_generations SET manifest=(SELECT g.manifest FROM media.artwork_generations g JOIN media.artwork a ON a.id=g.artwork_id WHERE a.source_artwork_id='series-y-poster' AND a.source_id=$2) WHERE artwork_id=$1")
+            .bind(art).bind(episode.source_id).execute(pool).await.unwrap();
+        sqlx::query("UPDATE media.objects SET state='ready' WHERE id IN (SELECT object_id FROM media.variants WHERE artwork_id=$1)").bind(art).execute(pool).await.unwrap();
+    }
+    sqlx::query("UPDATE media.artwork SET state='absent' WHERE source_id=$1 AND kind='poster'")
+        .bind(episode.source_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        media
+            .card_item_artwork(&scope, &ids, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        media
+            .card_item_artwork(&scope, &ids, Some(season.item_id))
+            .await
+            .unwrap()[&ids[0]]
+            .source_artwork_id,
+        "episode-own"
+    );
+    sqlx::query("UPDATE media.artwork SET state='enabled' WHERE source_id=$1")
+        .bind(episode.source_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    let mirror = catalog
+        .configure_source("ancestor-mirror", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    catalog
+        .configure_library(mirror.id, "art-library", "art-library", "Mirror")
+        .await
+        .unwrap();
+    let ingest = IngestRepository::new(pool.clone());
+    let policy = ingest
+        .create_policy(mirror.id, &policy(json!({"library_ids":["art-library"]})))
+        .await
+        .unwrap();
+    ingest.start_run(policy.id).await.unwrap();
+    let claim = ingest.claim("mirror", 60).await.unwrap().unwrap();
+    let mut mirror_season = item("season", "season", "art-library", "mirror season");
+    mirror_season.parent_public_id = Some("series".into());
+    let mut first = page(
+        vec![
+            item("series", "series", "art-library", "mirror series"),
+            mirror_season,
+        ],
+        Completion::Complete {
+            evidence: json!({}),
+        },
+        json!({}),
+    );
+    first
+        .artwork_inputs
+        .push(artwork_input(ArtworkReferenceInput {
+            source_artwork_id: "mirror-season".into(),
+            kind: "poster".into(),
+            rights: json!({}),
+            item_external_id: Some("season".into()),
+            person_external_id: None,
+            role: "primary".into(),
+            ordinal: 0,
+        }));
+    ingest.commit_fixture_page(&claim, &first).await.unwrap();
+    let claim = ingest.claim("mirror-art", 60).await.unwrap().unwrap();
+    MediaRepository::new(pool.clone())
+        .publish(&claim, &verified_object(mirror.id).await)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE media.artwork SET state='absent' WHERE source_id=$1 AND kind='poster'")
+        .bind(episode.source_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let across_sources = Scope {
+        kinds: vec!["episode".into()],
+        ..Scope::default()
+    };
+    assert!(
+        media
+            .card_item_artwork(&across_sources, &ids, None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    sqlx::query("UPDATE media.artwork SET state='enabled' WHERE source_id=$1")
+        .bind(episode.source_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
 
 async fn database(admin: &PgPool, url: &str) -> (String, PgPool) {
     let name = format!("screenroom_p_{}", Uuid::new_v4().simple());
@@ -27,6 +709,10 @@ async fn database(admin: &PgPool, url: &str) -> (String, PgPool) {
     (name, pool)
 }
 async fn runtime_pool(pool: &PgPool, role: &'static str) -> PgPool {
+    SearchRepository::new(pool.clone())
+        .register_model("test-manual", "1", 1024)
+        .await
+        .unwrap();
     PgPoolOptions::new()
         .max_connections(5)
         .after_connect(move |connection, _| {
@@ -43,11 +729,7 @@ async fn runtime_pool(pool: &PgPool, role: &'static str) -> PgPool {
 }
 
 async fn verified_object(source: Uuid) -> screenroom_backend::storage::VerifiedObject {
-    let bytes = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/catalog/artwork/tmdb.png"),
-    )
-    .unwrap();
+    let bytes = neutral_image::png([64, 96, 128]);
     verified_bytes(source, bytes).await
 }
 async fn verified_bytes(
@@ -148,7 +830,7 @@ fn item(id: &str, kind: &str, library: &str, text: &str) -> ItemWrite {
         parent_public_id: None,
         external_id: id.into(),
         source_revision: Some("r1".into()),
-        metadata: json!({"title":id,"provider_references":[{"provider":"tmdb","status":"available","url":"https://example.com/canonical"}]}),
+        metadata: json!({"title":id,"provider_references":[{"provider":"jellyfin","status":"available","url":"https://example.com/canonical"}]}),
         provenance: json!({"license":"synthetic-test"}),
         content_hash: input_hash(text).to_vec(),
         library_external_ids: vec![library.into()],
@@ -175,7 +857,6 @@ fn page(items: Vec<ItemWrite>, completion: Completion, cursor: Value) -> PageCom
     PageCommit {
         libraries: vec![],
         items,
-        feeds: vec![],
         artwork_inputs: vec![],
         artwork_omissions: vec![],
         followups: vec![],
@@ -184,17 +865,13 @@ fn page(items: Vec<ItemWrite>, completion: Completion, cursor: Value) -> PageCom
             cursor,
             watermark: None,
         },
-        requests: 1,
+        requests: 0,
         completion,
     }
 }
 
 fn artwork_input(reference: ArtworkReferenceInput) -> ArtworkInputWrite {
-    let bytes = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/catalog/artwork/tmdb.png"),
-    )
-    .unwrap();
+    let bytes = neutral_image::png([64, 96, 128]);
     ArtworkInputWrite {
         reference,
         manifest: ArtworkInputManifest {
@@ -205,6 +882,462 @@ fn artwork_input(reference: ArtworkReferenceInput) -> ArtworkInputWrite {
             }],
         },
     }
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly configured disposable PostgreSQL 18 + pgvector admin URL"]
+async fn postgres_request_reservation_contract() {
+    let url = std::env::var("SCREENROOM_TEST_DATABASE_URL").unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    let (name, pool) = database(&admin, &url).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let worker_pool = runtime_pool(&pool, "screenroom_worker").await;
+    let catalog_pool = runtime_pool(&pool, "screenroom_catalog").await;
+    let catalog = CatalogRepository::new(catalog_pool.clone());
+    let operator = IngestRepository::new(catalog_pool.clone());
+    let ingest = IngestRepository::new(worker_pool.clone());
+    let source = catalog
+        .configure_source("reserved", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    let mut write = policy(json!({"library_ids":["sample"]}));
+    catalog
+        .configure_library(source.id, "sample", "sample", "Sample")
+        .await
+        .unwrap();
+    write.max_requests = 8;
+    let policy = operator.create_policy(source.id, &write).await.unwrap();
+    let run = operator.start_run(policy.id).await.unwrap();
+    let first = ingest.claim("reserve-first", 60).await.unwrap().unwrap();
+    let mut outcomes = Vec::new();
+    for _ in 0..2 {
+        let receipt = ingest
+            .reserve_work_request(&first, OperationClass::Page)
+            .await
+            .unwrap();
+        outcomes.push(RequestOutcomeWrite {
+            receipt_id: receipt.id,
+            outcome: RequestOutcome::Success,
+            error_class: None,
+        });
+    }
+    let mut rejected = page(vec![], Completion::Continue, json!({}));
+    rejected.requests = -1;
+    assert!(
+        ingest
+            .commit_traversal_page(&first, &rejected, &TraversalWrites::default())
+            .await
+            .is_err()
+    );
+    let charged = ingest.run(run.id).await.unwrap().unwrap();
+    assert_eq!((charged.requests, charged.budget_requests), (2, 0));
+    let mut reserved_page = page(vec![], Completion::Pause, json!({"next":1}));
+    reserved_page.requests = 0;
+    ingest
+        .commit_traversal_page(
+            &first,
+            &reserved_page,
+            &TraversalWrites {
+                outcomes,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().requests, 2);
+    operator.resume(run.id).await.unwrap();
+    let second = ingest.claim("reserve-second", 60).await.unwrap().unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&first, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().requests, 2);
+    ingest
+        .reserve_work_request(&second, OperationClass::Page)
+        .await
+        .unwrap();
+    ingest.retry(&second, "test_retry", 0).await.unwrap();
+    sqlx::query("UPDATE queue.jobs SET available_at=now() WHERE id=$1")
+        .bind(second.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&second, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    let third = ingest.claim("reserve-third", 60).await.unwrap().unwrap();
+    assert!(third.fence > second.fence);
+    sqlx::query(
+        "UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+    )
+    .bind(third.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&third, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    let fourth = ingest.claim("reserve-fourth", 60).await.unwrap().unwrap();
+    catalog.set_source_state(source.id, false).await.unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&fourth, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    catalog.set_source_state(source.id, true).await.unwrap();
+    sqlx::query("UPDATE ingest.policies SET enabled=false WHERE id=$1")
+        .bind(policy.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&fourth, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE ingest.policies SET enabled=true,version=version+1 WHERE id=$1")
+        .bind(policy.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&fourth, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE ingest.policies SET version=version-1 WHERE id=$1")
+        .bind(policy.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A committed work unit resets only the per-job window, never lifetime usage.
+    ingest
+        .commit_fixture_page(
+            &fourth,
+            &page(vec![], Completion::Continue, json!({"next":2})),
+        )
+        .await
+        .unwrap();
+    let fifth = ingest.claim("reserve-fifth", 60).await.unwrap().unwrap();
+    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().requests, 4);
+    for _ in 0..3 {
+        ingest
+            .reserve_work_request(&fifth, OperationClass::Page)
+            .await
+            .unwrap();
+    }
+    let (a, b) = tokio::join!(
+        ingest.reserve_work_request(&fifth, OperationClass::Page),
+        ingest.reserve_work_request(&fifth, OperationClass::Page)
+    );
+    assert_ne!(a.is_ok(), b.is_ok());
+    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().requests, 8);
+    assert!(
+        ingest
+            .reserve_work_request(&fifth, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    let mut final_page = page(
+        vec![],
+        Completion::Complete {
+            evidence: json!({}),
+        },
+        json!({}),
+    );
+    final_page.requests = 0;
+    final_page
+        .artwork_inputs
+        .push(artwork_input(ArtworkReferenceInput {
+            source_artwork_id: "reserved-logo".into(),
+            kind: "logo".into(),
+            rights: json!({"license":"test"}),
+            item_external_id: None,
+            person_external_id: None,
+            role: "poster".into(),
+            ordinal: 0,
+        }));
+    ingest
+        .commit_traversal_page(&fifth, &final_page, &TraversalWrites::default())
+        .await
+        .unwrap();
+    let art = ingest.claim("reserve-artwork", 60).await.unwrap().unwrap();
+    assert_eq!(art.kind, "artwork");
+    assert!(
+        ingest
+            .reserve_work_request(&art, OperationClass::Artwork)
+            .await
+            .is_err()
+    );
+    assert_eq!(ingest.run(run.id).await.unwrap().unwrap().requests, 8);
+    ingest.complete_job(&art).await.unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&art, OperationClass::Artwork)
+            .await
+            .is_err()
+    );
+    let persisted = IngestRepository::new(worker_pool.clone())
+        .run(run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((persisted.requests, persisted.budget_requests), (8, 0));
+    // Cancellation must not refund a reservation.
+    let cancelled = operator.start_run(policy.id).await.unwrap();
+    let claim = ingest.claim("reserve-cancel", 60).await.unwrap().unwrap();
+    ingest
+        .reserve_work_request(&claim, OperationClass::Page)
+        .await
+        .unwrap();
+    operator.cancel_run(cancelled.id).await.unwrap();
+    assert!(
+        ingest
+            .reserve_work_request(&claim, OperationClass::Page)
+            .await
+            .is_err()
+    );
+    assert_eq!(ingest.run(cancelled.id).await.unwrap().unwrap().requests, 1);
+    worker_pool.close().await;
+    catalog_pool.close().await;
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly configured disposable PostgreSQL 18 + pgvector admin URL"]
+async fn postgres_canonical_manual_scheduling_and_non_authoritative_completion() {
+    let url = std::env::var("SCREENROOM_TEST_DATABASE_URL").unwrap();
+    let admin = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .unwrap();
+    let (name, pool) = database(&admin, &url).await;
+    MIGRATOR.run(&pool).await.unwrap();
+    let worker_pool = runtime_pool(&pool, "screenroom_worker").await;
+    let catalog_pool = runtime_pool(&pool, "screenroom_catalog").await;
+    let catalog = CatalogRepository::new(catalog_pool.clone());
+    let operator = IngestRepository::new(catalog_pool.clone());
+    let ingest = IngestRepository::new(worker_pool.clone());
+    let source = catalog
+        .configure_source("one-shot", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    catalog
+        .configure_library(source.id, "sample", "sample", "Sample")
+        .await
+        .unwrap();
+    let write = policy(json!({"library_ids":["sample"]}));
+    let p = operator.create_policy(source.id, &write).await.unwrap();
+    assert!(!p.automatic_runs);
+    assert!(ingest.due_policies(100).await.unwrap().is_empty());
+    let seed = operator.start_run(p.id).await.unwrap();
+    assert!(ingest.due_policies(100).await.unwrap().is_empty());
+    let claim = ingest.claim("seed", 60).await.unwrap().unwrap();
+    ingest
+        .commit_fixture_page(
+            &claim,
+            &page(
+                vec![item("unseen", "movie", "sample", "old")],
+                Completion::Complete {
+                    evidence: json!({}),
+                },
+                json!({}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest.run(seed.id).await.unwrap().unwrap().state,
+        "complete"
+    );
+    let finite: bool = sqlx::query_scalar("SELECT isfinite(next_due_at) AND next_due_at>now() AND NOT automatic_runs FROM ingest.policies WHERE id=$1").bind(p.id).fetch_one(&pool).await.unwrap();
+    assert!(finite);
+    let run = operator.start_run(p.id).await.unwrap();
+    let claim = ingest.claim("sample", 60).await.unwrap().unwrap();
+    let mut first = page(
+        vec![item("sample-item", "movie", "sample", "new")],
+        Completion::Continue,
+        json!({"next":1}),
+    );
+    first.followups.push(Followup {
+        kind: JobKind::Embedding,
+        dedupe_key: "sample-embedding".into(),
+        input: json!({"external_id":"sample-item"}),
+    });
+    first
+        .artwork_inputs
+        .push(artwork_input(ArtworkReferenceInput {
+            source_artwork_id: "sample-logo".into(),
+            kind: "logo".into(),
+            rights: json!({"license":"synthetic-test"}),
+            item_external_id: Some("sample-item".into()),
+            person_external_id: None,
+            role: "poster".into(),
+            ordinal: 0,
+        }));
+    ingest.commit_fixture_page(&claim, &first).await.unwrap();
+    // Keep the ingest job first, leaving both followup kinds pending across pause/resume.
+    sqlx::query("UPDATE queue.jobs SET available_at=now()+interval '1 hour' WHERE scope_id=$1 AND kind<>'ingest'").bind(run.id).execute(&pool).await.unwrap();
+    let claim = ingest.claim("pause", 60).await.unwrap().unwrap();
+    ingest
+        .commit_fixture_page(&claim, &page(vec![], Completion::Pause, json!({"next":2})))
+        .await
+        .unwrap();
+    assert_eq!(operator.start_run(p.id).await.unwrap().id, run.id);
+    assert!(ingest.due_policies(100).await.unwrap().is_empty());
+    operator.resume(run.id).await.unwrap();
+    let claim = ingest.claim("finish", 60).await.unwrap().unwrap();
+    sqlx::query("UPDATE queue.jobs SET available_at=now() WHERE scope_id=$1 AND kind<>'ingest'")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let leased = ingest.claim("leased-followup", 60).await.unwrap().unwrap();
+    assert_ne!(leased.kind, "ingest");
+    let final_page = page(
+        vec![],
+        Completion::Complete {
+            evidence: json!({"non_authoritative":true,"sample_items":1}),
+        },
+        json!({"done":true}),
+    );
+    let mut stale = claim.clone();
+    stale.fence += 1;
+    assert!(
+        ingest
+            .commit_fixture_page(&stale, &final_page)
+            .await
+            .is_err()
+    );
+    assert!(!ingest.policy(p.id).await.unwrap().unwrap().automatic_runs);
+    ingest
+        .commit_fixture_page(&claim, &final_page)
+        .await
+        .unwrap();
+    assert!(
+        ingest
+            .commit_fixture_page(&claim, &final_page)
+            .await
+            .is_err()
+    );
+    let completed = ingest.run(run.id).await.unwrap().unwrap();
+    assert_eq!(completed.state, "complete");
+    assert_eq!(
+        completed.coverage,
+        json!({"non_authoritative":true,"sample_items":1})
+    );
+    assert!(
+        catalog
+            .get(&Scope::default(), "unseen")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("UPDATE ingest.policies SET next_due_at=now()-interval '100 years' WHERE id=$1")
+        .bind(p.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(ingest.due_policies(100).await.unwrap().is_empty());
+    let search = SearchRepository::new(worker_pool.clone());
+    let model = search
+        .register_model("one-shot-model", "r1", 1024)
+        .await
+        .unwrap();
+    let media = MediaRepository::new(worker_pool.clone());
+    let verified = verified_object(source.id).await;
+    let pending = ingest.claim("pending-followup", 60).await.unwrap().unwrap();
+    assert_ne!(pending.kind, leased.kind);
+    for followup in [leased, pending] {
+        let mut stale = followup.clone();
+        stale.fence += 1;
+        assert!(ingest.complete_job(&stale).await.is_err());
+        if followup.kind == "artwork" {
+            media.publish(&followup, &verified).await.unwrap();
+        } else {
+            let item = catalog
+                .get(&Scope::default(), "sample-item")
+                .await
+                .unwrap()
+                .unwrap();
+            let document = search
+                .document_for_source_item(item.source_item_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut vector = vec![0.0; 1024];
+            vector[0] = 1.0;
+            search
+                .commit_embedding(
+                    &followup,
+                    document.id,
+                    model.id,
+                    &model.revision,
+                    &document.content_hash,
+                    &vector,
+                )
+                .await
+                .unwrap();
+        }
+    }
+    let (updated, _) = operator.update_policy(p.id, &write, false).await.unwrap();
+    assert!(!updated.automatic_runs && updated.enabled);
+    let explicit = operator.start_run(p.id).await.unwrap();
+    let claim = ingest.claim("explicit", 60).await.unwrap().unwrap();
+    ingest
+        .commit_fixture_page(
+            &claim,
+            &page(
+                vec![],
+                Completion::Complete {
+                    evidence: json!({}),
+                },
+                json!({}),
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        ingest.run(explicit.id).await.unwrap().unwrap().state,
+        "complete"
+    );
+    worker_pool.close().await;
+    let restarted_pool = runtime_pool(&pool, "screenroom_worker").await;
+    let restarted = IngestRepository::new(restarted_pool.clone());
+    let persisted = restarted.policy(p.id).await.unwrap().unwrap();
+    assert!(persisted.enabled);
+    assert!(!persisted.automatic_runs);
+    assert!(restarted.due_policies(100).await.unwrap().is_empty());
+    assert!(!restarted.policies(None).await.unwrap()[0].automatic_runs);
+    restarted_pool.close().await;
+    catalog_pool.close().await;
+    pool.close().await;
+    sqlx::query(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }
 
 #[tokio::test]
@@ -225,7 +1358,7 @@ async fn postgres_runtime_contract() {
             .fetch_one(&pool)
             .await
             .unwrap(),
-        5
+        MIGRATOR.iter().count() as i64
     );
     let version: String = sqlx::query_scalar("SHOW server_version")
         .fetch_one(&pool)
@@ -316,9 +1449,18 @@ async fn postgres_runtime_contract() {
                 .bind(art).bind(old_source).bind(variant).bind(if variant == "native" { legacy_native } else { legacy_object }).execute(&upgrade).await.unwrap();
         }
     }
-    sqlx::query("INSERT INTO ingest.jobs(run_id,kind,dedupe_key,input) VALUES($1,'artwork','legacy-unbound-art','{}')")
+    let old_jobs: String=sqlx::query_scalar("SELECT oid::regclass::text FROM pg_class WHERE relname='jobs' AND relnamespace=(SELECT oid FROM pg_namespace WHERE nspname='ingest')").fetch_one(&upgrade).await.unwrap();
+    sqlx::query(&format!("INSERT INTO {old_jobs}(run_id,kind,dedupe_key,input) VALUES($1,'artwork','legacy-unbound-art','{{}}')"))
         .bind(old_run).execute(&upgrade).await.unwrap();
     MIGRATOR.run(&upgrade).await.unwrap();
+    assert!(
+        IngestRepository::new(upgrade.clone())
+            .policy(old_policy)
+            .await
+            .unwrap()
+            .unwrap()
+            .automatic_runs
+    );
     let legacy_media = MediaRepository::new(upgrade.clone());
     assert_eq!(
         legacy_media
@@ -380,7 +1522,7 @@ async fn postgres_runtime_contract() {
     }
     assert_eq!(
         sqlx::query_scalar::<_, String>(
-            "SELECT state FROM ingest.jobs WHERE dedupe_key='legacy-unbound-art'"
+            "SELECT state FROM queue.jobs WHERE dedupe_key='legacy-unbound-art'"
         )
         .fetch_one(&upgrade)
         .await
@@ -439,10 +1581,10 @@ async fn postgres_runtime_contract() {
             "SELECT * FROM catalog.sources"
         };
         sqlx::query(allowed).execute(&mut *tx).await.unwrap();
-        let forbidden = if role == "screenroom_user" {
-            "SELECT * FROM catalog.sources"
-        } else {
-            "SELECT * FROM identity.users"
+        let forbidden = match role {
+            "screenroom_user" => "SELECT * FROM catalog.source_items",
+            "screenroom_catalog" => "SELECT * FROM identity.jellyfin_user_links",
+            _ => "SELECT * FROM identity.users",
         };
         assert!(sqlx::query(forbidden).execute(&mut *tx).await.is_err());
         tx.rollback().await.unwrap();
@@ -496,7 +1638,7 @@ async fn postgres_runtime_contract() {
             .is_err()
     );
     let mut locked = pool.begin().await.unwrap();
-    sqlx::query("SELECT id FROM ingest.jobs WHERE run_id=$1 FOR UPDATE")
+    sqlx::query("SELECT id FROM queue.jobs WHERE scope_id=$1 FOR UPDATE")
         .bind(run.id)
         .execute(&mut *locked)
         .await
@@ -524,7 +1666,7 @@ async fn postgres_runtime_contract() {
         Completion::Continue,
         json!({"next":"bad"}),
     );
-    assert!(ingest.commit_page(&c, &invalid).await.is_err());
+    assert!(ingest.commit_fixture_page(&c, &invalid).await.is_err());
     assert!(
         catalog
             .get(&Scope::default(), "beta")
@@ -540,7 +1682,7 @@ async fn postgres_runtime_contract() {
             .is_none()
     );
     sqlx::query(
-        "UPDATE ingest.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+        "UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
     )
     .bind(c.id)
     .execute(&pool)
@@ -551,7 +1693,7 @@ async fn postgres_runtime_contract() {
     assert!(ingest.renew(&c, 60).await.is_err());
     assert!(
         ingest
-            .commit_page(
+            .commit_fixture_page(
                 &c,
                 &page(vec![alpha.clone()], Completion::Continue, json!({"next":1}))
             )
@@ -560,9 +1702,8 @@ async fn postgres_runtime_contract() {
     );
     let mut first_page = page(
         vec![alpha.clone(), beta.clone()],
-        Completion::SelectedLibrariesComplete {
-            library_ids: vec!["movies".into(), "tv".into()],
-            evidence: json!({"adapter":"selected_libraries_complete"}),
+        Completion::Complete {
+            evidence: json!({"authoritative":false}),
         },
         json!({"done":true}),
     );
@@ -570,7 +1711,7 @@ async fn postgres_runtime_contract() {
         first_page.followups.push(Followup {
             kind: JobKind::Embedding,
             dedupe_key: format!("embed:{id}"),
-            input: json!({"public_id":id}),
+            input: json!({"external_id":id,"public_id":id}),
         });
     }
     let artwork = ArtworkReferenceInput {
@@ -583,7 +1724,10 @@ async fn postgres_runtime_contract() {
         ordinal: 0,
     };
     first_page.artwork_inputs.push(artwork_input(artwork));
-    ingest.commit_page(&newer, &first_page).await.unwrap();
+    ingest
+        .commit_fixture_page(&newer, &first_page)
+        .await
+        .unwrap();
     let all = catalog.list(&Scope::default(), None, 100).await.unwrap();
     assert_eq!(all.len(), 2);
     assert_eq!(
@@ -829,9 +1973,12 @@ async fn postgres_runtime_contract() {
     refresh_page.followups.push(Followup {
         kind: JobKind::Embedding,
         dedupe_key: "embed:alpha:changed".into(),
-        input: json!({}),
+        input: json!({"external_id":"alpha"}),
     });
-    ingest.commit_page(&refresh, &refresh_page).await.unwrap();
+    ingest
+        .commit_fixture_page(&refresh, &refresh_page)
+        .await
+        .unwrap();
     assert_eq!(
         search
             .vector(&Scope::default(), &unit, model.id, 100)
@@ -903,7 +2050,7 @@ async fn postgres_runtime_contract() {
     );
     catalog.set_source_state(source.id, true).await.unwrap();
 
-    // A second policy traversal removes alpha only inside Movies, leaving TV untouched.
+    // Completion cannot infer absence in a narrowed traversal.
     let (_, run2) = ingest
         .update_policy(
             p.id,
@@ -916,12 +2063,11 @@ async fn postgres_runtime_contract() {
     let c = ingest.claim("reconcile", 60).await.unwrap().unwrap();
     assert!(
         ingest
-            .commit_page(
+            .commit_fixture_page(
                 &c,
                 &page(
-                    vec![],
-                    Completion::SelectedLibrariesComplete {
-                        library_ids: vec!["tv".into()],
+                    vec![beta.clone()],
+                    Completion::Complete {
                         evidence: json!({})
                     },
                     json!({"done":true})
@@ -931,12 +2077,11 @@ async fn postgres_runtime_contract() {
             .is_err()
     );
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
                 vec![],
-                Completion::SelectedLibrariesComplete {
-                    library_ids: vec!["movies".into()],
+                Completion::Complete {
                     evidence: json!({}),
                 },
                 json!({"done":true}),
@@ -949,7 +2094,7 @@ async fn postgres_runtime_contract() {
             .get(&Scope::default(), "alpha")
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
     assert!(
         catalog
@@ -963,85 +2108,10 @@ async fn postgres_runtime_contract() {
         "complete"
     );
 
-    // A bounded TMDB feed leaves title identity intact when its membership departs.
-    let tmdb = catalog
-        .configure_source("synthetic-tmdb", "tmdb", &json!({}), &json!({}))
-        .await
-        .unwrap();
-    let tp = ingest
-        .create_policy(
-            tmdb.id,
-            &policy(json!({"kind":"feeds","feeds":["popular"]})),
-        )
-        .await
-        .unwrap();
-    ingest.start_run(tp.id).await.unwrap();
-    let c = ingest.claim("tmdb", 60).await.unwrap().unwrap();
-    let mut tmdb_alpha = alpha.clone();
-    tmdb_alpha.library_external_ids.clear();
-    tmdb_alpha.metadata["title"] = json!("TMDB alpha");
-    let mut tmdb_page = page(
-        vec![tmdb_alpha],
-        Completion::FeedWindowComplete {
-            feed_keys: vec!["popular".into()],
-            evidence: json!({}),
-        },
-        json!({"done":true}),
-    );
-    tmdb_page.feeds.push(FeedMembershipWrite {
-        feed_key: "popular".into(),
-        external_id: "alpha".into(),
-        ordinal: 7,
-    });
-    ingest.commit_page(&c, &tmdb_page).await.unwrap();
-    let provider_scope = Scope {
-        providers: vec!["tmdb".into()],
-        ..Scope::default()
-    };
-    assert_eq!(
-        catalog
-            .get(&provider_scope, "alpha")
-            .await
-            .unwrap()
-            .unwrap()
-            .metadata["title"],
-        "TMDB alpha"
-    );
-    assert!(catalog.get(&movie_scope, "alpha").await.unwrap().is_none());
-    let ordinal: i32 =
-        sqlx::query_scalar("SELECT ordinal FROM ingest.feed_memberships WHERE source_id=$1")
-            .bind(tmdb.id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(ordinal, 7);
-    ingest.start_run(tp.id).await.unwrap();
-    let c = ingest.claim("tmdb", 60).await.unwrap().unwrap();
-    ingest
-        .commit_page(
-            &c,
-            &page(
-                vec![],
-                Completion::FeedWindowComplete {
-                    feed_keys: vec!["popular".into()],
-                    evidence: json!({}),
-                },
-                json!({"done":true}),
-            ),
-        )
-        .await
-        .unwrap();
-    assert!(
-        catalog
-            .get(&provider_scope, "alpha")
-            .await
-            .unwrap()
-            .is_some()
-    );
-
     // A policy update fences a previously valid claim, and a source disable blocks writes.
-    ingest.start_run(p.id).await.unwrap();
+    let stale_run = ingest.start_run(p.id).await.unwrap();
     let c = ingest.claim("stale-policy", 60).await.unwrap().unwrap();
+    ingest.cancel_run(stale_run.id).await.unwrap();
     ingest
         .update_policy(p.id, &policy(json!({"library_ids":["movies"]})), false)
         .await
@@ -1052,28 +2122,35 @@ async fn postgres_runtime_contract() {
     catalog.set_source_state(source.id, false).await.unwrap();
     assert!(
         ingest
-            .commit_page(&c, &page(vec![alpha], Completion::Continue, json!({})))
+            .commit_fixture_page(&c, &page(vec![alpha], Completion::Continue, json!({})))
             .await
             .is_err()
     );
     ingest.cancel_run(c.run_id.unwrap()).await.unwrap();
 
     // Database constraints independently prohibit cross-source memberships and credits.
-    let tmdb_item = catalog
-        .get(&provider_scope, "alpha")
+    catalog.set_source_state(source.id, true).await.unwrap();
+    let other_source = catalog
+        .configure_source("constraint-other", "jellyfin", &json!({}), &json!({}))
         .await
-        .unwrap()
         .unwrap();
-    assert!(sqlx::query("INSERT INTO catalog.library_items(library_id,source_item_id,source_id,last_seen_run_id) VALUES($1,$2,$3,$4)").bind(movies.id).bind(tmdb_item.source_item_id).bind(tmdb.id).bind(run.id).execute(&pool).await.is_err());
+    let source_item: Uuid = sqlx::query_scalar(
+        "SELECT id FROM catalog.source_items WHERE source_id=$1 ORDER BY id LIMIT 1",
+    )
+    .bind(source.id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(sqlx::query("INSERT INTO catalog.library_items(library_id,source_item_id,source_id,last_seen_run_id) VALUES($1,$2,$3,$4)").bind(movies.id).bind(source_item).bind(other_source.id).bind(run.id).execute(&pool).await.is_err());
     catalog.set_source_state(source.id, true).await.unwrap();
     let mut bounded = policy(json!({"library_ids":["movies"]}));
     bounded.max_items = 1;
-    bounded.max_requests = 1;
+    bounded.max_requests = 8;
     let bounded = operator.create_policy(source.id, &bounded).await.unwrap();
     let bounded_run = operator.start_run(bounded.id).await.unwrap();
     let c = ingest.claim("budget", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
                 vec![item("budget-item", "movie", "movies", "budget document")],
@@ -1099,7 +2176,7 @@ async fn postgres_runtime_contract() {
     );
     let c = ingest.claim("budget-resumed", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
                 vec![],
@@ -1114,12 +2191,11 @@ async fn postgres_runtime_contract() {
     let totals = ingest.run(bounded_run.id).await.unwrap().unwrap();
     assert_eq!(totals.items, 1);
     assert_eq!(totals.requests, 2);
-    assert_eq!(totals.budget_requests, 1);
+    assert_eq!(totals.budget_requests, 0);
     source_run_regressions(&catalog, &operator, &ingest).await;
     retrieval_media_credit_regressions(&catalog, &operator, &ingest, &search, &media, &pool).await;
     artwork_generation_regressions(&catalog, &operator, &ingest, &media, &pool).await;
     required_variant_readiness_regressions(&catalog, &operator, &ingest, &media, &pool).await;
-    initialization_regressions(&catalog, &operator, &pool).await;
     shared_search_primitives(&catalog, &operator, &ingest, &pool).await;
     metadata_snapshot_regressions(&catalog, &operator, &ingest, &pool).await;
     startup_regressions(&admin, &url).await;
@@ -1188,7 +2264,7 @@ async fn startup_regressions(admin: &PgPool, admin_url: &str) {
                 .is_err()
         );
         assert!(
-            sqlx::query("SELECT * FROM identity.users")
+            sqlx::query("SELECT * FROM identity.jellyfin_user_links")
                 .execute(&pool)
                 .await
                 .is_err()
@@ -1352,16 +2428,8 @@ async fn artwork_generation_regressions(
         source_keys: vec![source.source_key.clone()],
         ..Scope::default()
     };
-    let bytes_a = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/catalog/artwork/tmdb.png"),
-    )
-    .unwrap();
-    let bytes_b = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/catalog/artwork/his-girl-friday.jpg"),
-    )
-    .unwrap();
+    let bytes_a = neutral_image::png([64, 96, 128]);
+    let bytes_b = neutral_image::png([128, 96, 64]);
     let a = verified_bytes(source.id, bytes_a.clone()).await;
     let b = verified_bytes(source.id, bytes_b.clone()).await;
     let inputs = |bytes: &[u8], label: &str| -> Vec<ArtworkInputWrite> {
@@ -1411,7 +2479,7 @@ async fn artwork_generation_regressions(
         source_artwork_id: "missing-optional".into(),
         code: ArtworkOmissionCode::Missing,
     });
-    ingest.commit_page(&claim, &first).await.unwrap();
+    ingest.commit_fixture_page(&claim, &first).await.unwrap();
     let selected = catalog
         .get(&scope, "generation-item")
         .await
@@ -1530,7 +2598,7 @@ async fn artwork_generation_regressions(
             .variants
             .retain(|v| v.variant == ArtworkVariant::Original);
     }
-    assert!(ingest.commit_page(&claim, &invalid).await.is_err());
+    assert!(ingest.commit_fixture_page(&claim, &invalid).await.is_err());
     assert_eq!(
         operator
             .checkpoint(policy.id, "selected", policy.version)
@@ -1550,7 +2618,7 @@ async fn artwork_generation_regressions(
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND kind='artwork'"
+            "SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind='artwork'"
         )
         .bind(invalid_run.id)
         .fetch_one(pool)
@@ -1648,7 +2716,10 @@ async fn artwork_generation_regressions(
         .await
         .unwrap()
         .unwrap();
-    ingest.commit_page(&claim, &unchanged).await.unwrap();
+    ingest
+        .commit_fixture_page(&claim, &unchanged)
+        .await
+        .unwrap();
     assert!(
         ingest
             .claim("generation-no-jobs", 60)
@@ -1678,7 +2749,7 @@ async fn artwork_generation_regressions(
             json!({"generation":revision}),
         );
         change.artwork_inputs = writes.clone();
-        ingest.commit_page(&claim, &change).await.unwrap();
+        ingest.commit_fixture_page(&claim, &change).await.unwrap();
         for row in media.list(&scope, None, 100).await.unwrap() {
             assert_eq!(row.revision, revision - 1);
         }
@@ -1757,7 +2828,7 @@ async fn artwork_generation_regressions(
         json!({"generation":4}),
     );
     change.artwork_inputs = inputs_b.clone();
-    ingest.commit_page(&claim, &change).await.unwrap();
+    ingest.commit_fixture_page(&claim, &change).await.unwrap();
     let old = ingest
         .claim("generation-old-lease", 60)
         .await
@@ -1776,7 +2847,10 @@ async fn artwork_generation_regressions(
     assert_eq!(page_claim.run_id, Some(newer.id));
     change.artwork_inputs = inputs_a;
     change.checkpoint.cursor = json!({"generation":5});
-    ingest.commit_page(&page_claim, &change).await.unwrap();
+    ingest
+        .commit_fixture_page(&page_claim, &change)
+        .await
+        .unwrap();
     for c in older {
         assert!(matches!(
             media.publish(&c, &b).await,
@@ -1815,11 +2889,11 @@ async fn artwork_generation_regressions(
         dedupe_key: "not-allowed".into(),
         input: json!({}),
     });
-    assert!(ingest.commit_page(&claim, &rollback).await.is_err());
+    assert!(ingest.commit_fixture_page(&claim, &rollback).await.is_err());
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM media.artwork WHERE source_id=$1 AND source_artwork_id='rollback-art'").bind(source.id).fetch_one(pool).await.unwrap();
     assert_eq!(count, 0);
     let jobs: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND kind='artwork'")
+        sqlx::query_scalar("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind='artwork'")
             .bind(rollback_run.id)
             .fetch_one(pool)
             .await
@@ -1841,7 +2915,7 @@ async fn artwork_generation_regressions(
         source_artwork_id: "invalid-optional".into(),
         code: ArtworkOmissionCode::Invalid,
     }];
-    ingest.commit_page(&claim, &rollback).await.unwrap();
+    ingest.commit_fixture_page(&claim, &rollback).await.unwrap();
     assert_eq!(
         operator
             .artwork_omissions(rollback_run.id, None, 100)
@@ -1868,7 +2942,7 @@ async fn artwork_generation_regressions(
     repaired.reference.source_artwork_id = "missing-optional".into();
     repaired.manifest.variants[1].sha256 = Sha256::digest(&bytes_b).into();
     repair.artwork_inputs.push(repaired);
-    ingest.commit_page(&claim, &repair).await.unwrap();
+    ingest.commit_fixture_page(&claim, &repair).await.unwrap();
     assert!(
         operator
             .artwork_omissions(repair_run.id, None, 100)
@@ -1912,6 +2986,30 @@ async fn artwork_generation_regressions(
             .unwrap()
             .is_some()
     );
+    let configured = vec![
+        "configured-10",
+        "configured-08",
+        "configured-02",
+        "configured-10",
+        "configured-07",
+        "configured-03",
+        "configured-11",
+        "configured-01",
+        "configured-09",
+        "configured-06",
+        "configured-00",
+    ];
+    let mut configuration: Value =
+        sqlx::query_scalar("SELECT configuration FROM catalog.sources WHERE id=$1")
+            .bind(source.id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    configuration["branding_artwork_ids"] = json!(configured);
+    catalog
+        .configure_source(&source.source_key, "jellyfin", &configuration, &json!({}))
+        .await
+        .unwrap();
     operator.start_run(policy.id).await.unwrap();
     let claim = ingest.claim("branding-inputs", 60).await.unwrap().unwrap();
     let mut branding_page = page(
@@ -1930,27 +3028,8 @@ async fn artwork_generation_regressions(
             .retain(|v| v.variant == ArtworkVariant::Native);
         branding_page.artwork_inputs.push(input);
     }
-    ingest.commit_page(&claim, &branding_page).await.unwrap();
-    let configured = vec![
-        "configured-10",
-        "configured-08",
-        "configured-02",
-        "configured-10",
-        "configured-07",
-        "configured-03",
-        "configured-11",
-        "configured-01",
-        "configured-09",
-        "configured-06",
-        "configured-00",
-    ];
-    catalog
-        .configure_source(
-            &source.source_key,
-            "jellyfin",
-            &json!({"branding_artwork_ids":configured}),
-            &json!({}),
-        )
+    ingest
+        .commit_fixture_page(&claim, &branding_page)
         .await
         .unwrap();
     assert!(media.branding(&scope, 8).await.unwrap().is_empty());
@@ -2008,7 +3087,7 @@ async fn artwork_generation_regressions(
     assert_eq!(media.branding(&scope, 8).await.unwrap().len(), 3);
     assert_eq!(media.branding(&tv_scope, 8).await.unwrap().len(), 1);
     let wrong_provider = Scope {
-        providers: vec!["tmdb".into()],
+        providers: vec!["unsupported".into()],
         ..scope.clone()
     };
     assert!(
@@ -2184,10 +3263,10 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
                 })
             })
             .collect();
-        ingest.commit_page(&first, &partial).await.unwrap();
+        ingest.commit_fixture_page(&first, &partial).await.unwrap();
         // Leave one delayed ready and one leased job of each follow-up kind.
-        sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp()+interval '1 day' WHERE run_id=$1 AND state='ready'").bind(run.id).execute(&pool).await.unwrap();
-        sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp()-interval '1 second' WHERE run_id=$1 AND ((kind='artwork' AND input->>'source_artwork_id'='leased') OR (kind='embedding' AND input->>'external_id'=$2))")
+        sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp()+interval '1 day' WHERE scope_id=$1 AND state='ready'").bind(run.id).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp()-interval '1 second' WHERE scope_id=$1 AND ((kind='artwork' AND input->>'source_artwork_id'='leased') OR (kind='embedding' AND input->>'external_id'=$2))")
             .bind(run.id).bind(&ids[0]).execute(&pool).await.unwrap();
         let mut leased = Vec::new();
         for _ in 0..2 {
@@ -2195,8 +3274,8 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
         }
         let old_art = leased.iter().find(|c| c.kind == "artwork").unwrap();
         let old_embedding = leased.iter().find(|c| c.kind == "embedding").unwrap();
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND kind IN ('artwork','embedding') AND state='ready' AND available_at>clock_timestamp()").bind(run.id).fetch_one(&pool).await.unwrap(),2);
-        sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp()-interval '1 second',max_attempts=1 WHERE run_id=$1 AND kind='ingest'").bind(run.id).execute(&pool).await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind IN ('artwork','embedding') AND state='ready' AND available_at>clock_timestamp()").bind(run.id).fetch_one(&pool).await.unwrap(),2);
+        sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp()-interval '1 second',max_attempts=1 WHERE scope_id=$1 AND kind='ingest'").bind(run.id).execute(&pool).await.unwrap();
         let final_claim = ingest
             .claim("final-ingest-attempt", 300)
             .await
@@ -2210,12 +3289,12 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
                 .await
                 .unwrap(),
             "expiry" => {
-                sqlx::query("UPDATE ingest.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1").bind(final_claim.id).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1").bind(final_claim.id).execute(&pool).await.unwrap();
                 assert!(ingest.claim("reap-expired", 300).await.unwrap().is_none());
             }
             _ => {
                 // Reproduce a pre-fix failure with active delayed/leased siblings.
-                sqlx::query("UPDATE ingest.jobs SET state='failed',lease_owner=NULL,lease_until=NULL WHERE id=$1").bind(final_claim.id).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE queue.jobs SET state='failed',lease_owner=NULL,lease_until=NULL WHERE id=$1").bind(final_claim.id).execute(&pool).await.unwrap();
                 sqlx::query("UPDATE ingest.runs SET state='failed',finished_at=now() WHERE id=$1")
                     .bind(run.id)
                     .execute(&pool)
@@ -2231,9 +3310,9 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
             }
         }
         assert_eq!(ingest.run(run.id).await.unwrap().unwrap().state, "failed");
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND kind IN ('artwork','embedding') AND state='cancelled' AND lease_owner IS NULL AND lease_until IS NULL").bind(run.id).fetch_one(&pool).await.unwrap(),4);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind IN ('artwork','embedding') AND state IN ('ready','leased')").bind(run.id).fetch_one(&pool).await.unwrap(),4);
         for old in &leased {
-            let fence: i64 = sqlx::query_scalar("SELECT fence FROM ingest.jobs WHERE id=$1")
+            let fence: i64 = sqlx::query_scalar("SELECT fence FROM queue.jobs WHERE id=$1")
                 .bind(old.id)
                 .fetch_one(&pool)
                 .await
@@ -2285,12 +3364,15 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
         partial.completion = Completion::Complete {
             evidence: json!({}),
         };
-        ingest.commit_page(&new_claim, &partial).await.unwrap();
+        ingest
+            .commit_fixture_page(&new_claim, &partial)
+            .await
+            .unwrap();
         assert_eq!(
             ingest.run(next.id).await.unwrap().unwrap().state,
             "complete"
         );
-        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND kind IN ('artwork','embedding') AND state='ready'").bind(next.id).fetch_one(&pool).await.unwrap(),4);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND kind IN ('artwork','embedding') AND state='ready'").bind(next.id).fetch_one(&pool).await.unwrap(),4);
         let mut completed = (0, 0);
         for _ in 0..4 {
             let claim = ingest
@@ -2330,12 +3412,16 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
             Err(screenroom_backend::Error::Stale)
         ));
         assert!(matches!(
-            ingest.commit_page(&final_claim, &partial).await,
+            ingest.commit_fixture_page(&final_claim, &partial).await,
             Err(screenroom_backend::Error::Stale)
         ));
     }
     let source = catalog
         .configure_source("completed-followups", "jellyfin", &json!({}), &json!({}))
+        .await
+        .unwrap();
+    catalog
+        .configure_library(source.id, "movies", "movies", "Movies")
         .await
         .unwrap();
     let p = operator
@@ -2356,25 +3442,25 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
         .map(|key| Followup {
             kind: JobKind::Embedding,
             dedupe_key: format!("completed:{key}"),
-            input: json!({}),
+            input: json!({"external_id":key}),
         })
         .collect();
-    ingest.commit_page(&claim, &done).await.unwrap();
-    sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp()+interval '1 day' WHERE run_id=$1 AND state='ready'").bind(run.id).execute(&pool).await.unwrap();
-    sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp(),max_attempts=1 WHERE run_id=$1 AND dedupe_key='completed:expired'").bind(run.id).execute(&pool).await.unwrap();
+    ingest.commit_fixture_page(&claim, &done).await.unwrap();
+    sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp()+interval '1 day' WHERE scope_id=$1 AND state='ready'").bind(run.id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp(),max_attempts=1 WHERE scope_id=$1 AND dedupe_key='completed:expired'").bind(run.id).execute(&pool).await.unwrap();
     let expired = ingest
         .claim("expired-followup", 300)
         .await
         .unwrap()
         .unwrap();
     sqlx::query(
-        "UPDATE ingest.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
+        "UPDATE queue.jobs SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1",
     )
     .bind(expired.id)
     .execute(&pool)
     .await
     .unwrap();
-    sqlx::query("UPDATE ingest.jobs SET available_at=clock_timestamp() WHERE run_id=$1 AND dedupe_key='completed:healthy'").bind(run.id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE queue.jobs SET available_at=clock_timestamp() WHERE scope_id=$1 AND dedupe_key='completed:healthy'").bind(run.id).execute(&pool).await.unwrap();
     let healthy = ingest
         .claim("healthy-followup", 300)
         .await
@@ -2385,7 +3471,7 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
     ingest.complete_job(&healthy).await.unwrap();
     assert_eq!(ingest.run(run.id).await.unwrap().unwrap().state, "complete");
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT state FROM ingest.jobs WHERE id=$1")
+        sqlx::query_scalar::<_, String>("SELECT state FROM queue.jobs WHERE id=$1")
             .bind(expired.id)
             .fetch_one(&pool)
             .await
@@ -2394,7 +3480,7 @@ async fn final_primitives_regressions(admin: &PgPool, url: &str) {
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM ingest.jobs WHERE run_id=$1 AND state='cancelled'"
+            "SELECT count(*) FROM queue.jobs WHERE scope_id=$1 AND state='cancelled'"
         )
         .bind(run.id)
         .fetch_one(&pool)
@@ -2427,7 +3513,7 @@ async fn top_level_regressions(
     ];
     for (key, provider, library) in [
         ("roots-primary", "jellyfin", "movies"),
-        ("roots-secondary", "tmdb", "tv"),
+        ("roots-secondary", "jellyfin", "tv"),
     ] {
         let source = catalog
             .configure_source(key, provider, &json!({}), &json!({}))
@@ -2458,7 +3544,7 @@ async fn top_level_regressions(
             items.push(write);
         }
         ingest
-            .commit_page(
+            .commit_fixture_page(
                 &claim,
                 &page(
                     items,
@@ -2503,7 +3589,8 @@ async fn top_level_regressions(
             ..scope.clone()
         },
         Scope {
-            providers: vec!["tmdb".into()],
+            providers: vec!["jellyfin".into()],
+            source_keys: vec!["roots-secondary".into()],
             ..scope.clone()
         },
         Scope {
@@ -2611,7 +3698,7 @@ async fn metadata_snapshot_regressions(
         ),
         (
             "snapshot-secondary",
-            "tmdb",
+            "jellyfin",
             "2026-03-01T08:00:00.125-03:00",
         ),
     ] {
@@ -2659,7 +3746,7 @@ async fn metadata_snapshot_regressions(
             items.push(series);
         }
         ingest
-            .commit_page(
+            .commit_fixture_page(
                 &claim,
                 &page(
                     items,
@@ -2698,6 +3785,7 @@ async fn metadata_snapshot_regressions(
     );
     let primary = Scope {
         providers: vec!["jellyfin".into()],
+        source_keys: vec!["snapshot-primary".into()],
         ..scope.clone()
     };
     assert_eq!(
@@ -2805,104 +3893,6 @@ async fn metadata_snapshot_regressions(
     );
 }
 
-async fn initialization_regressions(
-    catalog: &CatalogRepository,
-    operator: &IngestRepository,
-    pool: &PgPool,
-) {
-    let input = SourceInitialization {
-        source_key: "initialization-fresh".into(),
-        provider: "jellyfin".into(),
-        configuration: json!({"notices":[{"license":"preserved"}]}),
-        capabilities: json!({"libraries":true}),
-        libraries: vec![LibraryWrite {
-            public_id: "movies".into(),
-            external_id: "movies".into(),
-            title: "Movies".into(),
-        }],
-        initial_policy: Some(policy(json!({"library_ids":["movies"]}))),
-    };
-    let inputs = vec![input.clone()];
-    let (a, b) = tokio::join!(catalog.initialize(&inputs), catalog.initialize(&inputs));
-    let a = a.unwrap().remove(0);
-    let b = b.unwrap().remove(0);
-    assert_eq!(a.source.id, b.source.id);
-    assert_eq!(a.source.configuration, input.configuration);
-    assert_eq!(a.libraries[0].id, b.libraries[0].id);
-    assert_eq!(a.policies.len(), 1);
-    assert_eq!(a.policies[0].id, b.policies[0].id);
-    assert_eq!(operator.policies(Some(a.source.id)).await.unwrap().len(), 1);
-    catalog.set_source_state(a.source.id, false).await.unwrap();
-    sqlx::query("UPDATE catalog.sources SET configuration=$2 WHERE id=$1")
-        .bind(a.source.id)
-        .bind(json!({"operator":true}))
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query(
-        "UPDATE catalog.libraries SET state='disabled',title='Operator title' WHERE source_id=$1",
-    )
-    .bind(a.source.id)
-    .execute(pool)
-    .await
-    .unwrap();
-    let mut changed = policy(json!({"library_ids":["movies"]}));
-    changed.enabled = false;
-    changed.max_items = 37;
-    let (updated, _) = operator
-        .update_policy(a.policies[0].id, &changed, false)
-        .await
-        .unwrap();
-    operator.create_policy(a.source.id, &changed).await.unwrap();
-    let repeat = catalog.initialize(&inputs).await.unwrap().remove(0);
-    assert_eq!(repeat.source.state, "disabled");
-    assert_eq!(repeat.source.configuration, json!({"operator":true}));
-    assert_eq!(repeat.source.capabilities, input.capabilities);
-    assert_eq!(repeat.libraries[0].state, "disabled");
-    assert_eq!(repeat.libraries[0].title, "Operator title");
-    assert_eq!(repeat.policies.len(), 2);
-    let retained = repeat.policies.iter().find(|p| p.id == updated.id).unwrap();
-    assert_eq!(retained.version, updated.version);
-    assert_eq!(retained.max_items, 37);
-    assert!(!retained.enabled);
-    let mut first = input.clone();
-    first.source_key = "initialization-a-rollback".into();
-    let mut late = input.clone();
-    late.source_key = "initialization-z-conflict".into();
-    catalog
-        .configure_source(&late.source_key, "tmdb", &json!({}), &json!({}))
-        .await
-        .unwrap();
-    assert!(catalog.initialize(&[first.clone(), late]).await.is_err());
-    assert!(
-        !catalog
-            .sources()
-            .await
-            .unwrap()
-            .iter()
-            .any(|s| s.source_key == first.source_key)
-    );
-    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM catalog.libraries l JOIN catalog.sources s ON s.id=l.source_id WHERE s.source_key=$1").bind(&first.source_key).fetch_one(pool).await.unwrap(),0);
-    // A late DB constraint failure also rolls back a new source and policy staged earlier.
-    let mut late = input.clone();
-    late.source_key = input.source_key.clone();
-    late.libraries[0].external_id = "different-external".into();
-    first.source_key = "initialization-0-rollback".into();
-    assert!(catalog.initialize(&[first.clone(), late]).await.is_err());
-    assert!(
-        !catalog
-            .sources()
-            .await
-            .unwrap()
-            .iter()
-            .any(|s| s.source_key == first.source_key)
-    );
-    let mut invalid = input.clone();
-    invalid.libraries[0].public_id = "all".into();
-    assert!(catalog.initialize(&[invalid]).await.is_err());
-    assert!(catalog.initialize(&vec![input; 33]).await.is_err());
-}
-
 async fn shared_search_primitives(
     catalog: &CatalogRepository,
     operator: &IngestRepository,
@@ -2919,7 +3909,7 @@ async fn shared_search_primitives(
         ),
         (
             "primitives-secondary",
-            "tmdb",
+            "jellyfin",
             "Midnight Lantern",
             "cobaltquasar overview only",
         ),
@@ -2945,7 +3935,7 @@ async fn shared_search_primitives(
         let mut write = item("primitives-canonical", "movie", "movies", text);
         write.document_title = title.into();
         ingest
-            .commit_page(
+            .commit_fixture_page(
                 &claim,
                 &page(
                     vec![write],
@@ -3016,6 +4006,7 @@ async fn shared_search_primitives(
     );
     let primary = Scope {
         providers: vec!["jellyfin".into()],
+        source_keys: vec!["primitives-primary".into()],
         ..scope.clone()
     };
     assert!(
@@ -3249,10 +4240,8 @@ async fn required_variant_readiness_regressions(
         source_keys: vec![source.source_key.clone()],
         ..Scope::default()
     };
-    let root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/catalog/artwork");
-    let native_bytes = std::fs::read(root.join("tmdb.png")).unwrap();
-    let original_bytes = std::fs::read(root.join("his-girl-friday.jpg")).unwrap();
+    let native_bytes = neutral_image::png([64, 96, 128]);
+    let original_bytes = neutral_image::png([128, 96, 64]);
     let native_hash: [u8; 32] = Sha256::digest(&native_bytes).into();
     let original_hash: [u8; 32] = Sha256::digest(&original_bytes).into();
     assert_ne!(native_hash, original_hash);
@@ -3295,7 +4284,7 @@ async fn required_variant_readiness_regressions(
             ],
         },
     });
-    ingest.commit_page(&claim, &page).await.unwrap();
+    ingest.commit_fixture_page(&claim, &page).await.unwrap();
     let mut artwork = Uuid::nil();
     for _ in 0..2 {
         let claim = ingest
@@ -3416,7 +4405,7 @@ async fn source_run_regressions(
     operator: &IngestRepository,
     ingest: &IngestRepository,
 ) {
-    for provider in ["jellyfin", "tmdb"] {
+    for provider in ["jellyfin"] {
         let source = catalog
             .configure_source(
                 &format!("exclusion-{provider}"),
@@ -3430,11 +4419,7 @@ async fn source_run_regressions(
             .configure_library(source.id, "movies", "movies", "Movies")
             .await
             .unwrap();
-        let selection = if provider == "jellyfin" {
-            json!({"library_ids":["movies"]})
-        } else {
-            json!({"feeds":["popular"]})
-        };
+        let selection = json!({"library_ids":["movies"]});
         let a = operator
             .create_policy(source.id, &policy(selection.clone()))
             .await
@@ -3461,38 +4446,15 @@ async fn source_run_regressions(
         assert!(sqlx::query("INSERT INTO ingest.runs(source_id,policy_id,policy_version,policy_snapshot,selection_snapshot) VALUES($1,$2,1,'{}','{}')")
             .bind(source.id).bind(loser.id).execute(catalog.pool()).await.is_err());
         let id = format!("exclusion-{provider}");
-        let mut document = item(&id, "movie", "movies", "observed document");
-        if provider == "tmdb" {
-            document.library_external_ids.clear();
-        }
-        let observed = |completion| {
-            let mut page = page(vec![document.clone()], completion, json!({"next":true}));
-            if provider == "tmdb" {
-                page.feeds.push(FeedMembershipWrite {
-                    feed_key: "popular".into(),
-                    external_id: id.clone(),
-                    ordinal: 0,
-                });
-            }
-            page
-        };
-        let complete = || {
-            if provider == "jellyfin" {
-                Completion::SelectedLibrariesComplete {
-                    library_ids: vec!["movies".into()],
-                    evidence: json!({}),
-                }
-            } else {
-                Completion::FeedWindowComplete {
-                    feed_keys: vec!["popular".into()],
-                    evidence: json!({}),
-                }
-            }
+        let document = item(&id, "movie", "movies", "observed document");
+        let observed = |completion| page(vec![document.clone()], completion, json!({"next":true}));
+        let complete = || Completion::Complete {
+            evidence: json!({}),
         };
         let c = ingest.claim("exclusion", 60).await.unwrap().unwrap();
         assert_eq!(c.run_id, Some(run.id));
         ingest
-            .commit_page(&c, &observed(Completion::Continue))
+            .commit_fixture_page(&c, &observed(Completion::Continue))
             .await
             .unwrap();
         assert!(matches!(
@@ -3501,7 +4463,7 @@ async fn source_run_regressions(
         ));
         let c = ingest.claim("exclusion", 60).await.unwrap().unwrap();
         ingest
-            .commit_page(&c, &page(vec![], Completion::Pause, json!({})))
+            .commit_fixture_page(&c, &page(vec![], Completion::Pause, json!({})))
             .await
             .unwrap();
         assert!(matches!(
@@ -3529,14 +4491,14 @@ async fn source_run_regressions(
         ));
         let c = ingest.claim("exclusion", 60).await.unwrap().unwrap();
         ingest
-            .commit_page(&c, &page(vec![], complete(), json!({})))
+            .commit_fixture_page(&c, &page(vec![], complete(), json!({})))
             .await
             .unwrap();
         let second = operator.start_run(loser.id).await.unwrap();
         let c = ingest.claim("exclusion", 60).await.unwrap().unwrap();
         assert_eq!(c.run_id, Some(second.id));
         ingest
-            .commit_page(&c, &observed(Completion::Continue))
+            .commit_fixture_page(&c, &observed(Completion::Continue))
             .await
             .unwrap();
         assert!(matches!(
@@ -3545,7 +4507,7 @@ async fn source_run_regressions(
         ));
         let c = ingest.claim("exclusion", 60).await.unwrap().unwrap();
         ingest
-            .commit_page(&c, &page(vec![], complete(), json!({})))
+            .commit_fixture_page(&c, &page(vec![], complete(), json!({})))
             .await
             .unwrap();
         let scoped = Scope {
@@ -3553,10 +4515,6 @@ async fn source_run_regressions(
             ..Scope::default()
         };
         assert!(catalog.get(&scoped, &id).await.unwrap().is_some());
-        if provider == "tmdb" {
-            let count: i64 = sqlx::query_scalar("SELECT count(*) FROM ingest.feed_memberships WHERE source_id=$1 AND feed_key='popular'").bind(source.id).fetch_one(catalog.pool()).await.unwrap();
-            assert_eq!(count, 1);
-        }
         operator.start_run(winner.id).await.unwrap();
         let c = ingest
             .claim("concurrent-commits", 60)
@@ -3567,9 +4525,9 @@ async fn source_run_regressions(
         continued.followups.push(Followup {
             kind: JobKind::Embedding,
             dedupe_key: format!("concurrent-{provider}"),
-            input: json!({}),
+            input: json!({"external_id":provider}),
         });
-        ingest.commit_page(&c, &continued).await.unwrap();
+        ingest.commit_fixture_page(&c, &continued).await.unwrap();
         let first = ingest
             .claim("concurrent-commits", 60)
             .await
@@ -3594,7 +4552,7 @@ async fn source_run_regressions(
         );
         let results = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(
-                ingest.commit_page(&traversal, &terminal),
+                ingest.commit_fixture_page(&traversal, &terminal),
                 ingest.complete_job(&followup)
             )
         })
@@ -3617,8 +4575,8 @@ async fn retrieval_media_credit_regressions(
         .configure_source("reg-jellyfin", "jellyfin", &json!({}), &json!({}))
         .await
         .unwrap();
-    let tmdb = catalog
-        .configure_source("reg-tmdb", "tmdb", &json!({}), &json!({}))
+    let secondary_source = catalog
+        .configure_source("reg-secondary", "jellyfin", &json!({}), &json!({}))
         .await
         .unwrap();
     catalog
@@ -3629,12 +4587,19 @@ async fn retrieval_media_credit_regressions(
         .create_policy(jf.id, &policy(json!({"library_ids":["movies"]})))
         .await
         .unwrap();
+    catalog
+        .configure_library(secondary_source.id, "movies", "movies", "Movies")
+        .await
+        .unwrap();
     let tp = operator
-        .create_policy(tmdb.id, &policy(json!({"feeds":["popular"]})))
+        .create_policy(
+            secondary_source.id,
+            &policy(json!({"library_ids":["movies"]})),
+        )
         .await
         .unwrap();
     let scope = Scope {
-        source_keys: vec![jf.source_key.clone(), tmdb.source_key.clone()],
+        source_keys: vec![jf.source_key.clone(), secondary_source.source_key.clone()],
         ..Scope::default()
     };
     let mut jf_item = item("reg-shared", "movie", "movies", "local library synopsis");
@@ -3664,10 +4629,9 @@ async fn retrieval_media_credit_regressions(
             ordinal: 0,
         },
     ];
-    let mut tmdb_item = jf_item.clone();
-    tmdb_item.library_external_ids.clear();
-    tmdb_item.document = "quasarexclusive discovery text".into();
-    tmdb_item.metadata["title"] = json!("alternate display");
+    let mut secondary_item = jf_item.clone();
+    secondary_item.document = "quasarexclusive discovery text".into();
+    secondary_item.metadata["title"] = json!("alternate display");
     let refs = vec![
         ArtworkReferenceInput {
             source_artwork_id: "linked-item".into(),
@@ -3707,7 +4671,7 @@ async fn retrieval_media_credit_regressions(
         json!({}),
     );
     initial.artwork_inputs = refs.iter().cloned().map(artwork_input).collect();
-    ingest.commit_page(&c, &initial).await.unwrap();
+    ingest.commit_fixture_page(&c, &initial).await.unwrap();
     // Completed-run followups remain publishable while the next ingestion run exists.
     let next = operator.start_run(jp.id).await.unwrap();
     let verified = verified_object(jf.id).await;
@@ -3743,12 +4707,12 @@ async fn retrieval_media_credit_regressions(
     assert_eq!(credits.len(), 3);
     assert!(credits.iter().all(|c| c.ordinal == 0));
     operator.start_run(tp.id).await.unwrap();
-    let c = ingest.claim("reg-tmdb", 60).await.unwrap().unwrap();
+    let c = ingest.claim("reg-secondary", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
-                vec![tmdb_item],
+                vec![secondary_item],
                 Completion::Complete {
                     evidence: json!({}),
                 },
@@ -3782,7 +4746,7 @@ async fn retrieval_media_credit_regressions(
     let alternate = catalog
         .get(
             &Scope {
-                source_keys: vec![tmdb.source_key.clone()],
+                source_keys: vec![secondary_source.source_key.clone()],
                 ..Scope::default()
             },
             "reg-shared",
@@ -3807,7 +4771,7 @@ async fn retrieval_media_credit_regressions(
     let mut unit = vec![0.0; 1024];
     unit[0] = 1.0;
     // Simulate the already-validated worker writes for both documents, then stale the display source.
-    for key in [&jf.source_key, &tmdb.source_key] {
+    for key in [&jf.source_key, &secondary_source.source_key] {
         let item = catalog
             .get(
                 &Scope {
@@ -3845,7 +4809,7 @@ async fn retrieval_media_credit_regressions(
             .complete
     );
     let secondary = search
-        .document_for_reference(&tmdb.source_key, "reg-shared")
+        .document_for_reference(&secondary_source.source_key, "reg-shared")
         .await
         .unwrap()
         .unwrap();
@@ -3882,7 +4846,7 @@ async fn retrieval_media_credit_regressions(
     operator.start_run(jp.id).await.unwrap();
     let c = ingest.claim("reg-stale", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
                 vec![jf_item],
@@ -3948,17 +4912,29 @@ async fn retrieval_media_credit_regressions(
     operator.start_run(jp.id).await.unwrap();
     let c = ingest.claim("reg-absence", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &c,
             &page(
                 vec![],
-                Completion::SelectedLibrariesComplete {
-                    library_ids: vec!["movies".into()],
+                Completion::Complete {
                     evidence: json!({}),
                 },
                 json!({}),
             ),
         )
+        .await
+        .unwrap();
+    assert!(
+        catalog
+            .get(&jf_scope, "reg-shared")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Historical absent memberships remain readable without a mutation API for absence.
+    sqlx::query("UPDATE catalog.library_items SET state='absent' WHERE source_id=$1")
+        .bind(jf.id)
+        .execute(pool)
         .await
         .unwrap();
     assert!(
@@ -4085,7 +5061,7 @@ async fn retrieval_media_credit_regressions(
             media
                 .resolve(
                     &Scope {
-                        providers: vec!["tmdb".into()],
+                        providers: vec!["unsupported".into()],
                         ..Scope::default()
                     },
                     *id,
@@ -4109,10 +5085,13 @@ async fn retrieval_media_credit_regressions(
             .results
             .is_empty()
     );
-    catalog.set_source_state(tmdb.id, false).await.unwrap();
+    catalog
+        .set_source_state(secondary_source.id, false)
+        .await
+        .unwrap();
     assert!(
         search
-            .document_for_reference(&tmdb.source_key, "reg-shared")
+            .document_for_reference(&secondary_source.source_key, "reg-shared")
             .await
             .unwrap()
             .is_none()

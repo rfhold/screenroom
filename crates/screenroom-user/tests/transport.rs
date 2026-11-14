@@ -1,11 +1,6 @@
 use screenroom_backend::sqlx::postgres::PgPoolOptions;
-use screenroom_catalog_adapter::MockAdapters;
-use screenroom_proto::user::{
-    operator::v1::{ClearLinkRequest, jellyfin_user_service_client::JellyfinUserServiceClient},
-    v1::{GetCurrentUserRequest, user_service_client::UserServiceClient},
-};
+use screenroom_proto::user::v1::{GetCurrentUserRequest, user_service_client::UserServiceClient};
 use screenroom_user::{UserService, repository::Repository};
-use std::sync::Arc;
 use tonic::{Code, Request};
 
 #[tokio::test]
@@ -14,14 +9,8 @@ async fn native_and_grpcweb_public_routes_exclude_private_services() {
         .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
         .unwrap();
     let service = UserService {
+        connections: screenroom_backend::connections::ConnectionRepository::new(pool.clone(), None),
         repository: Repository::new(pool),
-        adapters: Arc::new(
-            MockAdapters::load(
-                concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/catalog"),
-                Default::default(),
-            )
-            .unwrap(),
-        ),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -48,15 +37,6 @@ async fn native_and_grpcweb_public_routes_exclude_private_services() {
             .unwrap_err()
             .code(),
         Code::InvalidArgument
-    );
-    let mut operator = JellyfinUserServiceClient::new(channel);
-    assert_eq!(
-        operator
-            .clear_link(ClearLinkRequest::default())
-            .await
-            .unwrap_err()
-            .code(),
-        Code::Unimplemented
     );
     let http = reqwest::Client::new();
     let response = http
@@ -98,6 +78,7 @@ async fn native_and_grpcweb_public_routes_exclude_private_services() {
             .contains("x-screenroom-user-id")
     );
     for route in [
+        "screenroom.user.operator.v1.JellyfinUserService/SetLink",
         "screenroom.user.operator.v1.JellyfinUserService/ClearLink",
         "screenroom.user.internal.v1.PlaybackStateService/GetContinueWatching",
     ] {
@@ -125,6 +106,23 @@ async fn native_and_grpcweb_public_routes_exclude_private_services() {
     let task = tokio::spawn(screenroom_user::serve_private(service, listener, async {
         let _ = stopped.await;
     }));
+    let private_http = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    for method in ["SetLink", "ClearLink"] {
+        let response = private_http
+            .post(format!(
+                "http://{address}/screenroom.user.operator.v1.JellyfinUserService/{method}"
+            ))
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(vec![0u8; 5])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["grpc-status"], "12");
+    }
     let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
         .unwrap()
         .connect()

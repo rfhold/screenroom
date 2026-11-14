@@ -326,12 +326,20 @@ impl MediaRepository {
         Self { pool }
     }
     pub async fn publish(&self, claim: &Claim, object: &VerifiedObject) -> Result<Uuid> {
+        self.publish_with_outcomes(claim, object, &[]).await
+    }
+    pub async fn publish_with_outcomes(
+        &self,
+        claim: &Claim,
+        object: &VerifiedObject,
+        outcomes: &[crate::ingest::RequestOutcomeWrite],
+    ) -> Result<Uuid> {
         if claim.kind != "artwork" {
             return Err(Error::Invalid("artwork publication"));
         }
         let mut tx = self.pool.begin().await?;
         let (_, policy) = guard(&mut tx, claim).await?;
-        let input: Value = sqlx::query_scalar("SELECT input FROM ingest.jobs WHERE id=$1")
+        let input: Value = sqlx::query_scalar("SELECT input FROM queue.jobs WHERE id=$1")
             .bind(claim.id)
             .fetch_one(&mut *tx)
             .await?;
@@ -378,6 +386,7 @@ impl MediaRepository {
             let ready: bool = sqlx::query_scalar("SELECT EXISTS(SELECT FROM media.variants v JOIN media.objects o ON o.id=v.object_id WHERE v.artwork_id=$1 AND v.revision=$2 AND v.variant=$3 AND o.sha256=$4 AND o.state='ready')")
                 .bind(art).bind(job.revision).bind(required.variant.as_str()).bind(required.sha256.as_slice()).fetch_one(&mut *tx).await?;
             if !ready {
+                crate::ingest::write_outcomes(&mut tx, claim, outcomes).await?;
                 finish(&mut tx, claim).await?;
                 tx.commit().await?;
                 return Ok(art);
@@ -390,10 +399,11 @@ impl MediaRepository {
                 "artwork generation requires ready native variant",
             ));
         }
-        sqlx::query("UPDATE media.artwork_generations SET state='published' WHERE artwork_id=$1 AND revision=$2")
+        sqlx::query("UPDATE media.artwork_generations SET state='published',published_at=COALESCE(published_at,clock_timestamp()) WHERE artwork_id=$1 AND revision=$2")
             .bind(art).bind(job.revision).execute(&mut *tx).await?;
         sqlx::query("UPDATE media.artwork a SET revision=g.revision,kind=g.kind,rights=g.rights,state='enabled' FROM media.artwork_generations g WHERE a.id=$1 AND g.artwork_id=a.id AND g.revision=$2 AND a.current_generation=g.revision")
             .bind(art).bind(job.revision).execute(&mut *tx).await?;
+        crate::ingest::write_outcomes(&mut tx, claim, outcomes).await?;
         finish(&mut tx, claim).await?;
         tx.commit().await?;
         Ok(art)
@@ -472,8 +482,9 @@ impl MediaRepository {
         if source_item_ids.is_empty() {
             return Ok(BTreeMap::new());
         }
+        // Image kind takes precedence over legacy associations marked uniformly primary.
         let sql = format!(
-            "{ELIGIBLE} SELECT DISTINCT ON (ia.source_item_id) ia.source_item_id AS target_id,a.id,a.source_id,a.source_artwork_id,a.kind,a.rights,a.revision FROM eligible e JOIN media.item_artwork ia ON ia.source_item_id=e.id JOIN media.artwork a ON a.id=ia.artwork_id JOIN catalog.sources s ON s.id=a.source_id JOIN media.artwork_generations g ON g.artwork_id=a.id AND g.revision=a.revision AND g.state='published' WHERE ia.source_item_id=ANY($5) AND a.state='enabled' AND s.state='enabled' AND {FULL_GENERATION_READY} ORDER BY ia.source_item_id,CASE ia.role WHEN 'primary' THEN 0 WHEN 'poster' THEN 1 WHEN 'thumbnail' THEN 2 ELSE 3 END,ia.ordinal,ia.role,a.source_artwork_id,a.id"
+            "{ELIGIBLE} SELECT DISTINCT ON (ia.source_item_id) ia.source_item_id AS target_id,a.id,a.source_id,a.source_artwork_id,a.kind,a.rights,a.revision FROM eligible e JOIN media.item_artwork ia ON ia.source_item_id=e.id JOIN media.artwork a ON a.id=ia.artwork_id JOIN catalog.sources s ON s.id=a.source_id JOIN media.artwork_generations g ON g.artwork_id=a.id AND g.revision=a.revision AND g.state='published' WHERE ia.source_item_id=ANY($5) AND a.state='enabled' AND s.state='enabled' AND {FULL_GENERATION_READY} ORDER BY ia.source_item_id,CASE a.kind WHEN 'poster' THEN 0 WHEN 'thumbnail' THEN 1 WHEN 'backdrop' THEN 2 WHEN 'logo' THEN 4 ELSE 3 END,CASE ia.role WHEN 'primary' THEN 0 WHEN 'poster' THEN 1 WHEN 'thumbnail' THEN 2 ELSE 3 END,ia.ordinal,ia.role,a.source_artwork_id,a.id"
         );
         let rows: Vec<TargetedArtwork> = sqlx::query_as(&sql)
             .bind(&scope.source_keys)
@@ -481,6 +492,68 @@ impl MediaRepository {
             .bind(&scope.providers)
             .bind(&scope.kinds)
             .bind(source_item_ids)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.target_id, row.artwork))
+            .collect())
+    }
+    /// Card artwork inherits only complete ancestor posters for episodes. A validated
+    /// season-children context retains each episode's own primary artwork instead.
+    pub async fn card_item_artwork(
+        &self,
+        scope: &Scope,
+        source_item_ids: &[Uuid],
+        season_parent: Option<Uuid>,
+    ) -> Result<BTreeMap<Uuid, ArtworkRecord>> {
+        scope.validate()?;
+        if source_item_ids.len() > 200 {
+            return Err(Error::Invalid("artwork target batch"));
+        }
+        if source_item_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        // Kind scope selects targets, not their season/series ancestors.
+        let sql = format!(
+            r#"{ELIGIBLE}, targets AS (
+                SELECT e.*, i.parent_id,
+                    (e.kind='episode' AND p.kind='season' AND p.id=$6) AS own_episode
+                FROM eligible e JOIN catalog.items i ON i.id=e.item_id
+                LEFT JOIN catalog.items p ON p.id=i.parent_id
+                WHERE e.id=ANY($5) AND (cardinality($7::text[])=0 OR e.kind=ANY($7))
+            ), candidates AS (
+                SELECT t.id AS target_id, t.id AS artwork_item_id, 0 AS priority, false AS poster_only
+                FROM targets t WHERE t.kind<>'episode' OR t.own_episode
+                UNION ALL
+                SELECT t.id, ancestor.id, CASE p.kind WHEN 'season' THEN 0 ELSE 1 END, true
+                FROM targets t JOIN catalog.items p ON p.id=t.parent_id AND p.kind IN ('season','series')
+                JOIN eligible ancestor ON ancestor.item_id=p.id AND ancestor.source_id=t.source_id
+                WHERE t.kind='episode' AND NOT coalesce(t.own_episode,false)
+                UNION ALL
+                SELECT t.id, ancestor.id, 1, true
+                FROM targets t JOIN catalog.items p ON p.id=t.parent_id AND p.kind='season'
+                JOIN catalog.items series ON series.id=p.parent_id AND series.kind='series'
+                JOIN eligible ancestor ON ancestor.item_id=series.id AND ancestor.source_id=t.source_id
+                WHERE t.kind='episode' AND NOT coalesce(t.own_episode,false)
+            )
+            SELECT DISTINCT ON (c.target_id) c.target_id,a.id,a.source_id,a.source_artwork_id,a.kind,a.rights,a.revision
+            FROM candidates c JOIN media.item_artwork ia ON ia.source_item_id=c.artwork_item_id
+            JOIN media.artwork a ON a.id=ia.artwork_id
+            JOIN catalog.sources s ON s.id=a.source_id
+            JOIN media.artwork_generations g ON g.artwork_id=a.id AND g.revision=a.revision AND g.state='published'
+            WHERE a.state='enabled' AND s.state='enabled' AND (NOT c.poster_only OR a.kind='poster') AND {FULL_GENERATION_READY}
+            ORDER BY c.target_id,c.priority,CASE a.kind WHEN 'poster' THEN 0 WHEN 'thumbnail' THEN 1 WHEN 'backdrop' THEN 2 WHEN 'logo' THEN 4 ELSE 3 END,
+            CASE ia.role WHEN 'primary' THEN 0 WHEN 'poster' THEN 1 WHEN 'thumbnail' THEN 2 ELSE 3 END,ia.ordinal,ia.role,a.source_artwork_id,a.id"#
+        );
+        let rows: Vec<TargetedArtwork> = sqlx::query_as(&sql)
+            .bind(&scope.source_keys)
+            .bind(&scope.library_ids)
+            .bind(&scope.providers)
+            .bind(Vec::<String>::new())
+            .bind(source_item_ids)
+            .bind(season_parent)
+            .bind(&scope.kinds)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows
@@ -537,7 +610,7 @@ impl MediaRepository {
 
 // Unattached source branding is distinct from artwork with item/person associations.
 const ARTWORK_AVAILABLE: &str = "((NOT EXISTS(SELECT FROM media.item_artwork ia WHERE ia.artwork_id=a.id) AND NOT EXISTS(SELECT FROM media.person_artwork pa WHERE pa.artwork_id=a.id)) OR EXISTS(SELECT FROM media.item_artwork ia JOIN eligible e ON e.id=ia.source_item_id WHERE ia.artwork_id=a.id) OR EXISTS(SELECT FROM media.person_artwork pa JOIN catalog.credits c ON c.person_id=pa.person_id JOIN eligible e ON e.id=c.source_item_id WHERE pa.artwork_id=a.id))";
-const FULL_GENERATION_READY: &str = r#"
+pub(crate) const FULL_GENERATION_READY: &str = r#"
 EXISTS(
  SELECT FROM media.variants nv JOIN media.objects no ON no.id=nv.object_id
  WHERE nv.artwork_id=a.id AND nv.revision=g.revision AND nv.variant='native'
@@ -599,6 +672,9 @@ pub(crate) async fn stage_input(
             .await?;
         revision
     };
+    // A successful staging observation is not an HTTP attempt or publication claim.
+    sqlx::query("INSERT INTO ingest.request_receipts(run_id,job_id,fence,operation,outcome,is_request,operation_key) SELECT scope_id,id,fence,'artwork','success',false,$2 FROM queue.jobs WHERE scope_id=$1 AND kind='ingest' AND state='leased' ON CONFLICT(run_id,operation,operation_key) WHERE operation_key IS NOT NULL DO NOTHING")
+            .bind(run).bind(format!("publication:{art}:{revision}")).execute(&mut **tx).await?;
     if let Some(item) = &r.item_external_id {
         let n=sqlx::query("INSERT INTO media.item_artwork(source_item_id,artwork_id,source_id,role,ordinal) SELECT id,$2,$3,$4,$5 FROM catalog.source_items WHERE source_id=$3 AND external_id=$1 ON CONFLICT(source_item_id,artwork_id,role) DO UPDATE SET ordinal=EXCLUDED.ordinal")
             .bind(item).bind(art).bind(source).bind(&r.role).bind(r.ordinal).execute(&mut **tx).await?.rows_affected();
@@ -729,15 +805,21 @@ mod tests {
         assert!(input.fingerprint().is_err());
     }
     #[test]
-    fn fixture_images_and_svg_are_retained() {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/catalog/artwork");
-        for name in ["tmdb.png", "his-girl-friday.jpg"] {
-            let bytes = std::fs::read(path.join(name)).unwrap();
+    fn neutral_images_and_svg_are_retained() {
+        for format in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
+            let mut output = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                2,
+                2,
+                image::Rgb([64, 96, 128]),
+            ))
+            .write_to(&mut output, format)
+            .unwrap();
+            let bytes = output.into_inner();
             let image = ValidatedImage::raster(bytes.clone()).unwrap();
             assert_eq!(image.bytes(), bytes);
         }
-        let bytes = std::fs::read(path.join("tmdb.svg")).unwrap();
+        let bytes = b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 2' width='2' height='2'><rect width='2' height='2' fill='gray'/></svg>".to_vec();
         assert_eq!(
             ValidatedImage::svg_original(bytes.clone()).unwrap().bytes(),
             bytes

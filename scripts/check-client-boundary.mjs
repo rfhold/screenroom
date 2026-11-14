@@ -52,6 +52,7 @@ export function inspectSource(file, contents) {
   const violations = [];
   const add = (rule, reason, index = 0) => violations.push({ path: file, line: text.slice(0, index).split('\n').length, rule, reason });
   const rules = [
+    ['client-footer', /\b(?:ProviderAttribution(?:View)?|provider_attribution|loadAttribution|attributionError)\b|provider[.-]attribution|Data &amp; artwork credits|Data & artwork credits/g, 'global attribution and technical-credit footers are not client UI'],
     ['remote-preferences', /\b(?:PreferencesService|get_preferences|update_preferences|getPreferences|updatePreferences)\b/g, 'settings are client-owned; remote preferences RPCs are retired'],
     ['mock-profile', /\b(?:mock_profile|mockProfile)\b|x-screenroom-mock-profile/g, 'use an explicit trusted-local user UUID selector, not a mock profile'],
     ['private-api', /screenroom\.(?:catalog|user)\.(?:operator|internal)\.|\b(?:jellyfin_user_service_client|playback_state_service_client|ingestion_service_client)\b/g, 'operator and internal contracts must not be used by public clients'],
@@ -122,7 +123,7 @@ export async function checkClientBoundary(root) {
     if (!stat) return;
     if (stat.isDirectory()) {
       if (/(?:^|\/)(?:artwork|Catalog)$/.test(relative) && !relative.includes('.xcassets/')) {
-        violations.push({ path: relative, line: 1, rule: 'legacy-artwork-directory', reason: 'legacy client-local catalog/artwork directory; keep canonical fixtures server-owned' });
+        violations.push({ path: relative, line: 1, rule: 'legacy-artwork-directory', reason: 'client-local catalog/artwork directory; load provider data through the shared core' });
       }
       for (const entry of (await readdir(path.join(root, relative))).sort()) await walk(`${relative}/${entry}`);
     } else if (!testFile(relative)) files.add(relative);
@@ -173,7 +174,7 @@ async function main(args) {
   const result = await checkClientBoundary(root);
   console.log('Client boundary static source/resource audit:');
   for (const item of scope) console.log(`  ${item}`);
-  console.log('Excluded: tests/fixtures, generated/build outputs, core crates, canonical fixtures, static website.');
+  console.log('Excluded: tests/fixtures, generated/build outputs, core crates, static website.');
   for (const item of result.violations) console.error(`${item.path}:${item.line} [${item.rule}] ${item.reason}`);
   console.log(`${result.filesScanned} files scanned; ${result.violations.length} violation(s). Static guard only, not runtime network proof.`);
   if (result.violations.length) process.exitCode = 1;

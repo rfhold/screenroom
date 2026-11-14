@@ -2,19 +2,11 @@ x-backend: &backend
   image: screenroom-backend:local
   build: {context: ., dockerfile: docker/backend/Dockerfile}
   networks: [private]
-  volumes:
-    - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/installation.json:/runtime/installation.json:ro
-    - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/users.json:/runtime/users.json:ro
   depends_on:
     postgres: {condition: service_healthy}
     garage: {condition: service_started}
   environment: &common
     SCREENROOM_MIGRATION_DATABASE_URL: postgres://screenroom:screenroom-local-only@postgres/screenroom
-    SCREENROOM_FIXTURE_ROOT: /app/fixtures/catalog
-    SCREENROOM_EMBEDDING_BASE_URL: https://agent-gateway.holdenitdown.net/v1
-    SCREENROOM_EMBEDDING_MODEL: local-embedding
-    SCREENROOM_EMBEDDING_DIMENSIONS: "1024"
-    SCREENROOM_EMBEDDING_REVISION: qwen3-embedding-0.6b-local-v1
     SCREENROOM_S3_ENDPOINT: http://garage:3900
     SCREENROOM_S3_REGION: garage
     SCREENROOM_S3_BUCKET: screenroom-artwork
@@ -51,31 +43,60 @@ services:
       <<: *common
       DATABASE_URL: postgres://catalog_runtime:catalog-local-only@postgres/screenroom
       SCREENROOM_CATALOG_LISTEN: 0.0.0.0:50052
-      SCREENROOM_CATALOG_PRIVATE_LISTEN: 0.0.0.0:50062
       SCREENROOM_CATALOG_PUBLIC_ORIGIN: ${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
       SCREENROOM_USER_PRIVATE_URI: http://user:50063
       SCREENROOM_CATALOG_CORS_ORIGINS: http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4176,http://localhost:4176,http://127.0.0.1:5173,http://localhost:5173
       SCREENROOM_S3_ACCESS_KEY_ID: ${CATALOG_S3_KEY:-}
       SCREENROOM_S3_SECRET_ACCESS_KEY: ${CATALOG_S3_SECRET:-}
-      SCREENROOM_EMBEDDING_API_KEY: ${SCREENROOM_EMBEDDING_API_KEY:-}
+      SCREENROOM_EMBEDDING_BASE_URL:
+      SCREENROOM_EMBEDDING_MODEL:
+      SCREENROOM_EMBEDDING_DIMENSIONS:
+      SCREENROOM_EMBEDDING_REVISION:
+      SCREENROOM_EMBEDDING_API_KEY:
   user:
     <<: *backend
     command: [screenroom-user]
+    volumes:
+      - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-local}/users.json:/runtime/users.json:ro
+      - backend-jellyfin-credentials:/run/screenroom/credentials:ro
     environment:
       <<: *common
       DATABASE_URL: postgres://user_runtime:user-local-only@postgres/screenroom
       SCREENROOM_USER_LISTEN: 0.0.0.0:50053
       SCREENROOM_USER_PRIVATE_LISTEN: 0.0.0.0:50063
+      SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY: /run/screenroom/credentials
       SCREENROOM_USER_CORS_ORIGINS: http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4176,http://localhost:4176,http://127.0.0.1:5173,http://localhost:5173
   worker:
     <<: *backend
     command: [screenroom-index-worker, serve]
+    volumes:
+      - backend-jellyfin-credentials:/run/screenroom/credentials:ro
     environment:
       <<: *common
       DATABASE_URL: postgres://worker_runtime:worker-local-only@postgres/screenroom
       SCREENROOM_S3_ACCESS_KEY_ID: ${WORKER_S3_KEY:-}
       SCREENROOM_S3_SECRET_ACCESS_KEY: ${WORKER_S3_SECRET:-}
-      SCREENROOM_EMBEDDING_API_KEY: ${SCREENROOM_EMBEDDING_API_KEY:-}
+      SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY: /run/screenroom/credentials
+      SCREENROOM_EMBEDDING_BASE_URL:
+      SCREENROOM_EMBEDDING_MODEL:
+      SCREENROOM_EMBEDDING_DIMENSIONS:
+      SCREENROOM_EMBEDDING_REVISION:
+      SCREENROOM_EMBEDDING_API_KEY:
+  index-operator:
+    image: ${SCREENROOM_OPERATOR_IMAGE:-screenroom-backend:local}
+    build: {context: ., dockerfile: docker/backend/Dockerfile}
+    profiles: [index-operator]
+    command: [screenroom-index-operator]
+    networks: [private]
+    ports: ["127.0.0.1:${SCREENROOM_OPERATOR_PORT:-50072}:50072"]
+    volumes:
+      - backend-jellyfin-credentials:/run/screenroom/credentials
+    environment:
+      DATABASE_URL: postgres://operator_runtime:operator-local-only@postgres/screenroom
+      SCREENROOM_MIGRATION_DATABASE_URL: postgres://screenroom:screenroom-local-only@postgres/screenroom
+      SCREENROOM_OPERATOR_ORIGIN: ${SCREENROOM_OPERATOR_ORIGIN:-http://127.0.0.1:50072}
+      SCREENROOM_OPERATOR_LISTEN: 0.0.0.0:50072
+      SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY: /run/screenroom/credentials
   edge:
     image: envoyproxy/envoy:v1.37-latest@sha256:7765ad61185fca9c9a770c9e2cad640d085d708ae9c22f3741345e88331472a4
     command: [envoy, -c, /etc/envoy/envoy.yaml, --concurrency, "2"]
@@ -83,7 +104,7 @@ services:
     ports: ["127.0.0.1:${SCREENROOM_BACKEND_PORT:-50051}:50051"]
     volumes:
       - ./docker/backend/envoy.yaml:/etc/envoy/envoy.yaml:ro
-      - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-e2e}/identity.json:/runtime/identity.json:ro
+      - ${SCREENROOM_BACKEND_RUNTIME:-./build/backend-runtime/screenroom-local}/identity.json:/runtime/identity.json:ro
 
 networks:
   private: {}
@@ -94,3 +115,4 @@ volumes:
   backend-postgres-data:
   backend-garage-meta:
   backend-garage-data:
+  backend-jellyfin-credentials:

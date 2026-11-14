@@ -105,6 +105,145 @@ pub mod user_service_client {
                 );
             self.inner.unary(req, path, codec).await
         }
+        pub async fn list_jellyfin_sources(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListJellyfinSourcesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJellyfinSourcesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/screenroom.user.v1.UserService/ListJellyfinSources",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "screenroom.user.v1.UserService",
+                        "ListJellyfinSources",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_jellyfin_profiles(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListJellyfinProfilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJellyfinProfilesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/screenroom.user.v1.UserService/ListJellyfinProfiles",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "screenroom.user.v1.UserService",
+                        "ListJellyfinProfiles",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn get_jellyfin_link(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetJellyfinLinkResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/screenroom.user.v1.UserService/GetJellyfinLink",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("screenroom.user.v1.UserService", "GetJellyfinLink"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn set_jellyfin_link(
+            &mut self,
+            request: impl tonic::IntoRequest<super::SetJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetJellyfinLinkResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/screenroom.user.v1.UserService/SetJellyfinLink",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("screenroom.user.v1.UserService", "SetJellyfinLink"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn clear_jellyfin_link(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ClearJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ClearJellyfinLinkResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/screenroom.user.v1.UserService/ClearJellyfinLink",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new(
+                        "screenroom.user.v1.UserService",
+                        "ClearJellyfinLink",
+                    ),
+                );
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -125,6 +264,41 @@ pub mod user_service_server {
             request: tonic::Request<super::GetCurrentUserRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetCurrentUserResponse>,
+            tonic::Status,
+        >;
+        async fn list_jellyfin_sources(
+            &self,
+            request: tonic::Request<super::ListJellyfinSourcesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJellyfinSourcesResponse>,
+            tonic::Status,
+        >;
+        async fn list_jellyfin_profiles(
+            &self,
+            request: tonic::Request<super::ListJellyfinProfilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListJellyfinProfilesResponse>,
+            tonic::Status,
+        >;
+        async fn get_jellyfin_link(
+            &self,
+            request: tonic::Request<super::GetJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetJellyfinLinkResponse>,
+            tonic::Status,
+        >;
+        async fn set_jellyfin_link(
+            &self,
+            request: tonic::Request<super::SetJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::SetJellyfinLinkResponse>,
+            tonic::Status,
+        >;
+        async fn clear_jellyfin_link(
+            &self,
+            request: tonic::Request<super::ClearJellyfinLinkRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ClearJellyfinLinkResponse>,
             tonic::Status,
         >;
     }
@@ -234,6 +408,234 @@ pub mod user_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetCurrentUserSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/screenroom.user.v1.UserService/ListJellyfinSources" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListJellyfinSourcesSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ListJellyfinSourcesRequest>
+                    for ListJellyfinSourcesSvc<T> {
+                        type Response = super::ListJellyfinSourcesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListJellyfinSourcesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::list_jellyfin_sources(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListJellyfinSourcesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/screenroom.user.v1.UserService/ListJellyfinProfiles" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListJellyfinProfilesSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ListJellyfinProfilesRequest>
+                    for ListJellyfinProfilesSvc<T> {
+                        type Response = super::ListJellyfinProfilesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListJellyfinProfilesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::list_jellyfin_profiles(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListJellyfinProfilesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/screenroom.user.v1.UserService/GetJellyfinLink" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetJellyfinLinkSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::GetJellyfinLinkRequest>
+                    for GetJellyfinLinkSvc<T> {
+                        type Response = super::GetJellyfinLinkResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetJellyfinLinkRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::get_jellyfin_link(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetJellyfinLinkSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/screenroom.user.v1.UserService/SetJellyfinLink" => {
+                    #[allow(non_camel_case_types)]
+                    struct SetJellyfinLinkSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::SetJellyfinLinkRequest>
+                    for SetJellyfinLinkSvc<T> {
+                        type Response = super::SetJellyfinLinkResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::SetJellyfinLinkRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::set_jellyfin_link(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = SetJellyfinLinkSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/screenroom.user.v1.UserService/ClearJellyfinLink" => {
+                    #[allow(non_camel_case_types)]
+                    struct ClearJellyfinLinkSvc<T: UserService>(pub Arc<T>);
+                    impl<
+                        T: UserService,
+                    > tonic::server::UnaryService<super::ClearJellyfinLinkRequest>
+                    for ClearJellyfinLinkSvc<T> {
+                        type Response = super::ClearJellyfinLinkResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ClearJellyfinLinkRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as UserService>::clear_jellyfin_link(&inner, request)
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ClearJellyfinLinkSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -1,6 +1,8 @@
 package org.screenroom.ui
 
-import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.awt.image.BufferedImage
 import javax.imageio.ImageIO
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.awaitCancellation
@@ -22,31 +24,35 @@ class ReadRefreshTest {
         var cancellations = 0
         var result: String? = null
         var decoded: java.awt.image.BufferedImage? = null
+        val imageBytes = ByteArrayOutputStream().also {
+            ImageIO.write(BufferedImage(2, 3, BufferedImage.TYPE_INT_RGB), "png", it)
+        }.toByteArray()
         val search = launch {
             refresh.repeatOnRefresh {
-                queries += "Bunny"
+                queries += "query"
                 if (queries.size == 1) try { awaitCancellation() } finally { cancellations++ }
-                result = "Big Buck Bunny"
+                result = "result"
             }
         }
         val artwork = launch {
             refresh.repeatOnRefresh {
                 artRequests++
                 if (artRequests == 1) try { awaitCancellation() } finally { cancellations++ }
-                decoded = ImageIO.read(File("../../../fixtures/catalog/artwork/big-buck-bunny.jpg"))
+                decoded = ImageIO.read(ByteArrayInputStream(imageBytes))
             }
         }
         runCurrent()
-        assertEquals(listOf("Bunny"), queries)
+        assertEquals(listOf("query"), queries)
         assertEquals(1, artRequests)
         refresh.advance()
         runCurrent()
         assertEquals(2, cancellations)
-        assertEquals(listOf("Bunny", "Bunny"), queries)
-        assertEquals("Big Buck Bunny", result)
+        assertEquals(listOf("query", "query"), queries)
+        assertEquals("result", result)
         assertEquals(2, artRequests)
         assertNotNull(decoded)
-        assertTrue(decoded!!.width > 0)
+        assertEquals(2, decoded!!.width)
+        assertEquals(3, decoded!!.height)
         search.cancelAndJoin(); artwork.cancelAndJoin()
         refresh.advance(); runCurrent()
         assertEquals(2, artRequests)

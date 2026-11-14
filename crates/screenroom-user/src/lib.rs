@@ -1,17 +1,17 @@
+mod profiles;
 pub mod progress;
 pub mod repository;
+pub mod watched;
 
 use repository::{Repository, uuid};
-use screenroom_catalog_adapter::MockAdapters;
 use screenroom_observability::telemetry::rpc_layer;
-use screenroom_proto::user::{internal::v1 as internal, operator::v1 as operator, v1::*};
-use std::sync::Arc;
+use screenroom_proto::user::{internal::v1 as internal, v1::*};
 use tonic::{Request, Response, Status};
 
 #[derive(Clone)]
 pub struct UserService {
     pub repository: Repository,
-    pub adapters: Arc<MockAdapters>,
+    pub connections: screenroom_backend::connections::ConnectionRepository,
 }
 
 pub fn local_selector<T>(request: &Request<T>) -> Result<screenroom_backend::Uuid, Status> {
@@ -34,6 +34,40 @@ pub fn local_selector<T>(request: &Request<T>) -> Result<screenroom_backend::Uui
 
 #[tonic::async_trait]
 impl user_service_server::UserService for UserService {
+    async fn list_jellyfin_sources(
+        &self,
+        request: Request<ListJellyfinSourcesRequest>,
+    ) -> Result<Response<ListJellyfinSourcesResponse>, Status> {
+        self.sources(request).await.map(Response::new)
+    }
+    async fn list_jellyfin_profiles(
+        &self,
+        request: Request<ListJellyfinProfilesRequest>,
+    ) -> Result<Response<ListJellyfinProfilesResponse>, Status> {
+        profiles::deadline(self.profiles(request))
+            .await
+            .map(Response::new)
+    }
+    async fn get_jellyfin_link(
+        &self,
+        request: Request<GetJellyfinLinkRequest>,
+    ) -> Result<Response<GetJellyfinLinkResponse>, Status> {
+        self.read_link(request).await.map(Response::new)
+    }
+    async fn set_jellyfin_link(
+        &self,
+        request: Request<SetJellyfinLinkRequest>,
+    ) -> Result<Response<SetJellyfinLinkResponse>, Status> {
+        profiles::deadline(self.select_profile(request))
+            .await
+            .map(Response::new)
+    }
+    async fn clear_jellyfin_link(
+        &self,
+        request: Request<ClearJellyfinLinkRequest>,
+    ) -> Result<Response<ClearJellyfinLinkResponse>, Status> {
+        self.unlink(request).await.map(Response::new)
+    }
     async fn get_current_user(
         &self,
         request: Request<GetCurrentUserRequest>,
@@ -45,37 +79,6 @@ impl user_service_server::UserService for UserService {
                 display_name: user.display_name,
             }),
         }))
-    }
-}
-
-#[tonic::async_trait]
-impl operator::jellyfin_user_service_server::JellyfinUserService for UserService {
-    async fn set_link(
-        &self,
-        request: Request<operator::SetLinkRequest>,
-    ) -> Result<Response<operator::SetLinkResponse>, Status> {
-        let mut link = request
-            .into_inner()
-            .link
-            .ok_or_else(|| Status::invalid_argument("link required"))?;
-        let id = uuid(&link.user_id)?;
-        self.repository
-            .set_link(id, &link.source_id, &link.jellyfin_user_id)
-            .await?;
-        link.user_id = id.to_string();
-        Ok(Response::new(operator::SetLinkResponse {
-            link: Some(link),
-        }))
-    }
-    async fn clear_link(
-        &self,
-        request: Request<operator::ClearLinkRequest>,
-    ) -> Result<Response<operator::ClearLinkResponse>, Status> {
-        let request = request.into_inner();
-        self.repository
-            .clear_link(uuid(&request.user_id)?, &request.source_id)
-            .await?;
-        Ok(Response::new(operator::ClearLinkResponse {}))
     }
 }
 
@@ -134,9 +137,6 @@ pub async fn serve_private(
     tonic::transport::Server::builder()
         .timeout(std::time::Duration::from_secs(10))
         .layer(rpc_layer())
-        .add_service(
-            operator::jellyfin_user_service_server::JellyfinUserServiceServer::new(service.clone()),
-        )
         .add_service(
             internal::playback_state_service_server::PlaybackStateServiceServer::new(service),
         )

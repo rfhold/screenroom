@@ -31,22 +31,53 @@ pub struct Item {
     pub colors: (String, String),
     pub parent: Option<String>,
     pub progress: Option<u8>,
+    pub watched: Option<bool>,
     pub rights: Value,
     pub metadata: Value,
     pub art: Option<Value>,
 }
+impl Item {
+    pub fn is_watched(&self) -> bool {
+        self.watched == Some(true)
+    }
+    pub fn playback_accessibility(&self, progress: Option<u8>) -> String {
+        let mut labels = Vec::new();
+        if self.is_watched() {
+            labels.push("Watched".to_owned());
+        }
+        if let Some(progress) = progress {
+            labels.push(format!("Playback progress {progress}%"));
+        }
+        labels.join(", ")
+    }
+    pub fn card_accessibility(&self, progress: Option<u8>) -> String {
+        [
+            self.title.clone(),
+            self.kind.label().into(),
+            self.meta.clone(),
+            self.playback_accessibility(progress),
+        ]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+    }
+}
 #[derive(Clone, Default)]
 pub struct Catalog {
     pub items: Vec<Item>,
-    pub art: Vec<Value>,
     pub libraries: Vec<core::MediaLibrary>,
     pub members: HashMap<String, Vec<String>>,
     pub children: HashMap<String, Vec<String>>,
     pub homes: HashMap<String, Vec<(String, Vec<(String, Option<u8>)>)>>,
-    pub info: core::CatalogInfo,
+    pub home_errors: HashMap<String, String>,
 }
 thread_local! { static DATA: RefCell<Catalog> = RefCell::default(); }
-pub fn install(data: Catalog) {
+pub fn install(mut data: Catalog) {
+    for ids in data.members.values_mut().chain(data.children.values_mut()) {
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(id.clone()));
+    }
     DATA.with(|d| d.replace(data));
 }
 pub fn merge_items(items: Vec<core::Item>) {
@@ -76,11 +107,53 @@ pub fn members(library: &str) -> Vec<String> {
 pub fn children(parent: &str) -> Vec<String> {
     DATA.with(|d| d.borrow().children.get(parent).cloned().unwrap_or_default())
 }
-pub fn info() -> core::CatalogInfo {
-    DATA.with(|d| d.borrow().info.clone())
+pub fn home_error(title: &str) -> Option<String> {
+    DATA.with(|d| d.borrow().home_errors.get(title).cloned())
 }
-pub fn artwork() -> Vec<Value> {
-    DATA.with(|d| d.borrow().art.clone())
+pub fn replace_home(library: &str, rows: Vec<core::HomeRow>) {
+    merge_items(rows.iter().flat_map(|r| r.items.clone()).collect());
+    DATA.with(|d| {
+        let mut data = d.borrow_mut();
+        data.home_errors.clear();
+        for row in &rows {
+            if let Some(error) = &row.read_error {
+                data.home_errors.insert(
+                    row.title.clone(),
+                    crate::presentation::row_error(&error.code).into(),
+                );
+            }
+        }
+        data.homes.insert(
+            library.into(),
+            rows.into_iter()
+                .map(|r| {
+                    (
+                        r.title,
+                        r.items
+                            .into_iter()
+                            .map(|i| (i.id, i.progress_percent.map(|p| p.min(100) as u8)))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        );
+    });
+}
+pub fn append_page(library: &str, parent: Option<&str>, ids: Vec<String>, items: Vec<core::Item>) {
+    merge_items(items);
+    DATA.with(|d| {
+        let mut data = d.borrow_mut();
+        let entries = if let Some(parent) = parent {
+            data.children.entry(parent.into()).or_default()
+        } else {
+            data.members.entry(library.into()).or_default()
+        };
+        for id in ids {
+            if !entries.contains(&id) {
+                entries.push(id);
+            }
+        }
+    });
 }
 pub fn art_for(id: &str) -> Option<Value> {
     catalog()
@@ -175,6 +248,7 @@ pub fn map_item(item: core::Item, credits: Vec<core::Credit>) -> Item {
         ),
         parent: item.parent_id,
         progress: item.progress_percent.map(|v| v.min(100) as u8),
+        watched: item.watched,
         rights: json!({"rights":rights.label,"note":rights.note,"source":rights.source,"license":rights.license_url,"attribution":rights.attribution}),
         metadata: json!({"rating":rating.map(|r| r.value),"ratingProvider":rating.map(|r| r.provider.clone()),"ratingScale":rating.map(|r| r.scale),"votes":rating.and_then(|r| r.votes),"retrievedAt":rating.map(|r| r.retrieved_at.clone()),"date":item.release_date,"providers":item.provider_references,"rights":item.metadata_rights,"metadataRetrievedAt":item.metadata_retrieved_at,"notes":item.provenance_notes,"cast":people(true),"crew":people(false)}),
         art: item.artwork.as_ref().map(art_record),
@@ -184,6 +258,37 @@ pub fn map_item(item: core::Item, credits: Vec<core::Credit>) -> Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn watched_state_is_explicit_and_independent_of_progress() {
+        for watched in [None, Some(false), Some(true), Some(false), None, Some(true)] {
+            let mapped = map_item(
+                core::Item {
+                    id: "stable-item".into(),
+                    watched,
+                    progress_percent: Some(100),
+                    ..Default::default()
+                },
+                vec![],
+            );
+            assert_eq!(mapped.watched, watched);
+            assert_eq!(mapped.is_watched(), watched == Some(true));
+            let label = mapped.card_accessibility(mapped.progress);
+            assert_eq!(
+                label.matches("Watched").count(),
+                usize::from(watched == Some(true))
+            );
+            assert!(label.contains("Playback progress 100%"));
+            assert_eq!(mapped.id, "stable-item");
+        }
+        let mapped = map_item(
+            core::Item {
+                watched: Some(true),
+                ..Default::default()
+            },
+            vec![],
+        );
+        assert_eq!(mapped.playback_accessibility(None), "Watched");
+    }
     #[test]
     fn arbitrary_provider_scale_and_metadata_survive_mapping() {
         let mapped = map_item(
@@ -228,7 +333,6 @@ mod tests {
             providers,
             "Other catalog · Archived · https://example.org/item"
         );
-        assert!(!providers.contains("TMDB"));
         assert!(!providers.contains("Jellyfin"));
     }
     #[test]
@@ -248,47 +352,5 @@ mod tests {
         assert_eq!(mapped.metadata["metadataRetrievedAt"], "metadata-only-date");
         assert_eq!(mapped.metadata["rights"]["note"], "Metadata only");
         assert_eq!(provider_info(&mapped.metadata), "");
-    }
-    #[test]
-    fn global_artwork_and_ordered_notices_are_not_limited_to_visited_items() {
-        let info = core::CatalogInfo {
-            branding: vec![
-                core::Artwork {
-                    id: "unvisited".into(),
-                    kind: "portrait".into(),
-                    ..Default::default()
-                },
-                core::Artwork {
-                    id: "brand".into(),
-                    kind: "logo".into(),
-                    url: "http://example.org/nonstandard-name.png".into(),
-                    ..Default::default()
-                },
-            ],
-            notices: ["second", "first"]
-                .map(|id| core::CatalogNotice {
-                    id: id.into(),
-                    ..Default::default()
-                })
-                .to_vec(),
-            retrieved_at: "catalog-date".into(),
-        };
-        install(Catalog {
-            art: info.branding.iter().map(art_record).collect(),
-            info: info.clone(),
-            ..Default::default()
-        });
-        assert!(catalog().is_empty());
-        assert_eq!(artwork().len(), 2);
-        assert_eq!(super::info(), info);
-        assert_eq!(
-            super::info()
-                .branding
-                .iter()
-                .find(|a| a.kind == "logo")
-                .unwrap()
-                .url,
-            "http://example.org/nonstandard-name.png"
-        );
     }
 }

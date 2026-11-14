@@ -8,6 +8,7 @@ use std::{
     path::PathBuf,
     process::{Child, Command, Stdio},
 };
+mod support;
 
 struct Config(PathBuf);
 impl Config {
@@ -23,7 +24,6 @@ impl Drop for Config {
         let _ = std::fs::remove_file(&self.0);
     }
 }
-
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {
@@ -31,7 +31,6 @@ impl Drop for Process {
         let _ = self.0.wait();
     }
 }
-
 fn launch(config: &Config, create_missing: bool, runtime: &str, migration: &str) -> Process {
     let mut command = Command::new(env!("CARGO_BIN_EXE_screenroom-user-init"));
     command
@@ -44,7 +43,6 @@ fn launch(config: &Config, create_missing: bool, runtime: &str, migration: &str)
     }
     Process(command.arg(&config.0).spawn().unwrap())
 }
-
 async fn success(process: &mut Process) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
@@ -58,11 +56,9 @@ async fn success(process: &mut Process) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
-
-fn user(id: Uuid, name: &str, external: &str) -> Value {
-    json!({"id": id, "display_name": name, "links": [{"source_id": "mock-jellyfin", "jellyfin_user_id": external}]})
+fn user(id: Uuid, name: &str) -> Value {
+    json!({"id": id, "display_name": name})
 }
-
 async fn snapshot(pool: &PgPool) -> (Vec<String>, Vec<String>) {
     (
         sqlx::query_scalar("SELECT row_to_json(u)::text FROM identity.users u ORDER BY id").fetch_all(pool).await.unwrap(),
@@ -70,17 +66,34 @@ async fn snapshot(pool: &PgPool) -> (Vec<String>, Vec<String>) {
     )
 }
 
+#[test]
+fn legacy_link_configuration_is_rejected_before_database_access() {
+    for links in [
+        json!([]),
+        json!(null),
+        json!([{"source_id":"owned", "jellyfin_user_id":"unchecked"}]),
+    ] {
+        let config =
+            Config::new(json!([{"id":Uuid::new_v4(),"display_name":"Viewer","links":links}]));
+        let output = Command::new(env!("CARGO_BIN_EXE_screenroom-user-init"))
+            .env_remove("DATABASE_URL")
+            .arg(&config.0)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("select a validated Jellyfin profile")
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires fresh disposable DB and separate restricted/owner LOGIN URLs: USER_BOOTSTRAP_DATABASE_URL, USER_BOOTSTRAP_MIGRATION_DATABASE_URL"]
 async fn create_only_bootstrap_preserves_operator_state_and_is_atomic() {
     let runtime = std::env::var("USER_BOOTSTRAP_DATABASE_URL").unwrap();
     let migration = std::env::var("USER_BOOTSTRAP_MIGRATION_DATABASE_URL").unwrap();
-    let alice = Uuid::new_v4();
-    let bob = Uuid::new_v4();
-    let canonical = Config::new(json!([
-        user(alice, "Alice", "initial-alice"),
-        user(bob, "Bob", "initial-bob")
-    ]));
+    let (alice, bob) = (Uuid::new_v4(), Uuid::new_v4());
+    let canonical = Config::new(json!([user(alice, "Alice"), user(bob, "Bob")]));
     assert!(success(&mut launch(&canonical, true, &runtime, &migration)).await);
     let pool = PgPoolOptions::new().connect(&runtime).await.unwrap();
     let repository = Repository::new(pool.clone());
@@ -90,127 +103,63 @@ async fn create_only_bootstrap_preserves_operator_state_and_is_atomic() {
             .await
             .is_err()
     );
-    assert_eq!(
-        repository
-            .link(alice, "mock-jellyfin")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("initial-alice")
-    );
-    assert_eq!(
-        repository
-            .link(bob, "mock-jellyfin")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("initial-bob")
-    );
+    assert!(repository.link(alice, "owned").await.unwrap().is_none());
     repository.init_user(alice, "Operator name").await.unwrap();
-    repository
-        .set_link(alice, "mock-jellyfin", "operator-remap")
+    support::set_link(&pool, alice, "owned", "operator-remap")
         .await
         .unwrap();
-    repository.clear_link(bob, "mock-jellyfin").await.unwrap();
     sqlx::query("UPDATE identity.users SET display_name='Disabled operator name',state='disabled',updated_at=now() WHERE id=$1").bind(bob).execute(&pool).await.unwrap();
     let before = snapshot(&pool).await;
     assert!(success(&mut launch(&canonical, true, &runtime, &migration)).await);
     assert_eq!(
         snapshot(&pool).await,
         before,
-        "bootstrap must preserve all fields, links, and timestamps, including cleared links and disabled users"
+        "bootstrap preserves identity, links, disabled state and timestamps"
     );
-
     let concurrent = Uuid::new_v4();
-    let one = Config::new(json!([user(concurrent, "First candidate", "first-link")]));
-    let two = Config::new(json!([user(concurrent, "Second candidate", "second-link")]));
+    let one = Config::new(json!([user(concurrent, "First candidate")]));
+    let two = Config::new(json!([user(concurrent, "Second candidate")]));
     let mut first = launch(&one, true, &runtime, &migration);
     let mut second = launch(&two, true, &runtime, &migration);
     assert!(success(&mut first).await);
     assert!(success(&mut second).await);
-    let name = repository.user(concurrent).await.unwrap().display_name;
-    let link = repository
-        .link(concurrent, "mock-jellyfin")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(
-        matches!(
-            (name.as_str(), link.as_str()),
-            ("First candidate", "first-link") | ("Second candidate", "second-link")
-        ),
-        "concurrent bootstrap must not mix candidates"
-    );
+    assert!(matches!(
+        repository
+            .user(concurrent)
+            .await
+            .unwrap()
+            .display_name
+            .as_str(),
+        "First candidate" | "Second candidate"
+    ));
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM identity.users WHERE id=$1")
         .bind(concurrent)
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(count, 1);
-
     let invalid = Uuid::new_v4();
-    assert!(
-        repository
-            .create_missing_user(invalid, "Invalid", &[("mock-jellyfin".into(), "".into())])
-            .await
-            .is_err()
-    );
+    assert!(repository.create_missing_user(invalid, "").await.is_err());
     assert!(repository.user(invalid).await.is_err());
-    let rollback = Uuid::new_v4();
-    assert!(
-        repository
-            .create_missing_user(
-                rollback,
-                "Rollback",
-                &[
-                    ("mock-jellyfin".into(), "first".into()),
-                    ("mock-jellyfin".into(), "duplicate-key".into())
-                ]
-            )
-            .await
-            .is_err()
-    );
-    assert!(
-        repository.user(rollback).await.is_err(),
-        "link insertion failure must roll back the new user"
-    );
-    assert!(
-        repository
-            .link(rollback, "mock-jellyfin")
-            .await
-            .unwrap()
-            .is_none(),
-        "earlier link insert must also roll back"
-    );
-    let valid_first = Uuid::new_v4();
     let invalid_json = Config::new(json!([
-        user(valid_first, "Should not write", "valid"),
-        user(Uuid::new_v4(), "Invalid last", "")
+        user(Uuid::new_v4(), "Should not write"),
+        user(Uuid::new_v4(), "")
     ]));
     let before = snapshot(&pool).await;
     assert!(!success(&mut launch(&invalid_json, true, &runtime, &migration)).await);
     assert_eq!(
         snapshot(&pool).await,
         before,
-        "whole input must validate before any writes"
+        "whole input validates before writes"
     );
-
-    let explicit = Config::new(json!([user(
-        alice,
-        "Explicit replacement",
-        "explicit-remap"
-    )]));
+    let explicit = Config::new(json!([user(alice, "Explicit replacement")]));
     assert!(success(&mut launch(&explicit, false, &runtime, &migration)).await);
     assert_eq!(
         repository.user(alice).await.unwrap().display_name,
         "Explicit replacement"
     );
     assert_eq!(
-        repository
-            .link(alice, "mock-jellyfin")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("explicit-remap")
+        repository.link(alice, "owned").await.unwrap().as_deref(),
+        Some("operator-remap")
     );
 }

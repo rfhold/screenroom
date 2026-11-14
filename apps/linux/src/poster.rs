@@ -1,11 +1,57 @@
 use crate::catalog::{Item, Kind};
 use adw::prelude::*;
 use gtk::cairo::{self, Context};
-use std::{cell::RefCell, collections::HashMap};
+use std::cell::RefCell;
 
-thread_local! { static TEXTURES: RefCell<HashMap<(String, i32, i32, bool), gtk::gdk::Texture>> = RefCell::default(); }
-pub fn clear_cache() {
-    TEXTURES.with(|c| c.borrow_mut().clear());
+#[path = "poster_progress.rs"]
+mod progress;
+
+thread_local! { static TEXTURES: RefCell<crate::cache::Cache<(String, i32, i32, bool), gtk::gdk::Texture>> = RefCell::new(crate::cache::Cache::new(crate::cache::TEXTURE_ENTRIES, crate::cache::TEXTURE_BYTES)); }
+type TextureKey = (String, i32, i32, bool);
+thread_local! { static LIVE_TEXTURES: RefCell<crate::cache::LiveIndex<TextureKey, gtk::glib::WeakRef<gtk::gdk::Texture>>> = RefCell::default(); }
+type PendingPicture = (
+    gtk::glib::WeakRef<gtk::Picture>,
+    String,
+    String,
+    i32,
+    i32,
+    bool,
+);
+thread_local! { static PENDING: RefCell<Vec<PendingPicture>> = RefCell::default(); }
+pub fn refresh_pending() {
+    LIVE_TEXTURES.with(|textures| {
+        textures
+            .borrow_mut()
+            .prune(|texture| texture.upgrade().is_some())
+    });
+    let pending = PENDING.with(|p| std::mem::take(&mut *p.borrow_mut()));
+    for (weak, file, title, width, height, contain) in pending {
+        if let Some(picture) = weak.upgrade() {
+            if crate::assets::contains(&file) {
+                let loaded = fitted_picture(&file, &title, width, height, contain);
+                picture.set_paintable(loaded.paintable().as_ref());
+                picture.set_content_fit(if contain {
+                    gtk::ContentFit::Contain
+                } else {
+                    gtk::ContentFit::Cover
+                });
+                crate::home::accessible_label(&picture, &title);
+            } else {
+                PENDING.with(|p| {
+                    p.borrow_mut()
+                        .push((weak, file, title, width, height, contain))
+                });
+            }
+        }
+    }
+}
+pub fn needs_artwork(file: &str) -> bool {
+    PENDING.with(|pending| {
+        pending
+            .borrow()
+            .iter()
+            .any(|(widget, url, ..)| url == file && widget.upgrade().is_some())
+    })
 }
 
 fn color(hex: &str) -> (f64, f64, f64) {
@@ -50,7 +96,12 @@ pub fn fitted_picture(
     contain: bool,
 ) -> gtk::Picture {
     let key = (file.to_owned(), width, height, contain);
-    if let Some(texture) = TEXTURES.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some(texture) = TEXTURES.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return picture_for_texture(&texture, title, width, height, contain);
+    }
+    if let Some(texture) =
+        LIVE_TEXTURES.with(|textures| textures.borrow().get(&key, gtk::glib::WeakRef::upgrade))
+    {
         return picture_for_texture(&texture, title, width, height, contain);
     }
     let source = if let Some(pixels) = crate::assets::pixels(file) {
@@ -68,6 +119,16 @@ pub fn fitted_picture(
         picture.set_size_request(width, height);
         picture.add_css_class("portrait-placeholder");
         crate::home::accessible_label(&picture, &format!("Image unavailable: {title}"));
+        PENDING.with(|p| {
+            p.borrow_mut().push((
+                picture.downgrade(),
+                file.into(),
+                title.into(),
+                width,
+                height,
+                contain,
+            ))
+        });
         return picture;
     };
     let scale = if contain {
@@ -85,15 +146,26 @@ pub fn fitted_picture(
     let pixels = if contain {
         scaled
     } else {
-        scaled.new_subpixbuf(
-            (scaled.width() - width) / 2,
-            (scaled.height() - height) / 2,
-            width,
-            height,
-        )
+        scaled
+            .new_subpixbuf(
+                (scaled.width() - width) / 2,
+                (scaled.height() - height) / 2,
+                width,
+                height,
+            )
+            .copy()
+            .expect("cropped artwork")
     };
     let texture = gtk::gdk::Texture::for_pixbuf(&pixels);
-    TEXTURES.with(|c| c.borrow_mut().insert(key, texture.clone()));
+    LIVE_TEXTURES.with(|textures| {
+        textures
+            .borrow_mut()
+            .insert(key.clone(), texture.downgrade())
+    });
+    let bytes = (texture.width() as usize)
+        .saturating_mul(texture.height() as usize)
+        .saturating_mul(4);
+    TEXTURES.with(|c| c.borrow_mut().insert(key, texture.clone(), bytes));
     picture_for_texture(&texture, title, width, height, contain)
 }
 fn picture_for_texture(
@@ -118,8 +190,86 @@ fn picture_for_texture(
     crate::home::accessible_label(&picture, title);
     picture
 }
-pub fn view(item: &Item, width: i32, progress: Option<u8>) -> gtk::Widget {
+pub fn view(item: &Item, width: i32, progress: Option<u8>, announce: bool) -> gtk::Widget {
+    view_context(item, width, progress, announce, None)
+}
+pub fn view_context(
+    item: &Item,
+    width: i32,
+    progress: Option<u8>,
+    announce: bool,
+    heading: Option<String>,
+) -> gtk::Widget {
+    let overlay = gtk::Overlay::builder()
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .build();
+    let poster_title = if item.kind == Kind::Episode {
+        format!("{}, {}", heading.clone().unwrap_or_else(|| crate::presentation::episode_labels(&item.meta, false).heading()), item.title)
+    } else {
+        item.title.clone()
+    };
+    let artwork = artwork_view(item, width, progress, heading);
+    overlay.set_child(Some(&artwork));
+    if announce {
+        crate::home::accessible_label(
+            &overlay,
+            &format!("{}, Poster{}", poster_title, {
+                let state = item.playback_accessibility(progress);
+                if state.is_empty() {
+                    state
+                } else {
+                    format!(", {state}")
+                }
+            }),
+        );
+    }
+    if item.is_watched() {
+        let badge = gtk::DrawingArea::builder()
+            .content_width(26)
+            .content_height(26)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::Start)
+            .margin_top(8)
+            .margin_end(8)
+            .accessible_role(gtk::AccessibleRole::Presentation)
+            .can_target(false)
+            .build();
+        badge.set_draw_func(|_, cr, _, _| {
+            cr.set_source_rgba(22. / 255., 37. / 255., 31. / 255., 0.93);
+            cr.arc(13., 13., 13., 0., std::f64::consts::TAU);
+            let _ = cr.fill();
+            cr.set_source_rgb(227. / 255., 244. / 255., 233. / 255.);
+            cr.set_line_width(2.);
+            cr.set_line_cap(cairo::LineCap::Round);
+            cr.set_line_join(cairo::LineJoin::Round);
+            cr.move_to(7.5, 13.3);
+            cr.line_to(11.4, 17.2);
+            cr.line_to(19., 9.1);
+            let _ = cr.stroke();
+        });
+        overlay.add_overlay(&badge);
+    }
+    overlay.upcast()
+}
+fn artwork_view(
+    item: &Item,
+    width: i32,
+    progress: Option<u8>,
+    heading_override: Option<String>,
+) -> gtk::Widget {
     if let Some(art) = crate::catalog::art_for(&item.id) {
+        let title = if item.kind == Kind::Episode {
+            format!(
+                "{}, {}",
+                heading_override.clone().unwrap_or_else(|| {
+                    crate::presentation::episode_labels(&item.meta, false).heading()
+                }),
+                item.title
+            )
+        } else {
+            crate::catalog::text(&art, "label").into()
+        };
         let overlay = gtk::Overlay::new();
         overlay.set_halign(gtk::Align::Start);
         overlay.set_valign(gtk::Align::Start);
@@ -127,17 +277,21 @@ pub fn view(item: &Item, width: i32, progress: Option<u8>) -> gtk::Widget {
         overlay.set_overflow(gtk::Overflow::Hidden);
         overlay.set_child(Some(&picture(
             crate::catalog::text(&art, "file"),
-            crate::catalog::text(&art, "label"),
+            &title,
             width,
             width * 3 / 2,
         )));
         if let Some(value) = progress {
-            let bar = gtk::ProgressBar::new();
-            bar.update_property(&[gtk::accessible::Property::Label(&format!(
-                "Watch progress {value}%"
-            ))]);
-            bar.set_fraction(f64::from(value) / 100.0);
-            bar.set_valign(gtk::Align::End);
+            let bar = gtk::DrawingArea::builder()
+                .content_height(progress::HEIGHT)
+                .halign(gtk::Align::Fill)
+                .valign(gtk::Align::End)
+                .accessible_role(gtk::AccessibleRole::Presentation)
+                .can_target(false)
+                .build();
+            bar.set_draw_func(move |_, cr, width, height| {
+                progress::paint(cr, f64::from(width), f64::from(height), Some(value));
+            });
             overlay.add_overlay(&bar);
         }
         return overlay.upcast();
@@ -187,8 +341,12 @@ pub fn view(item: &Item, width: i32, progress: Option<u8>) -> gtk::Widget {
         );
         cr.set_font_size(w * 0.175);
         cr.set_source_rgb(1., 0.96, 0.9);
+        let heading;
         let title = if item.kind == Kind::Episode {
-            item.meta.split(" · ").next().unwrap_or(&item.title)
+            heading = heading_override.clone().unwrap_or_else(|| {
+                crate::presentation::episode_labels(&item.meta, false).heading()
+            });
+            &heading
         } else {
             &item.title
         };
@@ -228,14 +386,7 @@ pub fn view(item: &Item, width: i32, progress: Option<u8>) -> gtk::Widget {
         cr.set_source_rgba(1., 1., 1., 0.6);
         cr.move_to(w * 0.12, h - 18.);
         let _ = cr.show_text("POSTER NOT INCLUDED");
-        if let Some(progress) = progress {
-            cr.set_source_rgba(1., 1., 1., 0.2);
-            cr.rectangle(0., h - 4., w, 4.);
-            let _ = cr.fill();
-            cr.set_source_rgb(0.91, 0.91, 0.91);
-            cr.rectangle(0., h - 4., w * f64::from(progress) / 100., 4.);
-            let _ = cr.fill();
-        }
+        progress::paint(cr, w, h, progress);
     });
     area.upcast()
 }

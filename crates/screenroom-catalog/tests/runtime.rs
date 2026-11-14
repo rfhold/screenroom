@@ -1,8 +1,9 @@
+mod support;
 use base64::Engine;
 use screenroom_backend::{
     Uuid,
-    catalog::{CatalogRepository, CreditWrite, ItemWrite},
-    ingest::{CheckpointWrite, Completion, IngestRepository, PageCommit, PolicyWrite},
+    catalog::{CreditWrite, ItemWrite},
+    ingest::{CheckpointWrite, Completion, PageCommit},
     sqlx::{self, postgres::PgPoolOptions},
 };
 use screenroom_catalog::Catalog;
@@ -11,13 +12,7 @@ use screenroom_proto::user::internal::v1::{
     playback_state_service_server::{PlaybackStateService, PlaybackStateServiceServer},
 };
 use screenroom_proto::{
-    catalog::{
-        operator::v1::{
-            GetPolicyRequest, GetRunRequest, StartRunRequest, UpdatePolicyRequest,
-            ingestion_service_client::IngestionServiceClient,
-        },
-        v1::*,
-    },
+    catalog::v1::*,
     common::v1::{SearchMethods, SearchTypes, SourceLibraryScope},
 };
 use serde_json::json;
@@ -25,6 +20,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
+use support::{CatalogRepository, IngestRepository, PolicyWrite};
 use tokio_stream::StreamExt;
 struct SlowObject {
     bytes: Vec<u8>,
@@ -78,6 +74,7 @@ const UNLINKED: &str = "00000000-0000-0000-0000-000000000003";
 struct SyntheticProgress {
     source: String,
     unavailable: Arc<AtomicBool>,
+    mode: Arc<AtomicUsize>,
 }
 #[tonic::async_trait]
 impl PlaybackStateService for SyntheticProgress {
@@ -90,6 +87,62 @@ impl PlaybackStateService for SyntheticProgress {
         }
         let r = request.into_inner();
         assert_eq!(r.page_size, 50);
+        let mode = self.mode.load(Ordering::SeqCst);
+        if mode == 4 {
+            return Ok(tonic::Response::new(GetContinueWatchingResponse {
+                entries: vec![ContinueWatchingEntry {
+                    source_id: self.source.clone(),
+                    external_item_id: "item-3".into(),
+                    progress_percent: 42,
+                    ..Default::default()
+                }],
+                next_page_token: String::new(),
+            }));
+        }
+        if mode != 0 {
+            assert_eq!(r.user_id, ALICE);
+            assert_eq!(r.scopes.len(), 1);
+            assert_eq!(r.scopes[0].source_id, self.source);
+            assert_eq!(r.scopes[0].library_id, "");
+            if mode == 3 && !r.page_token.is_empty() {
+                return Err(tonic::Status::failed_precondition(
+                    "snapshot changed secret upstream details",
+                ));
+            }
+            let first = r.page_token.is_empty();
+            let entries = if first && mode == 3 {
+                vec![ContinueWatchingEntry {
+                    source_id: self.source.clone(),
+                    external_item_id: "item-0".into(),
+                    progress_percent: 42,
+                    ..Default::default()
+                }]
+            } else if first {
+                (0..50)
+                    .map(|n| ContinueWatchingEntry {
+                        source_id: self.source.clone(),
+                        external_item_id: format!("unindexed-{n}"),
+                        progress_percent: 42,
+                        ..Default::default()
+                    })
+                    .collect()
+            } else {
+                vec![ContinueWatchingEntry {
+                    source_id: self.source.clone(),
+                    external_item_id: "item-0".into(),
+                    progress_percent: 42,
+                    ..Default::default()
+                }]
+            };
+            return Ok(tonic::Response::new(GetContinueWatchingResponse {
+                entries,
+                next_page_token: if first || mode == 2 {
+                    "bound-cursor".into()
+                } else {
+                    String::new()
+                },
+            }));
+        }
         assert!(r.page_token.is_empty());
         assert_eq!(r.scopes.len(), 1);
         assert_eq!(r.scopes[0].source_id, self.source);
@@ -308,6 +361,10 @@ async fn persisted_catalog_contract() {
     screenroom_backend::db::migrate(&admin).await.unwrap();
     let repo = CatalogRepository::new(admin.clone());
     let ingest = IngestRepository::new(admin.clone());
+    let fixture_model = screenroom_backend::search::SearchRepository::new(admin.clone())
+        .register_model("catalog-runtime", "synthetic-revision", 1024)
+        .await
+        .unwrap();
     let key = format!("synthetic-{}", Uuid::new_v4());
     let canonical_notices: Vec<_> = (0..7).map(|n| json!({
         "id":format!("canonical-{n}"), "section":"Provenance", "title":format!("Canonical notice {n}"),
@@ -351,11 +408,17 @@ async fn persisted_catalog_contract() {
         )
         .await
         .unwrap();
-    ingest.start_run(policy.id).await.unwrap();
+    ingest
+        .start_run_for_model(policy.id, fixture_model.id)
+        .await
+        .unwrap();
     let claim = ingest.claim("g-test", 60).await.unwrap().unwrap();
     let items=(0..205).map(|n|ItemWrite {public_id:format!("{key}-{n:03}"),kind:match n {1=>"series",2=>"season",3=>"episode",_=>"movie"}.into(),parent_public_id:match n {1..=3=>Some(format!("{key}-{:03}",n-1)),_=>None},external_id:format!("item-{n}"),source_revision:Some("r1".into()),metadata:json!({"title":format!("Synthetic {n}"),"rating":{"provider":"canonical","value":8.1,"scale":10,"votes":null},"runtime":{"seconds":null,"minimum_seconds":60,"note":"bounded runtime"},"provider_references":[{"provider":"canonical","status":"unavailable","url":"https://example.com/provenance"}]}),provenance:json!({}),content_hash:vec![n as u8;32],library_external_ids:vec!["movies".into()],external_ids:vec![],credits:["role-a","role-b","role-c"].into_iter().map(|role|CreditWrite {external_id:"person".into(),name:"Synthetic Person".into(),metadata:json!({}),department:"acting".into(),role:role.into(),ordinal:0}).collect(),document:"synthetic searchable document".into(),document_title:format!("Synthetic {n}"),document_version:1}).collect();
     let mut items: Vec<ItemWrite> = items;
     items[1].parent_public_id = None;
+    items[2].metadata["index"] = json!(2);
+    items[3].metadata["index"] = json!(5);
+    items[6].metadata["subtitle"] = json!("Retained subtitle without episode index");
     items[5].kind = "season".into();
     items[5].parent_public_id = Some(format!("{key}-001"));
     items[6].kind = "episode".into();
@@ -367,12 +430,11 @@ async fn persisted_catalog_contract() {
     items[0].metadata["metadata_retrieved_at"] = json!(snapshot);
     items[1].metadata["metadata_retrieved_at"] = json!("invalid-provider-date");
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &claim,
             &PageCommit {
                 libraries: vec![],
                 items,
-                feeds: vec![],
                 artwork_inputs: (0..205)
                     .map(|n| screenroom_backend::media::ArtworkInputWrite {
                         reference: screenroom_backend::media::ArtworkReferenceInput {
@@ -408,7 +470,7 @@ async fn persisted_catalog_contract() {
                     cursor: json!({"done":true}),
                     watermark: None,
                 },
-                requests: 1,
+                requests: 0,
                 completion: Completion::Complete {
                     evidence: json!({"synthetic":true}),
                 },
@@ -649,15 +711,17 @@ async fn persisted_catalog_contract() {
             .is_empty()
     );
     assert!(media.branding(&excluded_scope, 8).await.unwrap().is_empty());
-    let pending = ingest.start_run(policy.id).await.unwrap();
+    let pending = ingest
+        .start_run_for_model(policy.id, fixture_model.id)
+        .await
+        .unwrap();
     let pending_claim = ingest.claim("g-pending-art", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &pending_claim,
             &PageCommit {
                 libraries: vec![],
                 items: vec![],
-                feeds: vec![],
                 artwork_inputs: vec![screenroom_backend::media::ArtworkInputWrite {
                     reference: screenroom_backend::media::ArtworkReferenceInput {
                         source_artwork_id: "synthetic-image".into(),
@@ -683,7 +747,7 @@ async fn persisted_catalog_contract() {
                     cursor: json!({"done":true}),
                     watermark: None,
                 },
-                requests: 1,
+                requests: 0,
                 completion: Completion::Complete {
                     evidence: json!({"synthetic":true}),
                 },
@@ -725,14 +789,15 @@ async fn persisted_catalog_contract() {
         .connect(&url)
         .await
         .unwrap();
-    let operator = screenroom_catalog::Operator::new(runtime.clone());
     let progress_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let progress_address = progress_listener.local_addr().unwrap();
     let (progress_stop, progress_stopped) = tokio::sync::oneshot::channel();
     let progress_unavailable = Arc::new(AtomicBool::new(false));
+    let progress_mode = Arc::new(AtomicUsize::new(0));
     let progress = SyntheticProgress {
         source: key.clone(),
         unavailable: progress_unavailable.clone(),
+        mode: progress_mode.clone(),
     };
     let progress_server = tokio::spawn(async move {
         tonic::transport::Server::builder()
@@ -778,9 +843,14 @@ async fn persisted_catalog_contract() {
         missing_private
             .get_home(home(&key, ALICE))
             .await
-            .unwrap_err()
-            .code(),
-        tonic::Code::Unavailable
+            .unwrap()
+            .into_inner()
+            .rows[0]
+            .read_error
+            .as_ref()
+            .unwrap()
+            .code,
+        "progress_unavailable"
     );
     let alice = browse
         .get_home(home(&key, ALICE))
@@ -816,6 +886,160 @@ async fn persisted_catalog_contract() {
     let bob = browse.get_home(home(&key, BOB)).await.unwrap().into_inner();
     assert_eq!(bob.rows[0].items[0].id, format!("{key}-001"));
     assert_eq!(bob.rows[0].items[0].progress_percent, Some(67));
+    let season_art: Uuid = sqlx::query_scalar(
+        "SELECT id FROM media.artwork WHERE source_id=$1 AND source_artwork_id='synthetic-image-2'",
+    )
+    .bind(source.id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let own_art: Uuid = sqlx::query_scalar(
+        "SELECT id FROM media.artwork WHERE source_id=$1 AND source_artwork_id='synthetic-image-3'",
+    )
+    .bind(source.id)
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    let episode_id = format!("{key}-003");
+    assert_eq!(
+        alice.rows[1]
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .subtitle,
+        "Synthetic 1 · S02E05"
+    );
+    assert_eq!(
+        alice.rows[1]
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .artwork
+            .as_ref()
+            .unwrap()
+            .id,
+        season_art.to_string()
+    );
+    progress_mode.store(4, Ordering::SeqCst);
+    let episode_progress = browse
+        .get_home(home(&key, ALICE))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(episode_progress.rows[0].items[0].id, episode_id);
+    assert_eq!(
+        episode_progress.rows[0].items[0].subtitle,
+        "Synthetic 1 · S02E05"
+    );
+    assert_eq!(
+        episode_progress.rows[0].items[0]
+            .artwork
+            .as_ref()
+            .unwrap()
+            .id,
+        season_art.to_string()
+    );
+    progress_mode.store(0, Ordering::SeqCst);
+    let episode_scope = Some(SourceLibraryScope {
+        source_id: key.clone(),
+        library_id: "movies".into(),
+    });
+    let detail = details
+        .get_item(GetItemRequest {
+            id: episode_id.clone(),
+            scope: episode_scope.clone(),
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .item
+        .unwrap();
+    assert_eq!(detail.subtitle, "Synthetic 1 · S02E05");
+    assert_eq!(detail.artwork.unwrap().id, season_art.to_string());
+    let children = details
+        .list_children(ListChildrenRequest {
+            parent_id: format!("{key}-002"),
+            scope: episode_scope,
+            page: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        children
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .artwork
+            .as_ref()
+            .unwrap()
+            .id,
+        own_art.to_string()
+    );
+    assert_eq!(
+        children
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .subtitle,
+        "Synthetic 1 · S02E05"
+    );
+    assert_eq!(
+        children
+            .items
+            .iter()
+            .find(|item| item.id == format!("{key}-006"))
+            .unwrap()
+            .subtitle,
+        "Retained subtitle without episode index"
+    );
+    let mut episode_search = search_service_client::SearchServiceClient::new(channel.clone());
+    let found = episode_search
+        .search(SearchRequest {
+            source_id: key.clone(),
+            library_id: "movies".into(),
+            query: "Synthetic 3".into(),
+            types: Some(SearchTypes {
+                movie: false,
+                series: false,
+                episode: true,
+            }),
+            methods: Some(SearchMethods {
+                title_only: true,
+                text: true,
+                fuzzy: false,
+                semantic: false,
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        found
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .artwork
+            .as_ref()
+            .unwrap()
+            .id,
+        season_art.to_string()
+    );
+    assert_eq!(
+        found
+            .items
+            .iter()
+            .find(|item| item.id == episode_id)
+            .unwrap()
+            .subtitle,
+        "Synthetic 1 · S02E05"
+    );
     assert!(
         browse
             .get_home(home(&key, UNLINKED))
@@ -830,9 +1054,14 @@ async fn persisted_catalog_contract() {
         browse
             .get_home(home(&key, "00000000-0000-0000-0000-000000000004"))
             .await
-            .unwrap_err()
-            .code(),
-        tonic::Code::NotFound
+            .unwrap()
+            .into_inner()
+            .rows[0]
+            .read_error
+            .as_ref()
+            .unwrap()
+            .code,
+        "progress_unavailable"
     );
     assert_eq!(
         browse
@@ -844,10 +1073,55 @@ async fn persisted_catalog_contract() {
     );
     progress_unavailable.store(true, Ordering::SeqCst);
     assert_eq!(
-        browse.get_home(home(&key, ALICE)).await.unwrap_err().code(),
-        tonic::Code::Unavailable
+        browse
+            .get_home(home(&key, ALICE))
+            .await
+            .unwrap()
+            .into_inner()
+            .rows[0]
+            .read_error
+            .as_ref()
+            .unwrap()
+            .code,
+        "progress_unavailable"
     );
     progress_unavailable.store(false, Ordering::SeqCst);
+    sqlx::query("UPDATE catalog.sources SET provider='tmdb' WHERE id=$1")
+        .bind(source.id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    let neutral = browse
+        .get_home(home(&key, ALICE))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(neutral.rows[0].items[0].id, format!("{key}-000"));
+    assert_eq!(neutral.rows[0].items[0].progress_percent, Some(42));
+    assert!(neutral.rows[0].read_error.is_none());
+    sqlx::query("UPDATE catalog.sources SET provider='jellyfin' WHERE id=$1")
+        .bind(source.id)
+        .execute(&admin)
+        .await
+        .unwrap();
+    for mode in [1, 2, 3] {
+        progress_mode.store(mode, Ordering::SeqCst);
+        let mut request = home(&key, ALICE);
+        request.get_mut().library_id = "all".into();
+        let result = browse.get_home(request).await.unwrap().into_inner();
+        assert!(!result.rows[1].items.is_empty());
+        assert!(result.rows[1].read_error.is_none());
+        if mode == 1 {
+            assert_eq!(result.rows[0].items.len(), 1);
+            assert!(result.rows[0].read_error.is_none());
+        } else {
+            assert!(result.rows[0].items.is_empty());
+            let error = result.rows[0].read_error.as_ref().unwrap();
+            assert_eq!(error.code, "progress_unavailable");
+            assert!(!error.message.contains("secret"));
+        }
+    }
+    progress_mode.store(0, Ordering::SeqCst);
     let art_page = details
         .list_artwork(ListArtworkRequest {
             scope: Some(SourceLibraryScope {
@@ -921,6 +1195,10 @@ async fn persisted_catalog_contract() {
     // Unknown-service rejection must not require an unread protobuf request body.
     for target in [
         "/screenroom.catalog.operator.v1.IngestionService/GetPolicy",
+        "/screenroom.catalog.operator.v1.IngestionService/UpdatePolicy",
+        "/screenroom.catalog.operator.v1.IngestionService/StartRun",
+        "/screenroom.catalog.operator.v1.IngestionService/GetRun",
+        "/screenroom.catalog.operator.v1.IngestionService/CancelRun",
         "/screenroom.user.internal.v1.PlaybackStateService/GetContinueWatching",
         "/screenroom.user.v1.PreferencesService/GetPreferences",
         "/screenroom.unknown.v1.Unknown/Unknown",
@@ -1123,10 +1401,13 @@ async fn persisted_catalog_contract() {
         )
         .await
         .unwrap();
-    ingest.start_run(mirror_policy.id).await.unwrap();
+    ingest
+        .start_run_for_model(mirror_policy.id, fixture_model.id)
+        .await
+        .unwrap();
     let mirror_claim = ingest.claim("g-scoped-roots", 60).await.unwrap().unwrap();
     ingest
-        .commit_page(
+        .commit_fixture_page(
             &mirror_claim,
             &PageCommit {
                 libraries: vec![],
@@ -1146,7 +1427,6 @@ async fn persisted_catalog_contract() {
                     document_title: "Mirror root".into(),
                     document_version: 1,
                 }],
-                feeds: vec![],
                 artwork_inputs: vec![],
                 artwork_omissions: vec![],
                 followups: vec![],
@@ -1155,7 +1435,7 @@ async fn persisted_catalog_contract() {
                     cursor: json!({"done":true}),
                     watermark: None,
                 },
-                requests: 1,
+                requests: 0,
                 completion: Completion::Complete {
                     evidence: json!({"synthetic":true}),
                 },
@@ -1664,7 +1944,6 @@ async fn persisted_catalog_contract() {
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_screenroom-catalog"))
         .env("DATABASE_URL", &url)
         .env("SCREENROOM_CATALOG_LISTEN", "127.0.0.1:0")
-        .env("SCREENROOM_CATALOG_PRIVATE_LISTEN", "127.0.0.1:0")
         .env("SCREENROOM_CATALOG_PUBLIC_ORIGIN", "http://localhost:50052")
         .env("RUST_LOG", "info")
         .env_remove("SCREENROOM_EMBEDDING_BASE_URL")
@@ -1758,92 +2037,20 @@ async fn persisted_catalog_contract() {
             .await
             .is_err()
     );
-    let mut private = IngestionServiceClient::new(channel);
-    assert_eq!(
-        private
-            .get_policy(GetPolicyRequest {
-                policy_id: policy.id.to_string()
-            })
-            .await
-            .unwrap_err()
-            .code(),
-        tonic::Code::Unimplemented
-    );
-    let private_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let private_address = private_listener.local_addr().unwrap();
-    let (private_stop, private_stopped) = tokio::sync::oneshot::channel();
-    let private_server = tokio::spawn(screenroom_catalog::serve_operator(
-        private_listener,
-        async {
-            let _ = private_stopped.await;
-        },
-        operator,
-    ));
-    let private_channel =
-        tonic::transport::Endpoint::from_shared(format!("http://{private_address}"))
-            .unwrap()
-            .connect()
-            .await
-            .unwrap();
-    let mut operator = IngestionServiceClient::new(private_channel);
-    let current = operator
-        .get_policy(GetPolicyRequest {
-            policy_id: policy.id.to_string(),
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .policy
-        .unwrap();
-    let started = operator
-        .start_run(StartRunRequest {
-            policy_id: policy.id.to_string(),
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .run
-        .unwrap();
-    assert_eq!(started.policy.unwrap().version, current.version);
-    assert!(
-        operator
-            .get_run(GetRunRequest { run_id: started.id })
-            .await
-            .unwrap()
-            .into_inner()
-            .run
-            .is_some()
-    );
-    let mut invalid = current.clone();
-    invalid.selection_json = r#"{"library_ids":["movies"],"url":"http://arbitrary"}"#.into();
-    assert_eq!(
-        operator
-            .update_policy(UpdatePolicyRequest {
-                policy: Some(invalid)
-            })
-            .await
-            .unwrap_err()
-            .code(),
-        tonic::Code::InvalidArgument
-    );
-    let mut disabled = current;
-    disabled.enabled = false;
-    let updated = operator
-        .update_policy(UpdatePolicyRequest {
-            policy: Some(disabled),
-        })
-        .await
-        .unwrap()
-        .into_inner()
-        .policy
-        .unwrap();
-    assert_eq!(updated.version, 2);
-    assert!(!updated.enabled);
     progress_stop.send(()).unwrap();
     progress_server.await.unwrap();
     assert_eq!(
-        browse.get_home(home(&key, ALICE)).await.unwrap_err().code(),
-        tonic::Code::Unavailable
+        browse
+            .get_home(home(&key, ALICE))
+            .await
+            .unwrap()
+            .into_inner()
+            .rows[0]
+            .read_error
+            .as_ref()
+            .unwrap()
+            .code,
+        "progress_unavailable"
     );
     repo.set_source_state(source.id, false).await.unwrap();
     let unknown = details
@@ -1869,8 +2076,6 @@ async fn persisted_catalog_contract() {
         )
         .starts_with("HTTP/1.1 404")
     );
-    private_stop.send(()).unwrap();
-    private_server.await.unwrap().unwrap();
     runtime.close().await;
     assert!(
         String::from_utf8_lossy(&http(address, "GET", "/ready", "").await)

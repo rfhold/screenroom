@@ -43,7 +43,7 @@ class AssemblyTest {
     }
 
     @Test fun episodeSearchWithoutCachedAncestorsLoadsFullScopedChain() = runTest {
-        val scope = SourceLibraryScope("mock-jellyfin", "tv")
+        val scope = SourceLibraryScope("source-id", "library-id")
         val reads = mutableListOf<Pair<String, SourceLibraryScope>>()
         val episode = Node("episode", "season")
         var cache = listOf(episode)

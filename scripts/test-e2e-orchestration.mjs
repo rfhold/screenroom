@@ -1,13 +1,14 @@
 import { mkdtemp, mkdir, readFile, writeFile, readdir, chmod } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 
 const root = process.cwd();
-await mkdir('build/mock-client-validation', { recursive: true });
-const base = await mkdtemp(path.join(root, 'build/mock-client-validation/orchestration-'));
+await mkdir('build/backend-validation', { recursive: true });
+const base = await mkdtemp(path.join(root, 'build/backend-validation/orchestration-'));
+const userID = randomUUID();
 const flows = ['home', 'sidebar', 'library', 'search', 'detail'];
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -68,14 +69,14 @@ try {
     await put(path.join(cwd, 'scripts/e2e-group.mjs'), await readFile('scripts/e2e-group.mjs'));
     await put(path.join(cwd, 'scripts/backend.sh'), `#!/bin/bash
 set -eu
-mkdir -p build/backend-runtime/screenroom-e2e
+mkdir -p build/backend-runtime/screenroom-local
 case "$1" in
  status) exit 1 ;;
  up|wait)
   echo "$1" >> backend-events
   if [ "$1" = up ]; then echo owned > "$3"; fi
   if [ "${'${FAIL_BACKEND:-0}'}" = 1 ]; then exit 17; fi
-  echo '{"instanceID":"same-stack","project":"screenroom-e2e","seedRevision":"mock-adapters-v1","publicOrigin":"http://127.0.0.1:50051","clientNetwork":"screenroom-e2e_client","ready":true}' > build/backend-runtime/screenroom-e2e/descriptor.json ;;
+  echo '{"instanceID":"same-stack","project":"screenroom-local","bootstrapRevision":"installation-v1","publicOrigin":"http://127.0.0.1:50051","clientNetwork":"screenroom-local_client","userID":"${userID}","ready":true}' > build/backend-runtime/screenroom-local/descriptor.json ;;
  down) echo down >> backend-events ;;
 esac
 `);
@@ -98,7 +99,7 @@ esac
     }
     const helper = `import fs from 'node:fs';
 const [kind, ...profiles] = process.argv.slice(2);
-const event = (state, profile = kind) => fs.appendFileSync('events.jsonl', JSON.stringify({kind, profile, state, time:Date.now(), pid:process.pid, endpoint:process.env.SCREENROOM_API_ENDPOINT, webEndpoint:process.env.SCREENROOM_E2E_API_ENDPOINT, prepared:process.env.SCREENROOM_CORE_PREPARED, prefix:process.env.SCREENROOM_E2E_PROFILE_PREFIX})+'\\n');
+const event = (state, profile = kind) => fs.appendFileSync('events.jsonl', JSON.stringify({kind, profile, state, time:Date.now(), pid:process.pid, endpoint:process.env.SCREENROOM_API_ENDPOINT, webEndpoint:process.env.SCREENROOM_E2E_API_ENDPOINT, userID:process.env.SCREENROOM_USER_ID, prepared:process.env.SCREENROOM_CORE_PREPARED, prefix:process.env.SCREENROOM_E2E_PROFILE_PREFIX})+'\\n');
 event('start');
 fs.appendFileSync('categories.jsonl', JSON.stringify({kind, category:process.env.E2E_CATEGORY})+'\\n');
 if (!kind.startsWith('prepare')) {
@@ -131,11 +132,12 @@ if (kind === 'linux' && ${test.failure === 'suite'}) process.exit(17);
       'apps/android/scripts/e2e.sh': 'timeout -k 2s 30s node suite.mjs android mobile tv',
       'apps/linux/tests/e2e/run.sh': 'node suite.mjs linux linux',
       'bin/pnpm': 'if [ "${1-}" = --version ]; then echo 12.18.0; else node suite.mjs web desktop mobile; fi',
-      'bin/cargo': 'echo "Root orchestration must not build a private backend" >&2; exit 99'
+      'bin/cargo': 'echo "Root orchestration must not build a private backend" >&2; exit 99',
+      'bin/docker': 'echo "Isolated runner diagnostics stub"'
     })) await put(path.join(cwd, file), file.endsWith('.mjs') ? contents : `#!/bin/bash\nset -eu\n${contents}\n`);
     // The web preparation stub deliberately records a preparation event, not a suite.
     await put(path.join(cwd, 'apps/web/scripts/prepare-core.mjs'), "process.argv.push('prepare-web'); await import('../../../suite.mjs');");
-    for (const name of ['bin/pnpm', 'bin/cargo']) await chmod(path.join(cwd, name), 0o755);
+    for (const name of ['bin/pnpm', 'bin/cargo', 'bin/docker']) await chmod(path.join(cwd, name), 0o755);
     if (test.failure?.startsWith('export')) {
       await put(path.join(cwd, 'bin/cp'), `#!/bin/bash
 if [[ "\${2-}" == website/static/showcase/* ]] && [[ "\${1-}" == */export/* ]] && [ ! -f export-triggered ]; then
@@ -151,7 +153,7 @@ exec /bin/cp "$@"
     if (test.failure === 'png') await put(path.join(cwd, 'apps/web/e2e/build/screenshots/detail-mobile.png'), 'not PNG');
     const before = await tree(website);
     const env = { ...process.env, PATH: `${cwd}/bin:${process.env.PATH}`, E2E_MACOS: test.mac ?? '0' };
-    for (const key of ['E2E_APPLE_RUN_DIR', 'E2E_CATEGORY', 'SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT', 'SCREENROOM_CORE_PREPARED', 'SCREENROOM_BACKEND_ATTACH']) delete env[key];
+    for (const key of ['E2E_APPLE_RUN_DIR', 'E2E_CATEGORY', 'SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT', 'SCREENROOM_CORE_PREPARED', 'SCREENROOM_BACKEND_ATTACH', 'SCREENROOM_USER_ID', 'SCREENROOM_BACKEND_PROJECT', 'SCREENROOM_BACKEND_DESCRIPTOR']) delete env[key];
     if (test.backendFailure) env.FAIL_BACKEND = '1';
     if ('categoryEnv' in test) env.E2E_CATEGORY = test.categoryEnv;
     if (test.external) { env.SCREENROOM_API_ENDPOINT = endpoint; env.SCREENROOM_BACKEND_ATTACH = '1'; }
@@ -214,7 +216,7 @@ exec /bin/cp "$@"
       assert.equal(code, 2, test.name);
       assert.match(stderr, test.reject);
       assert.deepEqual(after, before);
-      for (const absent of ['build', 'events.jsonl', 'categories.jsonl', 'mock.json']) {
+      for (const absent of ['build', 'events.jsonl', 'categories.jsonl']) {
         await assert.rejects(readdir(path.join(cwd, absent)), { code: 'ENOENT' }, `${test.name}: created ${absent}`);
       }
       evidence.push({ scenario: test.name, exitCode: code, rejectedBeforePreparation: true });
@@ -276,6 +278,7 @@ exec /bin/cp "$@"
       for (const event of starts) {
         assert.equal(event.prepared, '1');
         assert.equal(event.endpoint, event.webEndpoint);
+        assert.equal(event.userID, userID, 'actual installation selector not propagated');
         assert.match(event.prefix, /^run-[A-Za-z0-9_-]+$/);
       }
       const artifact = stdout.match(/Persistent Apple E2E artifact path: (.+)/)?.[1];
@@ -296,11 +299,9 @@ exec /bin/cp "$@"
       assert.equal(await readFile(path.join(cwd, 'backend-events'), 'utf8'), 'up\ndown\n');
     } else {
       assert.ok(starts.every(event => event.endpoint === endpoint));
-      assert.equal((await fetch(`${endpoint}/health`)).status, 200, 'caller mock stopped');
-      assert.ok(!preps.some(event => event.kind === 'prepare-mock'));
+      assert.equal((await fetch(`${endpoint}/health`)).status, 200, 'caller server stopped');
       assert.equal(await readFile(path.join(cwd, 'backend-events'), 'utf8'), 'wait\n');
     }
-    assert.ok(!preps.some(event => event.kind === 'prepare-mock'));
     evidence.push({ scenario: test.name, exitCode: code, captures: test.count, childrenStopped: true });
     console.log(`PASS ${test.name}`);
   }

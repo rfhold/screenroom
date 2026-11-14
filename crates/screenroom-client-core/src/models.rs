@@ -104,6 +104,7 @@ pub struct Item {
     pub progress_percent: Option<u32>,
     pub provenance_notes: Vec<String>,
     pub metadata_retrieved_at: String,
+    pub watched: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -126,6 +127,14 @@ pub struct HomeRow {
     pub id: String,
     pub title: String,
     pub items: Vec<Item>,
+    pub read_error: Option<HomeRowReadError>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct HomeRowReadError {
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -173,8 +182,43 @@ pub struct User {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct JellyfinSource {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct JellyfinProfile {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct JellyfinLink {
+    pub source_id: String,
+    pub jellyfin_user_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 pub struct ItemPage {
     pub items: Vec<Item>,
+    pub next_page_token: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct JellyfinSourcePage {
+    pub sources: Vec<JellyfinSource>,
+    pub next_page_token: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct JellyfinProfilePage {
+    pub profiles: Vec<JellyfinProfile>,
     pub next_page_token: String,
 }
 
@@ -234,5 +278,4 @@ pub struct ClientSettings {
     pub source: String,
     pub types: Option<SearchTypes>,
     pub methods: Option<SearchMethods>,
-    pub subtitle_preference: String,
 }

@@ -13,9 +13,7 @@
     "prepare": "svelte-kit sync",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test:e2e": "node e2e/run.mjs",
-    "test:e2e:install": "playwright install chromium",
-    "import:tmdb": "node ../../scripts/import-tmdb.mjs",
-    "test:importer": "node --test ../../scripts/import-tmdb.test.mjs"
+    "test:e2e:install": "playwright install chromium"
   },
   "devDependencies": {
     "@playwright/test": "1.65.0",

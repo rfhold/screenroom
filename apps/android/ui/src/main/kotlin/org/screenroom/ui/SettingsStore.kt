@@ -11,12 +11,11 @@ class SettingsStore(context: Context, namespace: String, private val commit: (Sh
     fun load(): ClientSettings = try {
         val json = JSONObject(disk.getString("settings", null) ?: error("Missing settings"))
         check(json.getInt("version") == 1)
-        checked(ClientSettings(
+        normalizeSavedSettings(withTitleOnlyConstraint(ClientSettings(
             SourceLibraryScope(json.getString("sourceId"), json.getString("libraryId")),
             json.getString("source"),
             SearchTypes(json.getBoolean("movie"), json.getBoolean("series"), json.getBoolean("episode")),
-            SearchMethods(json.getBoolean("titleOnly"), json.getBoolean("text"), json.getBoolean("fuzzy"), json.getBoolean("semantic")),
-            json.getString("subtitle")))
+            SearchMethods(json.getBoolean("titleOnly"), json.getBoolean("text"), json.getBoolean("fuzzy"), json.getBoolean("semantic")))))
     } catch (_: Exception) { defaultSettings() }
 
     fun save(settings: ClientSettings): ClientSettings {
@@ -27,13 +26,14 @@ class SettingsStore(context: Context, namespace: String, private val commit: (Sh
         val json = JSONObject().put("version", 1).put("sourceId", scope.sourceId).put("libraryId", scope.libraryId)
             .put("source", value.source).put("movie", types.movie).put("series", types.series).put("episode", types.episode)
             .put("titleOnly", methods.titleOnly).put("text", methods.text).put("fuzzy", methods.fuzzy).put("semantic", methods.semantic)
-            .put("subtitle", value.subtitlePreference)
         check(commit(disk.edit().putString("settings", json.toString()))) { "Unable to persist settings" }
         return value
     }
 
-    fun checked(settings: ClientSettings): ClientSettings {
+    fun checked(settings: ClientSettings): ClientSettings = validateSettings(withTitleOnlyConstraint(settings))
+
+    private fun withTitleOnlyConstraint(settings: ClientSettings): ClientSettings {
         val methods = settings.methods
-        return validateSettings(if (methods?.titleOnly == true) settings.copy(methods = methods.copy(semantic = false)) else settings)
+        return if (methods?.titleOnly == true) settings.copy(methods = methods.copy(semantic = false)) else settings
     }
 }

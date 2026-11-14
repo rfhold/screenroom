@@ -5,8 +5,45 @@ use screenroom_backend::{
     media::ValidatedImage,
     storage::{ObjectLocation, ObjectStorage, StorageConfig},
 };
+use screenroom_observability::transport::{
+    BodyDirection, RequestKind, RequestOutcome, TransportObservation, TransportObserver,
+};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
+#[path = "support/image.rs"]
+mod neutral_image;
+#[derive(Default)]
+struct Observations {
+    chunks: std::sync::Mutex<Vec<(RequestKind, BodyDirection, u64)>>,
+    finished: std::sync::Mutex<Vec<(RequestKind, RequestOutcome, Duration)>>,
+}
+impl TransportObserver for Observations {
+    fn body_chunk(&self, k: RequestKind, d: BodyDirection, n: u64) {
+        self.chunks.lock().unwrap().push((k, d, n));
+    }
+    fn finished(&self, k: RequestKind, o: RequestOutcome, d: Duration) {
+        self.finished.lock().unwrap().push((k, o, d));
+    }
+}
+impl Observations {
+    fn bytes(&self, direction: BodyDirection) -> u64 {
+        self.chunks
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, d, _)| *d == direction)
+            .map(|(_, _, n)| n)
+            .sum()
+    }
+    fn outcomes(&self) -> Vec<RequestOutcome> {
+        self.finished
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, o, _)| *o)
+            .collect()
+    }
+}
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -105,7 +142,10 @@ async fn embedding_http_once_reorders_and_classifies_errors() {
             response(&mut socket, status, &bytes, false).await;
         }
     });
-    let client = EmbeddingClient::new(embedding_config(base)).unwrap();
+    let observations = std::sync::Arc::new(Observations::default());
+    let client = EmbeddingClient::new(embedding_config(base))
+        .unwrap()
+        .with_transport_observer(TransportObservation::new(observations.clone()));
     let input = vec![" hello\n world ".into(), "second".into()];
     let batch = client.embed(&input).await.unwrap();
     assert_eq!(batch.vectors.len(), 2);
@@ -125,6 +165,18 @@ async fn embedding_http_once_reorders_and_classifies_errors() {
     assert!(client.embed(&input).await.is_ok());
     server.await.unwrap();
     assert!(client.embed(&[]).await.is_err());
+    assert!(observations.bytes(BodyDirection::DownloadConsumed) > 0);
+    assert!(observations.bytes(BodyDirection::UploadBodyConsumed) > 0);
+    assert_eq!(
+        observations.outcomes(),
+        [
+            RequestOutcome::Succeeded,
+            RequestOutcome::Failed,
+            RequestOutcome::Failed,
+            RequestOutcome::Succeeded,
+            RequestOutcome::Succeeded
+        ]
+    );
 }
 
 #[tokio::test]
@@ -172,14 +224,57 @@ async fn transport_deadlines_and_response_bounds() {
 }
 
 #[tokio::test]
+async fn embedding_observes_partial_failure_and_cancelled_send() {
+    for cancel in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let observations = std::sync::Arc::new(Observations::default());
+        let client = EmbeddingClient::new(embedding_config(format!(
+            "http://{}",
+            listener.local_addr().unwrap()
+        )))
+        .unwrap()
+        .with_transport_observer(TransportObservation::new(observations.clone()));
+        let (started, wait) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            request(&mut socket).await;
+            started.send(()).unwrap();
+            if !cancel {
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nabc",
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                let mut byte = [0];
+                assert_eq!(socket.read(&mut byte).await.unwrap(), 0);
+            }
+        });
+        let inputs = ["test".into()];
+        let mut future = Box::pin(client.embed(&inputs));
+        if cancel {
+            tokio::select! {
+                _ = &mut future => panic!("request completed before cancellation"),
+                _ = wait => {}
+            }
+            drop(future);
+            assert_eq!(observations.bytes(BodyDirection::DownloadConsumed), 0);
+            assert_eq!(observations.outcomes(), [RequestOutcome::Cancelled]);
+        } else {
+            assert!(future.await.is_err());
+            assert_eq!(observations.bytes(BodyDirection::DownloadConsumed), 3);
+            assert_eq!(observations.outcomes(), [RequestOutcome::Failed]);
+        }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn private_s3_header_signing_upload_head_digest_read() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    let bytes = std::fs::read(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/catalog/artwork/tmdb.png"),
-    )
-    .unwrap();
+    let bytes = neutral_image::png([64, 96, 128]);
     let expected = bytes.clone();
     let server = tokio::spawn(async move {
         for method in ["PUT", "HEAD", "GET", "GET", "GET"] {
@@ -205,7 +300,15 @@ async fn private_s3_header_signing_upload_head_digest_read() {
             }
         }
     });
-    let storage = ObjectStorage::new(storage_config(endpoint)).unwrap();
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let observed_copy = observed.clone();
+    let observations = std::sync::Arc::new(Observations::default());
+    let storage = ObjectStorage::new(storage_config(endpoint))
+        .unwrap()
+        .with_transport_observer(TransportObservation::new(observations.clone()))
+        .with_download_observer(std::sync::Arc::new(move |bytes| {
+            observed_copy.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        }));
     let source = Uuid::new_v4();
     let image = ValidatedImage::raster(bytes.clone()).unwrap();
     let verified = storage.upload_verified(source, &image).await.unwrap();
@@ -225,6 +328,28 @@ async fn private_s3_header_signing_upload_head_digest_read() {
         storage.read(&invalid).await,
         Err(Error::Invalid(_))
     ));
+    assert_eq!(
+        observed.load(std::sync::atomic::Ordering::Relaxed),
+        3 * bytes.len() as u64
+    );
+    assert_eq!(
+        observations.bytes(BodyDirection::DownloadConsumed),
+        3 * bytes.len() as u64
+    );
+    assert_eq!(
+        observations.bytes(BodyDirection::UploadBodyConsumed),
+        bytes.len() as u64
+    );
+    assert_eq!(
+        observations.outcomes(),
+        [
+            RequestOutcome::Succeeded,
+            RequestOutcome::Succeeded,
+            RequestOutcome::Succeeded,
+            RequestOutcome::Succeeded,
+            RequestOutcome::Failed
+        ]
+    );
     server.await.unwrap();
 }
 
@@ -303,7 +428,10 @@ async fn object_stream_drop_and_body_deadline_close_upstream() {
         if timeout {
             config.timeout = Duration::from_millis(150);
         }
-        let storage = ObjectStorage::new(config).unwrap();
+        let observations = std::sync::Arc::new(Observations::default());
+        let storage = ObjectStorage::new(config)
+            .unwrap()
+            .with_transport_observer(TransportObservation::new(observations.clone()));
         let (closed, wait) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -327,6 +455,15 @@ async fn object_stream_drop_and_body_deadline_close_upstream() {
             ));
         }
         drop(read);
+        assert_eq!(observations.bytes(BodyDirection::DownloadConsumed), 3);
+        assert_eq!(
+            observations.outcomes(),
+            [if timeout {
+                RequestOutcome::Failed
+            } else {
+                RequestOutcome::Cancelled
+            }]
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(2), wait)
                 .await
@@ -392,12 +529,14 @@ async fn object_stream_rejects_headers_and_preflight_limits() {
 #[tokio::test]
 async fn object_stream_truncation_and_digest_failure_never_emit_full_length() {
     for body in [b"abc".as_slice(), b"ABCDEF".as_slice()] {
+        let observations = std::sync::Arc::new(Observations::default());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let storage = ObjectStorage::new(storage_config(format!(
             "http://{}",
             listener.local_addr().unwrap()
         )))
-        .unwrap();
+        .unwrap()
+        .with_transport_observer(TransportObservation::new(observations.clone()));
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             request(&mut socket).await;
@@ -420,6 +559,11 @@ async fn object_stream_truncation_and_digest_failure_never_emit_full_length() {
             }
         }
         assert!(failed && emitted < 6);
+        assert_eq!(
+            observations.bytes(BodyDirection::DownloadConsumed),
+            body.len() as u64
+        );
+        assert_eq!(observations.outcomes(), [RequestOutcome::Failed]);
         server.await.unwrap();
     }
 }

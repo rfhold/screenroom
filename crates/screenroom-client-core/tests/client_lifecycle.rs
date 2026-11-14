@@ -112,16 +112,17 @@ fn explicit_local_context_and_client_owned_settings() {
         &SourceLibraryScope::default()
     );
     assert!(defaults.types.as_ref().unwrap().episode);
-    assert_eq!(defaults.subtitle_preference, "off");
     assert_eq!(validate_settings(defaults.clone()).unwrap(), defaults);
-    for value in ["off", "library_tracks", "transcription"] {
+    for value in ["all", "jellyfin"] {
         let mut settings = defaults.clone();
-        settings.subtitle_preference = value.into();
+        settings.source = value.into();
         assert!(validate_settings(settings).is_ok());
     }
-    let mut invalid = defaults.clone();
-    invalid.subtitle_preference = "unknown".into();
-    assert!(validate_settings(invalid).is_err());
+    for value in ["tmdb", "unknown", ""] {
+        let mut invalid = defaults.clone();
+        invalid.source = value.into();
+        assert!(validate_settings(invalid).is_err());
+    }
     let mut invalid = defaults.clone();
     invalid.types = Some(SearchTypes::default());
     assert!(validate_settings(invalid).is_err());

@@ -1,4 +1,6 @@
-use screenroom_client_core::{ClientSettings, default_settings, validate_settings};
+use screenroom_client_core::{
+    ClientSettings, default_settings, normalize_saved_settings, validate_settings,
+};
 use std::{fs, io::Write, path::PathBuf};
 
 pub fn path() -> Result<PathBuf, String> {
@@ -25,12 +27,20 @@ pub fn path() -> Result<PathBuf, String> {
     }))
 }
 
-pub fn load() -> ClientSettings {
+pub fn load() -> (ClientSettings, Option<String>) {
     let result = path().and_then(load_at);
-    result.unwrap_or_else(|e: String| {
-        eprintln!("Local settings unavailable; using defaults: {e}");
-        default_settings()
-    })
+    match result {
+        Ok(settings) => (settings, None),
+        Err(error) => {
+            eprintln!("Local settings unavailable; using defaults: {error}");
+            (
+                default_settings(),
+                Some(
+                    "Local settings could not be read. Defaults are active in this session.".into(),
+                ),
+            )
+        }
+    }
 }
 fn load_at(path: PathBuf) -> Result<ClientSettings, String> {
     let bytes = match fs::read(&path) {
@@ -43,7 +53,7 @@ fn load_at(path: PathBuf) -> Result<ClientSettings, String> {
         return Err("Unsupported settings version".into());
     }
     let settings = serde_json::from_value(value["settings"].clone()).map_err(|e| e.to_string())?;
-    validate_settings(settings).map_err(|e| e.to_string())
+    normalize_saved_settings(settings).map_err(|e| e.to_string())
 }
 
 pub fn save(settings: ClientSettings) -> Result<(), String> {
@@ -89,9 +99,8 @@ mod tests {
         let path = directory.join("settings.json");
         let other = directory.join("isolated.json");
         let mut settings = default_settings();
-        settings.subtitle_preference = "transcription".into();
-        settings.source = "tmdb".into();
-        settings.scope.as_mut().unwrap().source_id = "mock-tmdb".into();
+        settings.source = "jellyfin".into();
+        settings.scope.as_mut().unwrap().source_id = "source-id".into();
         settings.scope.as_mut().unwrap().library_id = "movies".into();
         settings.types.as_mut().unwrap().movie = false;
         settings.types.as_mut().unwrap().episode = false;
@@ -100,6 +109,27 @@ mod tests {
         settings.methods.as_mut().unwrap().semantic = false;
         save_at(path.clone(), settings.clone()).unwrap();
         assert_eq!(load_at(path.clone()).unwrap(), settings);
+        let mut legacy = serde_json::to_value(&settings).unwrap();
+        legacy["source"] = "tmdb".into();
+        legacy["subtitle_preference"] = "transcription".into();
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"version":1,"settings":legacy})).unwrap(),
+        )
+        .unwrap();
+        let mut expected = settings.clone();
+        expected.source = "all".into();
+        assert_eq!(load_at(path.clone()).unwrap(), expected);
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("subtitle_preference");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"version":1,"settings":legacy})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(load_at(path.clone()).unwrap(), expected);
         assert_eq!(load_at(other).unwrap(), default_settings());
         assert_eq!(
             fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
@@ -112,6 +142,8 @@ mod tests {
         fs::write(&path, r#"{"version":2,"settings":{}}"#).unwrap();
         assert!(load_at(path.clone()).is_err());
         settings.source = "invalid".into();
+        assert!(save_at(path.clone(), settings.clone()).is_err());
+        settings.source = "tmdb".into();
         assert!(save_at(path.clone(), settings).is_err());
         fs::remove_file(path).unwrap();
         fs::remove_dir(directory).unwrap();

@@ -61,6 +61,64 @@ impl WasmClient {
     pub fn invalidate_reads(&self) {
         self.inner.invalidate_reads();
     }
+    #[wasm_bindgen(unchecked_return_type = "JellyfinSourcePage")]
+    pub async fn list_jellyfin_sources(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .list_jellyfin_sources(from_js(page)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "JellyfinProfilePage")]
+    pub async fn list_jellyfin_profiles(
+        &self,
+        source_id: String,
+        #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .list_jellyfin_profiles(source_id, from_js(page)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "JellyfinLink | null")]
+    pub async fn get_jellyfin_link(&self, source_id: String) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .get_jellyfin_link(source_id)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "JellyfinLink")]
+    pub async fn set_jellyfin_link(
+        &self,
+        source_id: String,
+        jellyfin_user_id: String,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .set_jellyfin_link(source_id, jellyfin_user_id)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    pub async fn clear_jellyfin_link(&self, source_id: String) -> Result<String, JsValue> {
+        self.inner
+            .clone()
+            .clear_jellyfin_link(source_id)
+            .await
+            .map_err(js_error)
+    }
     #[wasm_bindgen(unchecked_return_type = "HomeRow[]")]
     pub async fn get_home(
         &self,
@@ -218,4 +276,11 @@ pub fn wasm_validate_settings(
     #[wasm_bindgen(unchecked_param_type = "ClientSettings")] settings: JsValue,
 ) -> Result<JsValue, JsValue> {
     to_js(validate_settings(from_js(settings)?).map_err(js_error)?)
+}
+
+#[wasm_bindgen(js_name = normalize_saved_settings, unchecked_return_type = "ClientSettings")]
+pub fn wasm_normalize_saved_settings(
+    #[wasm_bindgen(unchecked_param_type = "ClientSettings")] settings: JsValue,
+) -> Result<JsValue, JsValue> {
+    to_js(normalize_saved_settings(from_js(settings)?).map_err(js_error)?)
 }

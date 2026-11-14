@@ -76,6 +76,7 @@ export interface Item {
   progress_percent: number | null;
   provenance_notes: Array<string>;
   metadata_retrieved_at: string;
+  watched: boolean | null;
 }
 export interface Page {
   size: number;
@@ -89,6 +90,11 @@ export interface HomeRow {
   id: string;
   title: string;
   items: Array<Item>;
+  read_error: HomeRowReadError | null;
+}
+export interface HomeRowReadError {
+  code: string;
+  message: string;
 }
 export interface SearchRequest {
   query: string;
@@ -118,8 +124,28 @@ export interface User {
   id: string;
   display_name: string;
 }
+export interface JellyfinSource {
+  id: string;
+  display_name: string;
+}
+export interface JellyfinProfile {
+  id: string;
+  display_name: string;
+}
+export interface JellyfinLink {
+  source_id: string;
+  jellyfin_user_id: string;
+}
 export interface ItemPage {
   items: Array<Item>;
+  next_page_token: string;
+}
+export interface JellyfinSourcePage {
+  sources: Array<JellyfinSource>;
+  next_page_token: string;
+}
+export interface JellyfinProfilePage {
+  profiles: Array<JellyfinProfile>;
   next_page_token: string;
 }
 export interface CreditPage {
@@ -157,5 +183,4 @@ export interface ClientSettings {
   source: string;
   types: SearchTypes | null;
   methods: SearchMethods | null;
-  subtitle_preference: string;
 }

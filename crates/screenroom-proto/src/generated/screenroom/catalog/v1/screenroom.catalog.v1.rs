@@ -165,6 +165,9 @@ pub struct Item {
     pub provenance_notes: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag="20")]
     pub metadata_retrieved_at: ::prost::alloc::string::String,
+    /// Explicit personal observation for the selected user and displayed source; absent is unknown.
+    #[prost(bool, optional, tag="21")]
+    pub watched: ::core::option::Option<bool>,
 }
 #[derive(serde::Serialize)]
 #[derive(serde::Deserialize)]
@@ -195,6 +198,22 @@ pub struct HomeRow {
     pub title: ::prost::alloc::string::String,
     #[prost(message, repeated, tag="3")]
     pub items: ::prost::alloc::vec::Vec<Item>,
+    /// Absent on a successful read, including a genuinely empty row. Progress read
+    /// failures return an empty Continue Watching row with this error while other
+    /// catalog rows remain available; they do not fail the entire GetHome call.
+    #[prost(message, optional, tag="4")]
+    pub read_error: ::core::option::Option<HomeRowReadError>,
+}
+#[derive(serde::Serialize)]
+#[derive(serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HomeRowReadError {
+    /// Stable machine-readable code: progress_unavailable for progress read failure.
+    #[prost(string, tag="1")]
+    pub code: ::prost::alloc::string::String,
+    /// Sanitized user-facing message; never upstream bodies, URLs, or credentials.
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
 }
 #[derive(serde::Serialize)]
 #[derive(serde::Deserialize)]
@@ -358,7 +377,7 @@ pub struct SearchRequest {
     pub types: ::core::option::Option<super::super::common::v1::SearchTypes>,
     #[prost(message, optional, tag="4")]
     pub methods: ::core::option::Option<super::super::common::v1::SearchMethods>,
-    /// Provider choice: all, tmdb, or jellyfin; not an installation source ID.
+    /// Provider choice: all or jellyfin; not an installation source ID.
     #[prost(string, tag="5")]
     pub source: ::prost::alloc::string::String,
     #[prost(message, optional, tag="6")]

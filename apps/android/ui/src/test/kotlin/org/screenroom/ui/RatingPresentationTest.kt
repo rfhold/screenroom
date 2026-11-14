@@ -7,15 +7,15 @@ class RatingPresentationTest {
     private val retrievedAt = "2026-11-07T12:00:00Z"
 
     @Test fun unknownCountPreservesAvailableRating() {
-        val result = ratingPresentation(org.screenroom.core.Rating("TMDB", 6.1, 10.0, null, retrievedAt), retrievedAt)
+        val result = ratingPresentation(org.screenroom.core.Rating("Provider", 6.1, 10.0, null, retrievedAt), retrievedAt)
         assertEquals("6.1/10", result.score)
-        assertEquals("TMDB user rating: 6.1/10 · Vote count unavailable. Snapshot · 2026-11-07 · Not live.", result.disclosure)
+        assertEquals("Provider user rating: 6.1/10 · Vote count unavailable. Snapshot · 2026-11-07 · Not live.", result.disclosure)
     }
 
     @Test fun explicitZeroCountIsUnrated() {
-        val result = ratingPresentation(org.screenroom.core.Rating("TMDB", 6.1, 10.0, 0uL, retrievedAt), retrievedAt)
+        val result = ratingPresentation(org.screenroom.core.Rating("Provider", 6.1, 10.0, 0uL, retrievedAt), retrievedAt)
         assertEquals("Unrated", result.score)
-        assertEquals("TMDB user rating: Unrated · 0 votes. Snapshot · 2026-11-07 · Not live.", result.disclosure)
+        assertEquals("Provider user rating: Unrated · 0 votes. Snapshot · 2026-11-07 · Not live.", result.disclosure)
     }
 
     @Test fun absentRatingDoesNotInventSnapshot() {

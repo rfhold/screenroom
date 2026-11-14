@@ -340,9 +340,38 @@ impl SearchRepository {
         expected_hash: &[u8],
         vector: &[f32],
     ) -> Result<()> {
+        self.commit_embedding_with_outcomes(
+            claim,
+            document,
+            model,
+            expected_revision,
+            expected_hash,
+            vector,
+            &[],
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn commit_embedding_with_outcomes(
+        &self,
+        claim: &Claim,
+        document: Uuid,
+        model: Uuid,
+        expected_revision: &str,
+        expected_hash: &[u8],
+        vector: &[f32],
+        outcomes: &[crate::ingest::RequestOutcomeWrite],
+    ) -> Result<()> {
         validate_vector(vector)?;
         if expected_hash.len() != 32 || expected_revision.is_empty() || claim.kind != "embedding" {
             return Err(Error::Invalid("embedding commit"));
+        }
+        let hash = claim.input["input_hash"]
+            .as_str()
+            .ok_or(Error::Invalid("embedding input hash"))?;
+        let expected: String = expected_hash.iter().map(|b| format!("{b:02x}")).collect();
+        if hash != expected {
+            return Err(Error::Stale);
         }
         let mut tx = self.pool.begin().await?;
         let (_, policy) = guard(&mut tx, claim).await?;
@@ -359,6 +388,7 @@ impl SearchRepository {
         if n != 1 {
             return Err(Error::Stale);
         }
+        crate::ingest::write_outcomes(&mut tx, claim, outcomes).await?;
         finish(&mut tx, claim).await?;
         tx.commit().await?;
         Ok(())

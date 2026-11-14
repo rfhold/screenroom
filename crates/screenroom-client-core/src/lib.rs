@@ -1,4 +1,10 @@
 mod models;
+mod operator;
+mod operator_models;
+pub use operator::*;
+pub use operator_models::*;
+#[cfg(target_arch = "wasm32")]
+mod operator_wasm;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures::{
     FutureExt,
@@ -6,7 +12,13 @@ use futures::{
 };
 pub use models::*;
 mod wire {
-    pub use screenroom_proto::{catalog::v1::*, user::v1::*};
+    pub use screenroom_proto::catalog::v1::*;
+    pub use screenroom_proto::user::v1::{
+        ClearJellyfinLinkRequest, ClearJellyfinLinkResponse, GetCurrentUserRequest,
+        GetCurrentUserResponse, GetJellyfinLinkRequest, GetJellyfinLinkResponse,
+        ListJellyfinProfilesRequest, ListJellyfinSourcesRequest, SetJellyfinLinkRequest,
+        SetJellyfinLinkResponse, user_service_client,
+    };
 }
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -14,7 +26,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -101,17 +113,12 @@ pub fn default_settings() -> ClientSettings {
             semantic: true,
             title_only: false,
         }),
-        subtitle_preference: "off".into(),
     }
 }
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
 pub fn validate_settings(settings: ClientSettings) -> Result<ClientSettings, ClientError> {
-    if !["all", "tmdb", "jellyfin"].contains(&settings.source.as_str()) {
-        return Err(invalid("source must be all, tmdb, or jellyfin"));
-    }
-    if !["off", "library_tracks", "transcription"].contains(&settings.subtitle_preference.as_str())
-    {
-        return Err(invalid("invalid subtitle preference"));
+    if !["all", "jellyfin"].contains(&settings.source.as_str()) {
+        return Err(invalid("source must be all or jellyfin"));
     }
     if settings
         .types
@@ -128,6 +135,16 @@ pub fn validate_settings(settings: ClientSettings) -> Result<ClientSettings, Cli
         return Err(invalid("at least one search engine required"));
     }
     Ok(settings)
+}
+/// Load-only migration of retired source preferences; saves use strict validation.
+#[cfg_attr(not(target_arch = "wasm32"), uniffi::export)]
+pub fn normalize_saved_settings(
+    mut settings: ClientSettings,
+) -> Result<ClientSettings, ClientError> {
+    if settings.source == "tmdb" {
+        settings.source = "all".into();
+    }
+    validate_settings(settings)
 }
 fn bridge<A: Serialize, B: DeserializeOwned>(a: A) -> Result<B, ClientError> {
     serde_json::to_value(a)
@@ -223,7 +240,10 @@ pub struct Client {
     #[cfg(not(target_arch = "wasm32"))]
     channel: Arc<tokio::sync::OnceCell<Transport>>,
     generation: AtomicU64,
+    cancellation: AtomicU64,
     cache: Mutex<Cache>,
+    mutation: futures::lock::Mutex<()>,
+    mutation_waiters: AtomicUsize,
     #[cfg(all(test, not(target_arch = "wasm32")))]
     artwork_completion_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -269,12 +289,16 @@ impl Client {
             #[cfg(not(target_arch = "wasm32"))]
             channel: Arc::new(tokio::sync::OnceCell::new()),
             generation: AtomicU64::new(0),
+            cancellation: AtomicU64::new(0),
             cache: Mutex::new(Cache::default()),
+            mutation: futures::lock::Mutex::new(()),
+            mutation_waiters: AtomicUsize::new(0),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             artwork_completion_hook: Mutex::new(None),
         }))
     }
     pub fn cancel_all(&self) {
+        self.cancellation.fetch_add(1, Ordering::SeqCst);
         let pending = if let Ok(mut c) = self.cache.lock() {
             // Cancellation and cache completion share this linearization point.
             self.generation.fetch_add(1, Ordering::SeqCst);
@@ -289,11 +313,84 @@ impl Client {
             abort.abort();
         }
     }
+    /// Invalidates cached nonpersonal reads and pending reads, including personal item reads.
+    /// Profile mutations use this boundary; completed item reads are never retained.
     pub fn invalidate_reads(&self) {
-        self.cancel_all();
         if let Ok(mut c) = self.cache.lock() {
+            self.generation.fetch_add(1, Ordering::SeqCst);
             c.values.clear();
+            for (_, entry) in c.pending.drain() {
+                entry.abort.abort();
+            }
         }
+    }
+    pub async fn list_jellyfin_sources(
+        self: Arc<Self>,
+        page: Page,
+    ) -> Result<JellyfinSourcePage, ClientError> {
+        self.require_user()?;
+        self.read(
+            "jellyfin_sources",
+            wire::ListJellyfinSourcesRequest {
+                page: Some(bridge(page)?),
+            },
+        )
+        .await
+    }
+    pub async fn list_jellyfin_profiles(
+        self: Arc<Self>,
+        source_id: String,
+        page: Page,
+    ) -> Result<JellyfinProfilePage, ClientError> {
+        self.require_user()?;
+        self.read(
+            "jellyfin_profiles",
+            wire::ListJellyfinProfilesRequest {
+                source_id,
+                page: Some(bridge(page)?),
+            },
+        )
+        .await
+    }
+    pub async fn get_jellyfin_link(
+        self: Arc<Self>,
+        source_id: String,
+    ) -> Result<Option<JellyfinLink>, ClientError> {
+        self.require_user()?;
+        let response: wire::GetJellyfinLinkResponse = self
+            .read("jellyfin_link", wire::GetJellyfinLinkRequest { source_id })
+            .await?;
+        bridge(response.link)
+    }
+    pub async fn set_jellyfin_link(
+        self: Arc<Self>,
+        source_id: String,
+        jellyfin_user_id: String,
+    ) -> Result<JellyfinLink, ClientError> {
+        let response: wire::SetJellyfinLinkResponse = self
+            .mutate(
+                "set_jellyfin_link",
+                wire::SetJellyfinLinkRequest {
+                    source_id,
+                    jellyfin_user_id,
+                },
+            )
+            .await?;
+        bridge(response.link.ok_or_else(|| ClientError::InvalidResponse {
+            reason: "missing link".into(),
+        })?)
+    }
+    pub async fn clear_jellyfin_link(
+        self: Arc<Self>,
+        source_id: String,
+    ) -> Result<String, ClientError> {
+        let response: wire::ClearJellyfinLinkResponse = self
+            .mutate(
+                "clear_jellyfin_link",
+                wire::ClearJellyfinLinkRequest { source_id },
+            )
+            .await?;
+        Ok(response.source_id)
     }
     pub async fn get_home(
         self: Arc<Self>,
@@ -484,6 +581,47 @@ impl Client {
 }
 
 impl Client {
+    fn require_user(&self) -> Result<(), ClientError> {
+        if self.config.user_id.is_empty() {
+            return Err(invalid("requires an explicit local user_id"));
+        }
+        Ok(())
+    }
+    async fn mutate<Q: Serialize, R: DeserializeOwned>(
+        self: Arc<Self>,
+        op: &'static str,
+        request: Q,
+    ) -> Result<R, ClientError> {
+        self.require_user()?;
+        if self.mutation_waiters.fetch_add(1, Ordering::SeqCst) >= 32 {
+            self.mutation_waiters.fetch_sub(1, Ordering::SeqCst);
+            return Err(ClientError::ResourceExhausted {
+                reason: "32 mutation requests already active".into(),
+            });
+        }
+        let _admission = MutationAdmission(self.clone());
+        let generation = self.cancellation.load(Ordering::SeqCst);
+        timeout(self.config.timeout_ms, async {
+            let _serial = self.mutation.lock().await;
+            if self.cancellation.load(Ordering::SeqCst) != generation {
+                return Err(ClientError::Cancelled);
+            }
+            self.invalidate_reads();
+            let _barrier = MutationBarrier(self.clone());
+            let key = format!("mutation:{}", self.generation.load(Ordering::SeqCst));
+            bridge(
+                self.clone()
+                    .dedup(
+                        key,
+                        op.into(),
+                        serde_json::to_value(request).map_err(|e| invalid(e.to_string()))?,
+                        false,
+                    )
+                    .await?,
+            )
+        })
+        .await
+    }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Cache>, ClientError> {
         self.cache.lock().map_err(|_| ClientError::InvalidResponse {
             reason: "cache lock poisoned".into(),
@@ -538,16 +676,19 @@ impl Client {
             "{}:{}:{op}:{value}",
             self.config.endpoint, self.config.user_id
         );
-        if let Some(v) = self
-            .lock()?
-            .values
-            .iter()
-            .find(|(k, _, _)| k == &key)
-            .map(|(_, v, _)| v.clone())
+        // Item responses carry personal observations without a validity deadline or revision.
+        let retain = !matches!(op, "home" | "items" | "item" | "children" | "search");
+        if retain
+            && let Some(v) = self
+                .lock()?
+                .values
+                .iter()
+                .find(|(k, _, _)| k == &key)
+                .map(|(_, v, _)| v.clone())
         {
             return bridge(v);
         }
-        bridge(self.dedup(key, op.into(), value, true).await?)
+        bridge(self.dedup(key, op.into(), value, retain).await?)
     }
     async fn dedup(
         self: Arc<Self>,
@@ -578,7 +719,10 @@ impl Client {
                     #[cfg(not(target_arch = "wasm32"))]
                     channel: self.channel.clone(),
                     generation: AtomicU64::new(0),
+                    cancellation: AtomicU64::new(0),
                     cache: Mutex::default(),
+                    mutation: futures::lock::Mutex::new(()),
+                    mutation_waiters: AtomicUsize::new(0),
                     #[cfg(all(test, not(target_arch = "wasm32")))]
                     artwork_completion_hook: Mutex::new(None),
                 };
@@ -699,6 +843,36 @@ impl Client {
             }};
         }
         match op {
+            "jellyfin_sources" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                list_jellyfin_sources,
+                wire::ListJellyfinSourcesRequest
+            ),
+            "jellyfin_profiles" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                list_jellyfin_profiles,
+                wire::ListJellyfinProfilesRequest
+            ),
+            "jellyfin_link" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                get_jellyfin_link,
+                wire::GetJellyfinLinkRequest
+            ),
+            "set_jellyfin_link" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                set_jellyfin_link,
+                wire::SetJellyfinLinkRequest
+            ),
+            "clear_jellyfin_link" => rpc!(
+                user_service_client,
+                UserServiceClient,
+                clear_jellyfin_link,
+                wire::ClearJellyfinLinkRequest
+            ),
             "catalog_info" => rpc!(
                 catalog_service_client,
                 CatalogServiceClient,
@@ -769,6 +943,19 @@ impl Client {
         }
     }
 }
+struct MutationBarrier(Arc<Client>);
+struct MutationAdmission(Arc<Client>);
+impl Drop for MutationAdmission {
+    fn drop(&mut self) {
+        self.0.mutation_waiters.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+impl Drop for MutationBarrier {
+    fn drop(&mut self) {
+        self.0.invalidate_reads();
+    }
+}
+
 async fn timeout<T>(
     ms: u32,
     f: impl std::future::Future<Output = Result<T, ClientError>>,

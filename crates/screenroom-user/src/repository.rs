@@ -36,6 +36,10 @@ impl Repository {
         Self { pool }
     }
 
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
     pub async fn ready(&self) -> Result<(), Status> {
         sqlx::query("SELECT id,display_name,state FROM identity.users LIMIT 0")
             .execute(&self.pool)
@@ -74,9 +78,58 @@ impl Repository {
             .bind(id).bind(source).fetch_optional(&self.pool).await.map_err(database)
     }
 
-    pub async fn set_link(&self, id: Uuid, source: &str, external: &str) -> Result<(), Status> {
+    pub async fn revision(&self, id: Uuid) -> Result<String, Status> {
+        sqlx::query_scalar(
+            "SELECT updated_at::text FROM identity.users WHERE id=$1 AND state='enabled'",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(database)?
+        .ok_or_else(|| Status::failed_precondition("local user unavailable"))
+    }
+
+    pub(crate) async fn set_current_link(
+        &self,
+        id: Uuid,
+        source: &str,
+        external: &str,
+        revision: &str,
+    ) -> Result<(), Status> {
         bounded(source)?;
         bounded(external)?;
+        let mut tx = self.pool.begin().await.map_err(database)?;
+        let state: Option<(String, String)> = sqlx::query_as(
+            "SELECT state,updated_at::text FROM identity.users WHERE id=$1 FOR UPDATE",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(database)?;
+        match state.as_ref().map(|(state, _)| state.as_str()) {
+            None => return Err(Status::not_found("local user not found")),
+            Some("enabled") => (),
+            _ => return Err(Status::failed_precondition("local user disabled")),
+        }
+        if state
+            .as_ref()
+            .is_none_or(|(_, current)| current != revision)
+        {
+            return Err(Status::aborted("profile generation changed"));
+        }
+        let available:bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM connections.jellyfin c JOIN catalog.sources s ON s.id=c.source_id WHERE s.source_key=$1 AND s.state='enabled' AND s.configuration->>'connection_id'=c.id::text AND s.configuration->>'connection_generation'=c.generation::text AND s.configuration->>'locator_revision'=c.revision)")
+                .bind(source).fetch_one(&mut *tx).await.map_err(database)?;
+        if !available {
+            return Err(Status::unavailable("provider unavailable"));
+        }
+        sqlx::query("INSERT INTO identity.jellyfin_user_links(user_id,source_id,jellyfin_user_id) VALUES($1,$2,$3) ON CONFLICT(user_id,source_id) DO UPDATE SET jellyfin_user_id=EXCLUDED.jellyfin_user_id,updated_at=now() WHERE identity.jellyfin_user_links.jellyfin_user_id IS DISTINCT FROM EXCLUDED.jellyfin_user_id")
+            .bind(id).bind(source).bind(external).execute(&mut *tx).await.map_err(database)?;
+        sqlx::query("UPDATE identity.users SET updated_at=GREATEST(clock_timestamp(),updated_at + interval '1 microsecond') WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(database)?;
+        tx.commit().await.map_err(database)
+    }
+
+    pub(crate) async fn clear_enabled_link(&self, id: Uuid, source: &str) -> Result<(), Status> {
+        bounded(source)?;
         let mut tx = self.pool.begin().await.map_err(database)?;
         let state: Option<String> =
             sqlx::query_scalar("SELECT state FROM identity.users WHERE id=$1 FOR UPDATE")
@@ -84,27 +137,11 @@ impl Repository {
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(database)?;
-        match state.as_deref() {
-            None => return Err(Status::not_found("local user not found")),
-            Some("enabled") => (),
-            _ => return Err(Status::failed_precondition("local user disabled")),
-        }
-        sqlx::query("INSERT INTO identity.jellyfin_user_links(user_id,source_id,jellyfin_user_id) VALUES($1,$2,$3) ON CONFLICT(user_id,source_id) DO UPDATE SET jellyfin_user_id=EXCLUDED.jellyfin_user_id,updated_at=now() WHERE identity.jellyfin_user_links.jellyfin_user_id IS DISTINCT FROM EXCLUDED.jellyfin_user_id")
-            .bind(id).bind(source).bind(external).execute(&mut *tx).await.map_err(database)?;
-        tx.commit().await.map_err(database)
-    }
-
-    pub async fn clear_link(&self, id: Uuid, source: &str) -> Result<(), Status> {
-        bounded(source)?;
-        let mut tx = self.pool.begin().await.map_err(database)?;
-        let exists: Option<Uuid> =
-            sqlx::query_scalar("SELECT id FROM identity.users WHERE id=$1 FOR UPDATE")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(database)?;
-        if exists.is_none() {
+        if state.is_none() {
             return Err(Status::not_found("local user not found"));
+        }
+        if state.as_deref() != Some("enabled") {
+            return Err(Status::failed_precondition("local user disabled"));
         }
         sqlx::query("DELETE FROM identity.jellyfin_user_links WHERE user_id=$1 AND source_id=$2")
             .bind(id)
@@ -112,6 +149,7 @@ impl Repository {
             .execute(&mut *tx)
             .await
             .map_err(database)?;
+        sqlx::query("UPDATE identity.users SET updated_at=GREATEST(clock_timestamp(),updated_at + interval '1 microsecond') WHERE id=$1").bind(id).execute(&mut *tx).await.map_err(database)?;
         tx.commit().await.map_err(database)
     }
 
@@ -122,26 +160,11 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn create_missing_user(
-        &self,
-        id: Uuid,
-        display_name: &str,
-        links: &[(String, String)],
-    ) -> Result<bool, Status> {
+    pub async fn create_missing_user(&self, id: Uuid, display_name: &str) -> Result<bool, Status> {
         bounded(display_name)?;
-        for (source, external) in links {
-            bounded(source)?;
-            bounded(external)?;
-        }
         let mut tx = self.pool.begin().await.map_err(database)?;
         let created: Option<Uuid> = sqlx::query_scalar("INSERT INTO identity.users(id,public_id,display_name) VALUES($1,$2,$3) ON CONFLICT(id) DO NOTHING RETURNING id")
             .bind(id).bind(id.to_string()).bind(display_name).fetch_optional(&mut *tx).await.map_err(database)?;
-        if created.is_some() {
-            for (source, external) in links {
-                sqlx::query("INSERT INTO identity.jellyfin_user_links(user_id,source_id,jellyfin_user_id) VALUES($1,$2,$3)")
-                    .bind(id).bind(source).bind(external).execute(&mut *tx).await.map_err(database)?;
-            }
-        }
         tx.commit().await.map_err(database)?;
         Ok(created.is_some())
     }

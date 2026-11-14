@@ -50,10 +50,6 @@ fn command(binary: &str, runtime: &str, migration: &str) -> Command {
     command
         .env("DATABASE_URL", runtime)
         .env("SCREENROOM_MIGRATION_DATABASE_URL", migration)
-        .env(
-            "SCREENROOM_FIXTURE_ROOT",
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/catalog"),
-        )
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
         .stdout(Stdio::null())

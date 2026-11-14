@@ -16,9 +16,11 @@ import urllib.request
 import uuid
 
 ROOT = Path(__file__).resolve().parent.parent
-PROJECT = os.environ.get('SCREENROOM_BACKEND_PROJECT', 'screenroom-e2e')
-if not re.fullmatch(r'screenroom-e2e(?:-[a-z0-9-]+)?', PROJECT):
-    raise SystemExit('project must be screenroom-e2e or screenroom-e2e-<suffix>')
+if 'SCREENROOM_BACKEND_PROFILE' in os.environ:
+    raise SystemExit('backend profiles are retired; use the ordinary local installation')
+PROJECT = os.environ.get('SCREENROOM_BACKEND_PROJECT', 'screenroom-local')
+if not re.fullmatch(r'screenroom-[a-z0-9]+(?:-[a-z0-9]+)*', PROJECT):
+    raise SystemExit('invalid backend project')
 RUNTIME = ROOT / 'build/backend-runtime' / PROJECT
 PORT = os.environ.get('SCREENROOM_BACKEND_PORT', '50051')
 if not PORT.isdigit() or not 1024 <= int(PORT) <= 65535:
@@ -30,6 +32,8 @@ for key in ('SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT'):
 os.environ.update(SCREENROOM_BACKEND_ENV=str(RUNTIME / 'runtime.env'),
                   SCREENROOM_BACKEND_RUNTIME=str(RUNTIME), SCREENROOM_API_ENDPOINT=ORIGIN)
 COMPOSE = ['docker', 'compose', '--env-file', str(RUNTIME / 'runtime.env'), '-p', PROJECT, '-f', str(ROOT / 'compose.yaml')]
+OPERATOR_COMPOSE = COMPOSE + ['--profile', 'index-operator']
+os.environ['SCREENROOM_BACKEND_PORT'] = PORT
 sys.dont_write_bytecode = True
 _spec = importlib.util.spec_from_file_location('backend_process', ROOT / 'scripts/backend-process.py')
 _process = importlib.util.module_from_spec(_spec)
@@ -90,24 +94,9 @@ def read_config(path):
         raise RuntimeError(f'invalid {path.name} JSON') from error
 
 
-def validate_bootstrap():
-    installation = read_config(RUNTIME / 'installation.json')
-    sources = installation.get('sources') if isinstance(installation, dict) else None
-    if not isinstance(sources, list) or len(sources) > 32:
-        raise RuntimeError('invalid existing installation.json sources')
-    keys = set()
-    for source in sources:
-        if not isinstance(source, dict) or source.get('provider') not in ('jellyfin', 'tmdb'):
-            raise RuntimeError('invalid existing installation.json provider')
-        key = source.get('key')
-        if not isinstance(key, str) or not key or key in keys:
-            raise RuntimeError('invalid existing installation.json source key')
-        keys.add(key)
-        configuration = source.get('configuration')
-        if not isinstance(configuration, dict) or configuration.get('adapter') != 'mock':
-            raise RuntimeError('installation requires offline mock adapters')
+def installation_user():
     users = read_config(RUNTIME / 'users.json')
-    if not isinstance(users, list) or len(users) > 1000:
+    if not isinstance(users, list) or not 1 <= len(users) <= 1000:
         raise RuntimeError('invalid existing users.json')
     ids = set()
     for user in users:
@@ -120,10 +109,41 @@ def validate_bootstrap():
         if identity in ids:
             raise RuntimeError('duplicate existing users.json identity')
         ids.add(identity)
+    selector_path = RUNTIME / 'local-user.json'
+    descriptor_path = RUNTIME / 'descriptor.json'
+    if selector_path.is_symlink() or descriptor_path.is_symlink():
+        raise RuntimeError('runtime files must not be symlinks')
+    selected = None
+    if selector_path.exists():
+        selector = read_config(selector_path)
+        if not isinstance(selector, dict) or not isinstance(selector.get('userID'), str):
+            raise RuntimeError('invalid installation user selector')
+        selected = selector['userID']
+    if not selected and descriptor_path.exists():
+        descriptor = read_config(descriptor_path)
+        if not isinstance(descriptor, dict) or not isinstance(descriptor.get('userID'), str):
+            raise RuntimeError('invalid existing descriptor user selector')
+        selected = descriptor['userID']
+    if selected and selected not in ids:
+        raise RuntimeError('persisted descriptor user is missing from users.json')
+    selected = selected or str(uuid.UUID(users[0]['id']))
+    create_json(selector_path, dict(userID=selected))
+    if read_config(selector_path).get('userID') != selected:
+        raise RuntimeError('installation user selector changed concurrently')
+    return selected
 
 
 def initialize_files():
     RUNTIME.mkdir(parents=True, exist_ok=True)
+    if RUNTIME.is_symlink() or RUNTIME.stat().st_uid != os.getuid():
+        raise RuntimeError('runtime must be an owned directory')
+    os.chmod(RUNTIME, 0o700)
+    for name in ('runtime.env', 'identity.json', 'users.json', 'descriptor.json', 'local-user.json'):
+        path = RUNTIME / name
+        if path.is_symlink():
+            raise RuntimeError('runtime files must not be symlinks')
+    if (RUNTIME / 'runtime.env').exists() and ((RUNTIME / 'runtime.env').stat().st_mode & 0o077 or (RUNTIME / 'runtime.env').stat().st_uid != os.getuid()):
+        raise RuntimeError('runtime keys must remain owner-private')
     env = RUNTIME / 'runtime.env'
     if not env.exists():
         existing = run(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={PROJECT}'], capture=True).stdout.strip()
@@ -140,36 +160,16 @@ def initialize_files():
         if run(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={PROJECT}'], capture=True).stdout.strip():
             raise RuntimeError('persistent volumes exist but instance identity is missing; restore identity.json')
         create_json(identity, dict(instanceID=str(uuid.uuid4()), project=PROJECT,
-            seedRevision='mock-adapters-v1', publicOrigin=ORIGIN, clientNetwork=f'{PROJECT}_client'))
+            bootstrapRevision='installation-v1', publicOrigin=ORIGIN, clientNetwork=f'{PROJECT}_client'))
     persisted = read_config(identity)
-    if not isinstance(persisted, dict) or persisted.get('publicOrigin') != ORIGIN or persisted.get('project') != PROJECT or persisted.get('clientNetwork') != f'{PROJECT}_client' or persisted.get('seedRevision') != 'mock-adapters-v1':
+    if not isinstance(persisted, dict) or persisted.get('publicOrigin') != ORIGIN or persisted.get('project') != PROJECT or persisted.get('clientNetwork') != f'{PROJECT}_client':
         raise RuntimeError('persistent instance origin mismatch')
     uuid.UUID(persisted['instanceID'])
-    notices = json.loads((ROOT / 'fixtures/catalog/notices.json').read_text())
-    policy = dict(enabled=True, max_items=1000, max_requests=100,
-                  incremental_seconds=86400, reconcile_seconds=604800,
-                  enrich_metadata=True, enrich_people=True, enrich_artwork=True)
-    feeds = []
-    for feed in ('MoviePopular', 'MovieUpcoming', 'MovieNowPlaying', 'MovieTrending',
-                 'TvPopular', 'TvOnTheAir', 'TvTrending'):
-        trending = feed.endswith('Trending')
-        feeds.append(dict(feed_key=f'{feed}:en-US:{"Day" if trending else "US"}:1', feed=feed,
-                          max_pages=1, page_size=25, locale='en-US',
-                          region='US' if feed in ('MoviePopular', 'MovieUpcoming', 'MovieNowPlaying') else None,
-                          trending_window='Day' if trending else None))
-    sources = []
-    for provider in ('jellyfin', 'tmdb'):
-        selection = dict(library_ids=['movies', 'tv'], page_size=25) if provider == 'jellyfin' else dict(feeds=feeds)
-        sources.append(dict(key=f'mock-{provider}', provider=provider,
-            configuration=dict(adapter='mock', notices=notices if provider == 'tmdb' else [], branding_artwork_ids=['tmdb']),
-            capabilities={}, libraries=[dict(id=id, external_id=id, title=title)
-                for id, title in (('movies', 'Movies'), ('tv', 'TV'))] if provider == 'jellyfin' else [],
-            policy=dict(policy, selection_json=selection)))
-    create_json(RUNTIME / 'installation.json', dict(sources=sources))
-    create_json(RUNTIME / 'users.json', [dict(id=f'00000000-0000-0000-0000-00000000000{i}',
-        display_name=name, links=[dict(source_id='mock-jellyfin', jellyfin_user_id=f'mock-jellyfin-{name.lower()}')])
-        for i, name in ((1, 'Alice'), (2, 'Bob'))])
-    validate_bootstrap()
+    if not (RUNTIME / 'users.json').exists():
+        if run(['docker', 'volume', 'ls', '-q', '--filter', f'label=com.docker.compose.project={PROJECT}'], capture=True).stdout.strip():
+            raise RuntimeError('persistent volumes exist but user identity is missing; restore users.json')
+        create_json(RUNTIME / 'users.json', [dict(id=str(uuid.uuid4()), display_name='Local user', links=[])])
+    installation_user()
 
 
 def bootstrap_garage():
@@ -203,66 +203,219 @@ def rpc(method, data=None, user=True):
     args = ['grpcurl', '-plaintext', '-max-time', '15', '-import-path', 'proto',
             '-proto', 'screenroom/catalog/v1/catalog.proto', '-proto', 'screenroom/user/v1/user.proto']
     if user:
-        args += ['-H', 'x-screenroom-user-id: 00000000-0000-0000-0000-000000000001']
+        args += ['-H', f'x-screenroom-user-id: {installation_user()}']
     args += ['-d', json.dumps(data or {}), f'127.0.0.1:{PORT}', method]
     return json.loads(run(args, capture=True).stdout)
 
 
-def wait(activate=False):
-    deadline = time.monotonic() + int(os.environ.get('SCREENROOM_BACKEND_WAIT_SECONDS', '900'))
-    last = 'not checked'
+def validate_embeddings():
+    from urllib.parse import urlsplit
+    keys = ('BASE_URL', 'MODEL', 'DIMENSIONS', 'REVISION', 'API_KEY')
+    values = {key: os.environ.get('SCREENROOM_EMBEDDING_' + key) for key in keys}
+    if not any(value is not None for value in values.values()):
+        return
+    url = urlsplit(values['BASE_URL'] or '')
+    if (url.scheme not in ('http', 'https') or not url.hostname or url.username or url.password
+            or url.query or url.fragment or values['DIMENSIONS'] != '1024'
+            or any(not values[key] or len(values[key].encode()) > 200 for key in ('MODEL', 'REVISION'))):
+        raise RuntimeError('invalid optional embedding configuration; provide URL, model, 1024 dimensions and revision')
+
+
+def initialize_credentials():
+    script = '''set -eu
+d=/run/screenroom/credentials
+test -d "$d" && test ! -L "$d"
+if [ "$(stat -c '%u:%g:%a' "$d")" = '0:0:755' ] && [ -z "$(ls -A "$d")" ]; then
+  chown 10001:10001 "$d"
+  chmod 700 "$d"
+fi
+test "$(stat -c '%u:%g:%a' "$d")" = '10001:10001:700'
+'''
+    operator_compose('run', '--rm', '--no-deps', '--user', '0:0', '--entrypoint', '/bin/sh',
+                     'index-operator', '-ec', script, capture=True)
+
+
+def provision_operator_role():
+    sql("""DO $$ BEGIN
+IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='operator_runtime') THEN
+ CREATE ROLE operator_runtime LOGIN INHERIT PASSWORD 'operator-local-only' IN ROLE screenroom_operator;
+END IF;
+END $$;""")
+
+
+def worker_command(command, timeout=1800):
+    name = f'{PROJECT}-operation-{uuid.uuid4().hex}'
+    try:
+        return bounded_run(COMPOSE + ['run', '--rm', '--no-deps', '--name', name,
+                           'worker', 'screenroom-index-worker', *command],
+                           cwd=ROOT, timeout=timeout, cap=1024 * 1024, group=True)
+    except (subprocess.TimeoutExpired, RuntimeError):
+        # The CLI's process group does not own the daemon's one-off container.
+        bounded_run(['docker', 'stop', '--time', '15', name], cwd=ROOT, timeout=30, check=False)
+        raise
+
+
+def wait():
+    seconds = int(os.environ.get('SCREENROOM_BACKEND_WAIT_SECONDS', '120'))
+    if not 1 <= seconds <= 900:
+        raise RuntimeError('wait must be between 1 and 900 seconds')
+    spec = importlib.util.spec_from_file_location('contract', ROOT / 'scripts/backend-contract.py')
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            pending = sql("SELECT count(*) FROM ingest.jobs WHERE state NOT IN ('complete','cancelled')")
-            docs = int(sql('SELECT count(*) FROM search.documents'))
-            if pending != '0' or docs < 10:
-                raise RuntimeError(f'jobs={pending}; documents={docs}')
-            if activate and sql("SELECT count(*) FROM search.embedding_models WHERE state='active'") == '0':
-                compose('run', '--rm', '--no-deps', 'worker', 'screenroom-index-worker', 'activate-model', capture=True)
-            if sql("SELECT count(*) FROM search.embedding_models WHERE state='active' AND dimensions=1024") != '1':
-                raise RuntimeError('no active 1024-dimensional model')
-            missing = sql("SELECT count(*) FROM search.documents d JOIN catalog.source_items si ON si.id=d.source_item_id JOIN catalog.sources s ON s.id=si.source_id CROSS JOIN search.embedding_models m WHERE si.state='enabled' AND s.state='enabled' AND m.state='active' AND (d.document_version<>m.document_version OR NOT EXISTS(SELECT FROM search.embeddings e WHERE e.document_id=d.id AND e.model_id=m.id AND e.input_hash=d.content_hash))")
-            if missing != '0':
-                raise RuntimeError(f'active model missing {missing} current document embeddings')
-            home = rpc('screenroom.catalog.v1.BrowseService/GetHome')
-            user = rpc('screenroom.user.v1.UserService/GetCurrentUser')
-            with urllib.request.urlopen(ORIGIN + '/__screenroom_instance', timeout=5) as response:
+            info = rpc('screenroom.catalog.v1.CatalogService/GetCatalogInfo', user=False)
+            current = rpc('screenroom.user.v1.UserService/GetCurrentUser')
+            if (contract.web_rpc('screenroom.catalog.v1.CatalogService/GetCatalogInfo') != info
+                    or contract.web_rpc('screenroom.user.v1.UserService/GetCurrentUser') != current):
+                raise RuntimeError('native and browser readiness mismatch')
+            with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(ORIGIN + '/__screenroom_instance', timeout=5) as response:
                 identity = json.load(response)
-            expected = json.loads((RUNTIME / 'identity.json').read_text())
-            if identity != expected or not home or not user:
-                raise RuntimeError('public instance or RPC mismatch')
-            contract = bounded_run([sys.executable, 'scripts/backend-contract.py'], cwd=ROOT,
-                timeout=min(120, max(0, deadline - time.monotonic())), cap=1024 * 1024, group=True)
-            evidence = json.loads(contract.stdout)
-            model = json.loads(sql("SELECT row_to_json(m) FROM (SELECT name,revision,dimensions,document_version FROM search.embedding_models WHERE state='active') m"))
-            descriptor = RUNTIME / f'.descriptor-{uuid.uuid4()}.json'
-            descriptor.write_text(json.dumps(dict(expected,
-                userID='00000000-0000-0000-0000-000000000001', documents=docs,
-                clientUpstream='edge:50051', embeddingModel=model,
-                embeddingRevisionKind='operator-declared', checks=evidence, ready=True), indent=2))
-            descriptor.replace(RUNTIME / 'descriptor.json')
+            expected = read_config(RUNTIME / 'identity.json')
+            if identity != expected or current.get('user', {}).get('id') != installation_user():
+                raise RuntimeError('public identity or RPC mismatch')
+            descriptor = dict(expected, userID=installation_user(),
+                clientUpstream='edge:50051', ready=True,
+                checks=dict(native=True, grpcWeb=True, identity=True))
+            temporary = RUNTIME / f'.descriptor-{uuid.uuid4()}.json'
+            temporary.write_text(json.dumps(descriptor, indent=2))
+            temporary.replace(RUNTIME / 'descriptor.json')
             print(RUNTIME / 'descriptor.json')
             return
-        except (subprocess.SubprocessError, ValueError, OSError, RuntimeError) as error:
-            last = str(error)
-            if isinstance(error, subprocess.CalledProcessError) and error.stderr:
-                last += ': ' + error.stderr[-4000:]
-            time.sleep(2)
-    raise RuntimeError(f'semantic readiness timed out: {last}; inspect docker compose -p {PROJECT} logs')
+        except (subprocess.SubprocessError, ValueError, OSError, RuntimeError, AssertionError):
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+    raise RuntimeError('readiness timed out; inspect private service diagnostics')
+
+
+def operator_settings():
+    port = os.environ.get('SCREENROOM_OPERATOR_PORT', '50072')
+    reserved = {4173, 4176, 5173, 50051, 50052, 50073, int(PORT)}
+    if not port.isascii() or not port.isdigit() or str(int(port)) != port or not 1024 <= int(port) <= 65535 or int(port) in reserved:
+        raise RuntimeError('invalid or conflicting operator port')
+    origin = f'http://127.0.0.1:{port}'
+    if os.environ.get('SCREENROOM_OPERATOR_ORIGIN', origin) != origin:
+        raise RuntimeError(f'SCREENROOM_OPERATOR_ORIGIN must equal {origin}')
+    os.environ.update(SCREENROOM_OPERATOR_PORT=port, SCREENROOM_OPERATOR_ORIGIN=origin,
+                      SCREENROOM_OPERATOR_IMAGE='screenroom-backend:local')
+    return origin
+
+
+def operator_instance():
+    if not RUNTIME.is_dir() or RUNTIME.is_symlink() or RUNTIME.stat().st_uid != os.getuid():
+        raise RuntimeError('operator requires an existing owned runtime')
+    for name in ('runtime.env', 'identity.json', 'descriptor.json', 'lifecycle.lock'):
+        path = RUNTIME / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
+            raise RuntimeError(f'operator requires existing owned {name}')
+    if (RUNTIME / 'runtime.env').stat().st_mode & 0o077:
+        raise RuntimeError('runtime keys must remain owner-private')
+    identity = read_config(RUNTIME / 'identity.json')
+    descriptor = read_config(RUNTIME / 'descriptor.json')
+    expected = dict(project=PROJECT, publicOrigin=ORIGIN, clientNetwork=f'{PROJECT}_client')
+    if not isinstance(identity, dict) or any(identity.get(k) != v for k, v in expected.items()):
+        raise RuntimeError('operator instance ownership mismatch')
+    uuid.UUID(identity['instanceID'])
+    if not isinstance(descriptor, dict) or descriptor.get('ready') is not True or any(descriptor.get(k) != v for k, v in identity.items()):
+        raise RuntimeError('operator requires matching ready instance descriptor')
+    return identity
+
+
+def operator_compose(*args, capture=False):
+    return run(OPERATOR_COMPOSE + list(args), capture=capture)
+
+
+def operator_database():
+    container = operator_compose('ps', '-q', 'postgres', capture=True).stdout.strip()
+    if not container or '\n' in container:
+        raise RuntimeError('operator requires existing healthy postgres')
+    raw = run(['docker', 'inspect', '--format', '{{json .State}}|{{json .Config.Labels}}', container], capture=True).stdout
+    state, labels = (json.loads(part) for part in raw.strip().split('|', 1))
+    if state.get('Health', {}).get('Status') != 'healthy' or not state.get('Running') or labels.get('com.docker.compose.project') != PROJECT or labels.get('com.docker.compose.service') != 'postgres' or labels.get('com.docker.compose.project.working_dir') != str(ROOT):
+        raise RuntimeError('operator postgres health or ownership mismatch')
+    role = operator_compose('exec', '-T', 'postgres', 'psql', '-XAt', '-v', 'ON_ERROR_STOP=1',
+        '-U', 'screenroom', '-d', 'screenroom', '-c',
+        "SELECT count(*) FROM pg_roles WHERE rolname='operator_runtime' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND pg_has_role(oid,'screenroom_operator','member')", capture=True).stdout.strip()
+    if role != '1':
+        raise RuntimeError('operator requires existing restricted operator runtime database role')
+
+
+def operator_container(origin):
+    container = operator_compose('ps', '-q', 'index-operator', capture=True).stdout.strip()
+    if not container or '\n' in container:
+        raise RuntimeError('operator requires one running container owned by this project')
+    raw = run(['docker', 'inspect', '--format',
+               '{{json .State}}|{{json .Config.Labels}}|{{json .NetworkSettings.Ports}}', container], capture=True).stdout
+    state, labels, ports = (json.loads(part) for part in raw.strip().split('|', 2))
+    if not state.get('Running') or labels.get('com.docker.compose.project') != PROJECT or labels.get('com.docker.compose.service') != 'index-operator' or labels.get('com.docker.compose.project.working_dir') != str(ROOT):
+        raise RuntimeError('operator container ownership or running state mismatch')
+    expected = [{'HostIp': '127.0.0.1', 'HostPort': origin.rsplit(':', 1)[1]}]
+    if not isinstance(ports, dict) or ports.get('50072/tcp') != expected:
+        raise RuntimeError('operator container published port does not match requested loopback origin')
+
+
+def operator_health(origin):
+    request = urllib.request.Request(origin + '/api/health', headers={'Host': origin.removeprefix('http://')})
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
+        if response.geturl() != request.full_url or json.load(response).get('ready') is not True:
+            raise RuntimeError('operator is not ready')
+
+
+def operator_public_identity(identity):
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(ORIGIN + '/__screenroom_instance', timeout=3) as response:
+        if response.geturl() != ORIGIN + '/__screenroom_instance' or json.load(response) != identity:
+            raise RuntimeError('operator public instance identity mismatch')
+
+
+def operator_command(command, owner_file=None):
+    origin = operator_settings()
+    identity = operator_instance()
+    if owner_file and (not owner_file.is_file() or owner_file.read_text() != PROJECT):
+        raise RuntimeError('operator owner mismatch')
+    with (RUNTIME / 'lifecycle.lock').open('r+') as lock:
+        fcntl.flock(lock, (fcntl.LOCK_SH if command == 'operator-status' else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+        if command == 'operator-down':
+            operator_compose('stop', '--timeout', '15', 'index-operator')
+            return
+        if command == 'operator-up':
+            operator_public_identity(identity)
+            operator_database()
+            operator_compose('up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'index-operator')
+            deadline = time.monotonic() + 60
+            while True:
+                try:
+                    operator_container(origin)
+                    operator_health(origin)
+                    break
+                except (OSError, ValueError, RuntimeError):
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError('operator readiness timed out; inspect private operator logs')
+                    time.sleep(1)
+        else:
+            operator_public_identity(identity)
+            operator_container(origin)
+            operator_health(origin)
+        print(json.dumps(dict(project=PROJECT, instanceID=identity['instanceID'], operatorOrigin=origin, ready=True)))
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['up', 'wait', 'status', 'down'])
+    parser.add_argument('command', choices=['initialize', 'up', 'wait', 'status', 'drain', 'activate-model', 'down',
+                                          'operator-up', 'operator-down', 'operator-status'])
     parser.add_argument('--owner-file', type=Path)
     args = parser.parse_args()
+    if args.command.startswith('operator-'):
+        operator_command(args.command, args.owner_file)
+        return
+    if args.command in ('initialize', 'up', 'drain', 'activate-model'):
+        validate_embeddings()
     if args.command == 'status':
         descriptor = json.loads((RUNTIME / 'descriptor.json').read_text())
-        with urllib.request.urlopen(ORIGIN + '/__screenroom_instance', timeout=3) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(ORIGIN + '/__screenroom_instance', timeout=3) as response:
             identity = json.load(response)
         expected = json.loads((RUNTIME / 'identity.json').read_text())
-        if identity != expected or any(descriptor[key] != value for key, value in expected.items()):
-            raise RuntimeError('live instance identity mismatch')
+        if identity != expected or any(descriptor.get(key) != value for key, value in expected.items()) or descriptor.get('ready') is not True or descriptor.get('userID') != installation_user():
+            raise RuntimeError('instance identity or user selector mismatch')
         print(json.dumps(descriptor, indent=2))
         return
     RUNTIME.mkdir(parents=True, exist_ok=True)
@@ -284,13 +437,20 @@ def main():
                 raise RuntimeError('SCREENROOM_BACKEND_BUILD must be 0 or 1')
             if build == '1':
                 compose('build', 'catalog')
-            compose('run', '--rm', '--no-deps', 'catalog', 'screenroom-catalog-init', '/runtime/installation.json')
+            initialize_credentials()
             compose('run', '--rm', '--no-deps', 'user', 'screenroom-user-init', '--create-missing', '/runtime/users.json')
+            provision_operator_role()
             compose('up', '-d', 'user', 'catalog', 'worker', 'edge')
-            wait(activate=True)
+            wait()
+        elif args.command == 'initialize':
+            initialize_files()
+        elif args.command in ('drain', 'activate-model'):
+            worker_command([args.command])
         elif args.command == 'wait':
             wait()
         else:
+            if args.owner_file and (not args.owner_file.is_file() or args.owner_file.read_text() != PROJECT):
+                raise RuntimeError('teardown owner mismatch')
             compose('down', '--timeout', '15')
             (RUNTIME / 'descriptor.json').unlink(missing_ok=True)
 
@@ -298,6 +458,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (RuntimeError, subprocess.CalledProcessError, OSError) as error:
-        print(f'backend: {error}', file=sys.stderr)
+    except (RuntimeError, subprocess.CalledProcessError, OSError, ValueError) as error:
+        print('backend: operation failed; inspect private diagnostics' if isinstance(error, subprocess.CalledProcessError) else f'backend: {error}', file=sys.stderr)
         sys.exit(1)

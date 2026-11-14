@@ -1,5 +1,8 @@
 use crate::{Error, Result, config::required};
 use futures_util::StreamExt;
+use screenroom_observability::transport::{
+    BodyDirection, RequestKind, RequestObservation, RequestOutcome, TransportObservation,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -19,6 +22,22 @@ pub struct EmbeddingConfig {
     pub timeout: Duration,
 }
 impl EmbeddingConfig {
+    pub fn optional_from_env() -> Result<Option<Self>> {
+        let configured = [
+            "SCREENROOM_EMBEDDING_BASE_URL",
+            "SCREENROOM_EMBEDDING_MODEL",
+            "SCREENROOM_EMBEDDING_API_KEY",
+            "SCREENROOM_EMBEDDING_DIMENSIONS",
+            "SCREENROOM_EMBEDDING_REVISION",
+        ]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some());
+        if configured {
+            Self::from_env().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
     pub fn from_env() -> Result<Self> {
         Ok(Self {
             base_url: required("SCREENROOM_EMBEDDING_BASE_URL")?,
@@ -59,6 +78,7 @@ impl EmbeddingConfig {
 
 #[derive(Clone)]
 pub struct EmbeddingClient {
+    transport_observer: TransportObservation,
     client: reqwest::Client,
     config: EmbeddingConfig,
 }
@@ -77,7 +97,15 @@ impl EmbeddingClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| Error::Unavailable)?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            config,
+            transport_observer: Default::default(),
+        })
+    }
+    pub fn with_transport_observer(mut self, observer: TransportObservation) -> Self {
+        self.transport_observer = observer;
+        self
     }
     pub fn config(&self) -> &EmbeddingConfig {
         &self.config
@@ -97,18 +125,41 @@ impl EmbeddingClient {
         if let Some(key) = &self.config.api_key {
             request = request.bearer_auth(key);
         }
-        let response = request.send().await.map_err(|_| Error::Unavailable)?;
-        if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error() || response.status().as_u16() == 429 {
-                    Error::Unavailable
-                } else {
-                    Error::Incompatible("embedding HTTP response")
-                },
-            );
+        let mut observation = self.transport_observer.start(RequestKind::Embedding);
+        let result = async {
+            let mut request = request.build().map_err(|_| Error::Unavailable)?;
+            if observation.is_enabled()
+                && let Some(bytes) = request.body().and_then(reqwest::Body::as_bytes)
+            {
+                let bytes = bytes.to_vec();
+                request
+                    .headers_mut()
+                    .insert(reqwest::header::CONTENT_LENGTH, bytes.len().into());
+                *request.body_mut() = Some(observed_upload(bytes, &observation));
+            }
+            let response = self
+                .client
+                .execute(request)
+                .await
+                .map_err(|_| Error::Unavailable)?;
+            if !response.status().is_success() {
+                return Err(
+                    if response.status().is_server_error() || response.status().as_u16() == 429 {
+                        Error::Unavailable
+                    } else {
+                        Error::Incompatible("embedding HTTP response")
+                    },
+                );
+            }
+            bounded_body(response, 2 * 1024 * 1024, &observation).await
         }
-        let bytes = bounded_body(response, 2 * 1024 * 1024).await?;
-        decode(&bytes, inputs.len(), &self.config.revision)
+        .await;
+        observation.finish(if result.is_ok() {
+            RequestOutcome::Succeeded
+        } else {
+            RequestOutcome::Failed
+        });
+        decode(&result?, inputs.len(), &self.config.revision)
     }
 }
 
@@ -164,7 +215,11 @@ fn decode(bytes: &[u8], count: usize, revision: &str) -> Result<EmbeddingBatch> 
         revision: revision.into(),
     })
 }
-pub(crate) async fn bounded_body(response: reqwest::Response, max: usize) -> Result<Vec<u8>> {
+async fn bounded_body(
+    response: reqwest::Response,
+    max: usize,
+    observation: &RequestObservation,
+) -> Result<Vec<u8>> {
     if response.content_length().is_some_and(|n| n > max as u64) {
         return Err(Error::Incompatible("response byte limit"));
     }
@@ -172,12 +227,36 @@ pub(crate) async fn bounded_body(response: reqwest::Response, max: usize) -> Res
     let mut bytes = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| Error::Unavailable)?;
+        observation
+            .body()
+            .chunk(BodyDirection::DownloadConsumed, chunk.len());
         if bytes.len() + chunk.len() > max {
             return Err(Error::Incompatible("response byte limit"));
         }
         bytes.extend_from_slice(&chunk);
     }
     Ok(bytes)
+}
+
+pub(crate) fn observed_upload(bytes: Vec<u8>, observation: &RequestObservation) -> reqwest::Body {
+    if !observation.is_enabled() {
+        return reqwest::Body::from(bytes);
+    }
+    let observer = observation.body();
+    reqwest::Body::wrap_stream(futures_util::stream::unfold(
+        bytes::Bytes::from(bytes),
+        move |mut remaining| {
+            let observer = observer.clone();
+            async move {
+                if remaining.is_empty() {
+                    return None;
+                }
+                let chunk = remaining.split_to(remaining.len().min(64 * 1024));
+                observer.chunk(BodyDirection::UploadBodyConsumed, chunk.len());
+                Some((Ok::<_, std::io::Error>(chunk), remaining))
+            }
+        },
+    ))
 }
 
 #[cfg(test)]

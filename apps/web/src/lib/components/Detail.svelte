@@ -1,7 +1,6 @@
 <script lang="ts">
   import Poster from './Poster.svelte';
   import People from './People.svelte';
-  import ItemRights from './ItemRights.svelte';
   import type { Item } from '../core/models';
   let { item }: { item: Item } = $props();
   const score = $derived(item.rating ? item.rating.count === 0 ? 'Unrated' : `${item.rating.value.toFixed(1)}/${item.rating.scale}` : '—');
@@ -38,7 +37,6 @@
   </div>
     <People title="Cast" people={item.cast} />
     <People title="Crew" people={item.crew} />
-    <div class="rights"><ItemRights {item} /></div>
 </article>
 
 <style>
@@ -49,7 +47,6 @@
   h1 { margin: 8px 0; font-size: 28px; }
   p { font-size: 14px; line-height: 1.6; }
   .muted { color: var(--muted); font-size: 12px; }
-  .rights { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 24px; }
   .metadata { position: relative; margin-block: 18px; min-height: 44px; }
   .badges { display: flex; flex-wrap: wrap; align-items: start; gap: 8px; }
   .badge { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: #ffffff05; font-size: 12px; color: var(--muted); white-space: nowrap; box-sizing: border-box; }

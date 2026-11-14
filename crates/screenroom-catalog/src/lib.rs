@@ -1,6 +1,5 @@
 mod browse;
 mod mapping;
-mod operator;
 mod page;
 mod progress;
 mod search;
@@ -17,6 +16,7 @@ pub struct Catalog {
     pub(crate) catalog: CatalogRepository,
     pub(crate) media: MediaRepository,
     pub(crate) search: SearchRepository,
+    pub(crate) watched: screenroom_backend::watched::WatchedRepository,
     pub(crate) storage: Option<ObjectStorage>,
     pub(crate) origin: String,
     pub(crate) user_uri: Option<String>,
@@ -49,7 +49,8 @@ impl Catalog {
         Ok(Self {
             catalog: CatalogRepository::new(pool.clone()),
             media: MediaRepository::new(pool.clone()),
-            search: SearchRepository::new(pool),
+            search: SearchRepository::new(pool.clone()),
+            watched: screenroom_backend::watched::WatchedRepository::new(pool),
             storage,
             origin: origin.trim_end_matches('/').into(),
             user_uri,
@@ -73,13 +74,13 @@ pub(crate) fn status(error: screenroom_backend::Error) -> Status {
         Error::SourceBusy { .. } => Status::failed_precondition("source has an active run"),
         Error::Stale => Status::failed_precondition("stale state"),
         Error::Incompatible(_) => Status::failed_precondition("incompatible upstream response"),
-        Error::Database(_) | Error::Unavailable => Status::unavailable("backend unavailable"),
+        Error::Database(_) | Error::Unavailable | Error::Connection(_) => {
+            Status::unavailable("backend unavailable")
+        }
     }
 }
 
-pub use operator::Operator;
-pub use operator::validate_policy_write;
-pub use transport::{serve, serve_operator};
+pub use transport::serve;
 
 #[cfg(test)]
 mod tests {

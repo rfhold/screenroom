@@ -2,9 +2,14 @@ use adw::prelude::*;
 
 mod assets;
 mod backend;
+mod cache;
 mod catalog;
 mod home;
+mod jellyfin;
+mod paging;
 mod poster;
+mod presentation;
+mod profile_change;
 mod search;
 mod settings;
 mod state;

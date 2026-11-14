@@ -2,7 +2,7 @@ const services = {
   BrowseService: { namespace: 'catalog', methods: ['GetHome', 'ListLibraries', 'ListLibraryItems'] },
   CatalogService: { namespace: 'catalog', methods: ['GetCatalogInfo', 'GetItem', 'ListChildren', 'ListCredits', 'ListArtwork'] },
   SearchService: { namespace: 'catalog', methods: ['Search', 'GetSearchCapabilities'] },
-  UserService: { namespace: 'user', methods: ['GetCurrentUser'] },
+  UserService: { namespace: 'user', methods: ['GetCurrentUser', 'ListJellyfinSources', 'ListJellyfinProfiles', 'GetJellyfinLink', 'SetJellyfinLink', 'ClearJellyfinLink'] },
 } as const;
 
 export type RpcMethod = { [S in keyof typeof services]: `${S}/${typeof services[S]['methods'][number]}` }[keyof typeof services];

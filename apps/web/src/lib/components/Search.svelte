@@ -8,6 +8,9 @@
   import type { Item } from '../core/models';
   import PosterCard from './PosterCard.svelte';
   import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
+  import { IncrementalPages } from '../core/pagination';
+  import LoadMore from './LoadMore.svelte';
+  import { OwnedReads } from '../core/owned-reads';
 
   let { location: route, capabilities, operation, refreshVersion = 0, onReadComplete, onRetry }: { location: Location; capabilities: SearchCapabilities; operation: MetadataOperation; refreshVersion?: number; onReadComplete: (error?: string) => void; onRetry: () => void } = $props();
   let pending = $state<Location | null>(null);
@@ -43,10 +46,14 @@
   const typeLabels: Record<string, string> = { Movie: 'Movies', Series: 'Shows', Episode: 'Episodes' };
   const methodLabels: Record<string, string> = { title_only: 'Title only', text: 'Text (titles and metadata)', fuzzy: 'Fuzzy titles', semantic: 'Semantic' };
   const methodKeys: Record<string, keyof Methods> = { title_only: 'titleOnly', text: 'text', fuzzy: 'fuzzy', semantic: 'semantic' };
-  const sourceLabels: Record<string, string> = { all: 'All catalogs', tmdb: 'TMDB', jellyfin: 'Jellyfin' };
+  const sourceLabels: Record<string, string> = { all: 'All catalogs', jellyfin: 'Jellyfin' };
   let searchGeneration = 0;
   let lastRefresh = -1;
   let searchClient: Awaited<ReturnType<typeof client>> | undefined;
+  let more = $state(false);
+  let loadingMore = $state(false);
+  let pageError = $state('');
+  let loadMore = $state<() => void>(() => {});
 
   onMount(() => {
     input.focus();
@@ -60,29 +67,47 @@
   $effect(() => { if (pending && href(route) === href(pending)) pending = null; });
   $effect(() => {
     const query = location.query;
-    const library = location.library; const selectedTypes = types; const selectedMethods = methods; const source = location.source;
+    const library = location.library; const selectedTypes = types; const selectedMethods = methods; const source = location.source; const sourceId = location.sourceId;
     if (lastRefresh !== refreshVersion) { searchClient?.invalidate_reads(); lastRefresh = refreshVersion; }
     const current = ++searchGeneration;
     searchClient?.cancel_all();
-    results = []; searching = !!query.trim(); error = '';
+    results = []; searching = !!query.trim(); error = ''; more = false; loadingMore = false; pageError = ''; searchStatus = '';
     const budget = operation;
+    let pages: IncrementalPages<Item> | undefined;
+    let owned: Awaited<ReturnType<typeof client>> | undefined;
+    let reads: OwnedReads | undefined;
+    const isCurrent = () => active && current === searchGeneration && budget.active();
     if (href(location) !== href(route)) return;
     const timer = setTimeout(async () => {
       try {
         budget.check();
         if (query.trim()) {
-          searchClient ??= await budget.read(newClient);
-          if (!active) { searchClient.free(); searchClient = undefined; return; }
-          if (current !== searchGeneration) return;
-           const response = await search(query, library, selectedTypes, selectedMethods, source, searchClient, () => active && current === searchGeneration, location.sourceId, budget);
-           budget.check();
-           if (active && current === searchGeneration) { results = response.items; searchStatus = `Effective methods: ${response.effective}.${response.degradation ? ` ${response.degradation}` : ''}`; }
+          owned = await budget.read(newClient);
+          if (!isCurrent()) { owned.free(); return; }
+          searchClient = owned;
+          reads = new OwnedReads(owned);
+          const transport = { search: (request: Parameters<NonNullable<typeof owned>['search']>[0]) => reads!.read(() => owned!.search(request)) };
+          pages = new IncrementalPages(async page => {
+            const response = await search(query, library, selectedTypes, selectedMethods, source, transport, isCurrent, sourceId, new MetadataOperation(isCurrent), page);
+            if (isCurrent()) searchStatus = `Effective methods: ${response.effective}.${response.degradation ? ` ${response.degradation}` : ''}`;
+            return response;
+          }, isCurrent);
+          const pager = pages;
+          loadMore = async () => {
+            if (!isCurrent() || pager.loading || !pager.more) return;
+            loadingMore = true; pageError = '';
+            try { await pager.load(); if (isCurrent()) results = pager.entries; }
+            catch (cause) { if (isCurrent() && !(cause instanceof MetadataCancelled)) pageError = failure(cause); }
+            finally { if (isCurrent()) { loadingMore = false; more = pager.more; } }
+          };
+          await pager.load(budget);
+          if (isCurrent()) { results = pager.entries; more = pager.more; }
         }
         budget.check();
         if (active && current === searchGeneration) { settled = query; searching = false; onReadComplete(); }
       } catch (cause) { if (active && current === searchGeneration && budget.active() && !(cause instanceof MetadataCancelled)) { error = failure(cause); searching = false; onReadComplete(error); } }
     }, Math.max(0, Math.min(350, budget.deadline - budget.now())));
-    return () => { clearTimeout(timer); searchGeneration++; };
+    return () => { clearTimeout(timer); searchGeneration++; pages?.cancel(); reads?.dispose(); if (searchClient === owned) searchClient = undefined; };
   });
   function navigate(changes: Partial<Location>, replace = false) {
     const next = { ...location, types, ...changes };
@@ -150,11 +175,12 @@
   {:else if !location.query.trim()}Enter a title to search {location.library.title}.
   {:else if searching || location.query !== settled}Searching titles…
   {:else if results.length === 0}No matches in {location.library.title}. Try another search.
-  {:else}{results.length} {results.length === 1 ? 'result' : 'results'} in {location.library.title}{/if}
+   {:else}{results.length} loaded in {location.library.title}{/if}
 </div>
 {#if !searching && !error && location.query.trim() && searchStatus}<p role="status">{searchStatus}</p>{/if}
 {#if !searching && !error && location.query.trim() && location.query === settled}
   <div class="grid" aria-label="Search results">{#each results as item (item.id)}<PosterCard {item} href={itemHref(location, item)} />{/each}</div>
+  <LoadMore {more} loading={loadingMore} error={pageError} load={loadMore} />
 {/if}
 
 <style>

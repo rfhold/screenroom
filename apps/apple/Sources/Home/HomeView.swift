@@ -37,9 +37,7 @@ struct HomeView: View {
     @State private var settled = ""
     @State private var options = SearchOptions()
     @State private var settings = false
-    @State private var subtitle = "Off"
     #if os(tvOS)
-    @State private var subtitleChoices = false
     #endif
     @State private var status = ""
     @State private var searchOrigin = "Home"
@@ -57,11 +55,10 @@ struct HomeView: View {
         let savedLibrary = saved.scope?.libraryId ?? ""
         _library = State(initialValue: savedLibrary.isEmpty ? "all" : savedLibrary)
         _screen = State(initialValue: savedLibrary.isEmpty ? "Home" : "Library")
-        _subtitle = State(initialValue: saved.subtitlePreference == "library_tracks" ? "Library tracks" : saved.subtitlePreference == "transcription" ? "Transcription" : "Off")
     }
 
     private func saveSettings() {
-        catalog.save(options: options, library: library, subtitle: subtitle == "Library tracks" ? "library_tracks" : subtitle == "Transcription" ? "transcription" : "off")
+        catalog.save(options: options, library: library)
     }
 
     var body: some View {
@@ -83,7 +80,7 @@ struct HomeView: View {
         .preferredColorScheme(.dark)
         .tint(.white)
         .environment(catalog)
-        .task(id: "\(screen)|\(library)|\(path.last?.id ?? "")|\(refresh)|\(query)|\(options)") {
+        .task(id: "\(screen)|\(library)|\(path.last?.id ?? "")|\(refresh)|\(query)|\(options)|\(catalog.jellyfinProfile.revision)") {
             let requested = query
             let requestedRefresh = refresh
             let refreshing = requestedRefresh > completedRefresh
@@ -101,7 +98,6 @@ struct HomeView: View {
         .onChange(of: catalog.capabilities) { _, capabilities in
             if let capabilities { options.reconcile(capabilities, preferences: catalog.preferences) }
         }
-        .onChange(of: subtitle) { _, _ in saveSettings() }
         .onChange(of: library) { _, _ in saveSettings() }
         .onDisappear { navigationGeneration += 1; navigationTask?.cancel() }
         #if os(tvOS)
@@ -172,7 +168,7 @@ struct HomeView: View {
     }
 
     private func menuButton(_ title: String, _ icon: String, libraryID: String? = nil, action: @escaping () -> Void) -> some View {
-        let selected = (screen == "Home" && title == "Home") || (screen == "Search" && title == "Search titles") || (screen == "Library" && libraryID == library)
+        let selected = (screen == "Home" && title == "Home") || (screen == "Search" && title == "Search titles") || (screen == "Jellyfin profile" && title == "Jellyfin profile") || (screen == "Library" && libraryID == library)
         #if os(tvOS)
         return tvSidebarRow(title, icon, selected: selected, action: action)
             .accessibilityValue(selected ? "Selected" : "Not selected")
@@ -198,9 +194,10 @@ struct HomeView: View {
         Group {
             menuButton("Home", "house") { go("Home") }
             menuButton("Search titles", "magnifyingglass") { startSearch() }
+            menuButton("Jellyfin profile", "person.crop.circle") { go("Jellyfin profile") }
             if expanded { Text("Libraries").font(.caption).foregroundStyle(.secondary).padding(.top, 12) }
             ForEach(catalog.libraries, id: \.id) { value in
-                menuButton(value.title, value.id == "tv" ? "tv" : "rectangle.stack", libraryID: value.id) { library = value.id; go("Library") }
+                menuButton(value.title, "rectangle.stack", libraryID: value.id) { library = value.id; go("Library") }
             }
         }
     }
@@ -219,15 +216,6 @@ struct HomeView: View {
                         navigationButtons
                         if expanded {
                             Divider().padding(.vertical, 12)
-                            Text("Subtitles").foregroundStyle(.secondary)
-                            ForEach(["Off", "Library tracks", "Transcription"], id: \.self) { choice in
-                                Button { subtitle = choice } label: {
-                                    Label(choice, systemImage: subtitle == choice ? "checkmark.circle.fill" : "circle")
-                                        .frame(maxWidth: .infinity, minHeight: ScreenroomTheme.controlSize, alignment: .leading)
-                                 }.buttonStyle(.borderless)
-                                     .accessibilityIdentifier("subtitle.\(choice)")
-                                      .accessibilityValue(subtitle == choice ? "Selected" : "Not selected")
-                            }
                              Button("Refresh") { reload() }.frame(minHeight: ScreenroomTheme.controlSize)
                         }
                     }
@@ -274,29 +262,19 @@ struct HomeView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     menuButton("Home", "house") { go("Home") }
                     menuButton("Search titles", "magnifyingglass") { startSearch() }
+                    menuButton("Jellyfin profile", "person.crop.circle") { go("Jellyfin profile") }
                     if expanded {
                         Text("Libraries").font(.system(size: 18, weight: .medium)).foregroundStyle(.secondary)
                             .padding(.horizontal, 12).padding(.top, 14).padding(.bottom, 4)
                     }
                     ForEach(catalog.libraries, id: \.id) { value in
-                        menuButton(value.title, value.id == "tv" ? "tv" : value.id == "movies" ? "film" : "rectangle.stack", libraryID: value.id) { library = value.id; go("Library") }
+                        menuButton(value.title, "rectangle.stack", libraryID: value.id) { library = value.id; go("Library") }
                     }
                 }
             }
             if expanded {
                 VStack(alignment: .leading, spacing: 6) {
                     Divider().padding(.bottom, 6)
-                    tvSidebarRow("Subtitles", subtitleChoices ? "chevron.up" : "captions.bubble", value: subtitle) { subtitleChoices.toggle() }
-                        .accessibilityIdentifier("sidebar.subtitles")
-                        .accessibilityValue("\(subtitle); \(subtitleChoices ? "Expanded" : "Collapsed")")
-                    if subtitleChoices {
-                        ForEach(["Off", "Library tracks", "Transcription"], id: \.self) { choice in
-                            tvSidebarRow(choice, subtitle == choice ? "checkmark" : "circle", selected: subtitle == choice) {
-                                subtitle = choice
-                                subtitleChoices = false
-                            }.accessibilityIdentifier("subtitle.\(choice)")
-                        }
-                    }
                     tvSidebarRow("Refresh", "arrow.clockwise") { reload() }
                 }
             }
@@ -348,9 +326,15 @@ struct HomeView: View {
                     }
                 } else if screen == "Home" {
                     heading("Home")
+                    Button("Browse libraries") { library = "all"; go("Library") }
+                    Text("Catalog membership, not playback availability.").font(.caption).foregroundStyle(.secondary)
                     ForEach(Array(catalog.rows.enumerated()), id: \.offset) { index, row in
                         VStack(alignment: .leading, spacing: 14) {
                             Text(row.title).font(.title3.weight(.semibold)).accessibilityIdentifier("home.row.\(index)")
+                            if let failure = row.readError {
+                                Text(homeRowError(failure.code)).font(.caption).foregroundStyle(.secondary)
+                                Button("Retry \(row.title)") { Task { await catalog.retryHomeRows() } }
+                            }
                             ScrollView(.horizontal) {
                                 HStack(alignment: .top, spacing: 18) {
                                     ForEach(row.items.map(CatalogItem.init)) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth) }
@@ -360,11 +344,15 @@ struct HomeView: View {
                     }
                 } else if screen == "Library" {
                     heading(catalog.libraryTitle(library))
+                    Text(loadedItemCount(catalog.items.count)).foregroundStyle(.secondary).accessibilityIdentifier("catalog.loadedCount")
                     grid(catalog.items, compact: compact)
+                    loadMore(search: false)
                 } else if screen == "Search" {
                     search(compact: compact)
+                } else if screen == "Jellyfin profile" {
+                    heading("Jellyfin profile")
+                    JellyfinProfileView(profile: catalog.jellyfinProfile)
                 }
-                 CreditsView().frame(maxWidth: ScreenroomTheme.detailMaxWidth, alignment: .leading)
              }
              .padding(compact ? 16 : ScreenroomTheme.inset)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -413,23 +401,27 @@ struct HomeView: View {
         }
     }
 
-    private func card(_ item: CatalogItem, width: CGFloat) -> some View {
-        Button { open(item) } label: {
+    private func card(_ item: CatalogItem, width: CGFloat, seasonContext: Bool = false) -> some View {
+        let labels = item.labels(seasonContext: seasonContext)
+        return Button { open(item) } label: {
             VStack(alignment: .leading, spacing: 8) {
-                PosterView(item: item).frame(width: width, height: width * 1.5)
-                Text(item.title).font(.body.weight(.medium)).lineLimit(2)
-                Text("\(item.kind) · \(String(item.year))").font(.caption).foregroundStyle(.secondary)
+                PosterView(item: item, seasonContext: seasonContext).frame(width: width, height: width * 1.5).accessibilityHidden(true)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    if !labels.primary.isEmpty { Text(labels.primary).font(.body.weight(.medium)).lineLimit(2) }
+                    if !labels.number.isEmpty { Text(labels.number).font(.caption).foregroundStyle(.secondary) }
+                }
+                Text(labels.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }.frame(width: width, alignment: .leading).contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
-        .accessibilityLabel("\(item.title), \(item.kind), \(item.meta)")
-        .accessibilityValue(item.artwork == nil ? "Designed placeholder; poster not included" : catalog.loadedArtwork.contains(item.artwork!.url) ? "Licensed core artwork ready" : "Artwork loading")
+        .accessibilityLabel([labels.heading, labels.subtitle, item.playbackAccessibility].filter { !$0.isEmpty }.joined(separator: ", "))
+        .accessibilityValue(item.artwork == nil ? "Designed placeholder; poster not included" : catalog.loadedArtwork.contains(item.artwork!.url) ? "Core artwork ready" : "Artwork loading")
         .accessibilityIdentifier("card.\(item.id)")
     }
 
-    private func grid(_ items: [CatalogItem], compact: Bool) -> some View {
+    private func grid(_ items: [CatalogItem], compact: Bool, parent: CatalogItem? = nil) -> some View {
         LazyVGrid(columns: [GridItem(.adaptive(minimum: compact ? 140 : ScreenroomTheme.posterWidth), spacing: 20)], alignment: .leading, spacing: 24) {
-            ForEach(items) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth) }
+            ForEach(items) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth, seasonContext: item.isSeasonChild(of: parent)) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         #if os(tvOS)
@@ -454,23 +446,13 @@ struct HomeView: View {
                 }
             }
             if catalog.detail?.id == item.id {
-                if item.kind == "Series" || item.kind == "Season" { grid(catalog.children, compact: compact) }
+                if item.kind == "Series" || item.kind == "Season" {
+                    Text(loadedItemCount(catalog.children.count)).foregroundStyle(.secondary).accessibilityIdentifier("catalog.loadedCount")
+                    grid(catalog.children, compact: compact, parent: item)
+                    loadMore(search: false)
+                }
                 PeopleView(title: "Cast", people: catalog.credits.filter { $0.department.lowercased() == "cast" })
                 PeopleView(title: "Crew", people: catalog.credits.filter { $0.department.lowercased() != "cast" })
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Title rights").font(.headline)
-                Text(item.rights).font(.caption).foregroundStyle(.secondary)
-                if let attribution = item.attribution { Text(attribution).font(.caption) }
-                if let source = externalURL(item.rightsSource) { Link("Rights source", destination: source) }
-                if let value = item.licenseURL, let license = externalURL(value) { Link("License", destination: license) }
-                ForEach(Array(item.value.provenanceNotes.enumerated()), id: \.offset) { _, note in Text(note).font(.caption) }
-                if let rights = item.value.metadataRights {
-                    Text("Metadata: \(rights.label) · \(rights.note)").font(.caption)
-                    if !rights.attribution.isEmpty { Text(rights.attribution).font(.caption) }
-                    if let source = externalURL(rights.source) { Link("Metadata rights source", destination: source) }
-                    if let license = externalURL(rights.licenseUrl) { Link("Metadata license", destination: license) }
-                }
             }
         }.frame(maxWidth: ScreenroomTheme.detailMaxWidth, alignment: .leading)
     }
@@ -492,6 +474,19 @@ struct HomeView: View {
         Button(action: action) {
             Label(title, systemImage: selected ? "checkmark.square.fill" : "square").frame(minHeight: ScreenroomTheme.controlSize, alignment: .leading)
         }.buttonStyle(.borderless).disabled(disabled).accessibilityValue(selected ? "Selected" : "Not selected")
+    }
+
+    private func loadMore(search: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !catalog.pageError.isEmpty { Text(catalog.pageError).font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("catalog.pageError") }
+            if !(search ? catalog.searchPage.token : catalog.itemPage.token).isEmpty {
+                Button(catalog.pageError.isEmpty ? "Load more" : "Retry loading more") { Task { await catalog.loadMore(search: search) } }
+                    .frame(minHeight: ScreenroomTheme.controlSize)
+                    .disabled(catalog.pageLoading)
+                    .accessibilityIdentifier("catalog.loadMore")
+            }
+            if catalog.pageLoading { ProgressView("Loading more…") }
+        }
     }
 
     private func search(compact: Bool) -> some View {
@@ -552,7 +547,7 @@ struct HomeView: View {
              }
               Text(query.trimmingCharacters(in: .whitespaces).isEmpty ? "Enter a title to search \(catalog.libraryTitle(library))." : query != settled ? "Searching titles…" : results.isEmpty ? "No matches in \(catalog.libraryTitle(library)). Try another search." : "\(results.count) \(results.count == 1 ? "result" : "results") in \(catalog.libraryTitle(library))")
                 .foregroundStyle(.secondary).accessibilityIdentifier("search.status")
-            if !query.isEmpty && query == settled { grid(results, compact: compact) }
+            if !query.isEmpty && query == settled { grid(results, compact: compact); loadMore(search: true) }
         }
     }
 
@@ -568,6 +563,7 @@ struct HomeView: View {
 
 struct PosterView: View {
     let item: CatalogItem
+    var seasonContext = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -581,7 +577,7 @@ struct PosterView: View {
                     .fill(LinearGradient(colors: [.black.opacity(0.15), Color(hex: item.light)], startPoint: .leading, endPoint: .trailing))
                     .frame(width: width * 1.7, height: geometry.size.height).rotationEffect(.degrees(-32)).opacity(0.45)
                     .offset(x: -width * 0.2, y: geometry.size.height * 0.48)
-                Text(item.kind == "Episode" ? String(item.meta.split(separator: "·")[0]).trimmingCharacters(in: .whitespaces) : item.title)
+                 Text(item.labels(seasonContext: seasonContext).heading)
                     .font(.system(size: width * 0.155, design: .serif)).lineLimit(3).minimumScaleFactor(0.6).foregroundStyle(Color(hex: "fff5e5"))
                     .frame(width: width * 0.78, alignment: .leading).offset(x: width * 0.12, y: geometry.size.height * 0.42)
                   Text("POSTER NOT INCLUDED")
@@ -599,7 +595,18 @@ struct PosterView: View {
                 }
             }
             .frame(width: width, height: geometry.size.height, alignment: .topLeading)
+            .overlay(alignment: .topTrailing) {
+                if item.watched {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Color(hex: "e3f4e9"))
+                        .frame(width: 26, height: 26)
+                        .background(Color(hex: "16251f").opacity(0.93), in: Circle())
+                        .padding(8).accessibilityHidden(true)
+                }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 10))
-        }.accessibilityHidden(true)
+        }.accessibilityElement(children: .ignore)
+            .accessibilityLabel([item.labels(seasonContext: seasonContext).heading, item.kind == "Episode" ? item.title : "", "Poster", item.playbackAccessibility].filter { !$0.isEmpty }.joined(separator: ", "))
     }
 }

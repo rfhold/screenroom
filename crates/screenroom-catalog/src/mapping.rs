@@ -1,4 +1,7 @@
-use screenroom_backend::{catalog::CatalogItem, media::ArtworkRecord};
+use screenroom_backend::{
+    catalog::{CatalogItem, ItemContext},
+    media::ArtworkRecord,
+};
 use screenroom_proto::catalog::v1::*;
 use serde_json::Value;
 
@@ -7,17 +10,52 @@ impl crate::Catalog {
         &self,
         scope: &screenroom_backend::catalog::Scope,
         rows: Vec<CatalogItem>,
+        user: Option<&str>,
     ) -> Result<Vec<Item>, tonic::Status> {
+        self.hydrate_items_in_season(scope, rows, None, user).await
+    }
+
+    pub(crate) async fn hydrate_items_in_season(
+        &self,
+        scope: &screenroom_backend::catalog::Scope,
+        rows: Vec<CatalogItem>,
+        season_parent: Option<screenroom_backend::Uuid>,
+        user: Option<&str>,
+    ) -> Result<Vec<Item>, tonic::Status> {
+        let user = user
+            .map(screenroom_backend::Uuid::parse_str)
+            .transpose()
+            .map_err(|_| tonic::Status::invalid_argument("user selector must be UUID"))?;
+        let revision = match user {
+            Some(user) => self.watched.revision(user).await.map_err(crate::status)?,
+            None => None,
+        };
         let mut items = Vec::with_capacity(rows.len());
         for batch in rows.chunks(200) {
             let ids: Vec<_> = batch.iter().map(|row| row.source_item_id).collect();
+            let watched = match user {
+                Some(user) => self.watched.read(user, &ids).await.map_err(crate::status)?,
+                None => Default::default(),
+            };
             let artwork = self
                 .media
-                .primary_item_artwork(scope, &ids)
+                .card_item_artwork(scope, &ids, season_parent)
+                .await
+                .map_err(crate::status)?;
+            let episode_ids: Vec<_> = batch
+                .iter()
+                .filter(|row| row.kind == "episode")
+                .map(|row| row.source_item_id)
+                .collect();
+            let contexts = self
+                .catalog
+                .item_contexts(scope, &episode_ids)
                 .await
                 .map_err(crate::status)?;
             for row in batch {
                 let mut item = item(row.clone());
+                item.watched = watched.get(&row.source_item_id).copied();
+                item.subtitle = episode_subtitle(row, contexts.get(&row.source_item_id));
                 item.artwork = artwork
                     .get(&row.source_item_id)
                     .cloned()
@@ -25,8 +63,46 @@ impl crate::Catalog {
                 items.push(item);
             }
         }
+        if let Some(user) = user
+            && self.watched.revision(user).await.map_err(crate::status)? != revision
+        {
+            for item in &mut items {
+                item.watched = None;
+            }
+        }
         Ok(items)
     }
+}
+
+fn episode_subtitle(row: &CatalogItem, context: Option<&ItemContext>) -> String {
+    let fallback = || string(&row.metadata, "subtitle");
+    if row.kind != "episode" {
+        return fallback();
+    }
+    let Some(context) = context else {
+        return fallback();
+    };
+    let Some(episode) = number(&row.metadata, "index") else {
+        return fallback();
+    };
+    let Some(season) = context
+        .parent_metadata
+        .as_ref()
+        .filter(|_| context.parent_kind.as_deref() == Some("season"))
+        .and_then(|metadata| number(metadata, "index"))
+    else {
+        return fallback();
+    };
+    let Some(series) = context
+        .grandparent_metadata
+        .as_ref()
+        .filter(|_| context.grandparent_kind.as_deref() == Some("series"))
+        .and_then(|metadata| metadata["title"].as_str())
+        .filter(|title| !title.trim().is_empty())
+    else {
+        return fallback();
+    };
+    format!("{series} · S{season:02}E{episode:02}")
 }
 
 pub(crate) fn string(value: &Value, key: &str) -> String {
@@ -105,6 +181,7 @@ pub(crate) fn item(row: CatalogItem) -> Item {
             })
             .unwrap_or_default(),
         progress_percent: None,
+        watched: None,
         provenance_notes: strings(m, "provenance_notes"),
         metadata_retrieved_at: string(m, "metadata_retrieved_at"),
     }
@@ -127,5 +204,91 @@ pub(crate) fn artwork(row: ArtworkRecord, origin: &str) -> Artwork {
             .or_else(|| r["license_url"].as_str())
             .unwrap_or_default()
             .into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use screenroom_backend::Uuid;
+    use serde_json::json;
+
+    #[test]
+    fn episode_identity_subtitles_require_complete_context() {
+        let mut row = CatalogItem {
+            source_item_id: Uuid::nil(),
+            item_id: Uuid::nil(),
+            source_id: Uuid::nil(),
+            public_id: "episode".into(),
+            parent_public_id: Some("season".into()),
+            kind: "episode".into(),
+            source_key: "source".into(),
+            provider: "jellyfin".into(),
+            external_id: "episode".into(),
+            provenance: json!({}),
+            metadata: json!({"title":"Episode title", "index":5, "subtitle":"Existing mock subtitle"}),
+        };
+        let mut context = ItemContext {
+            source_item_id: row.source_item_id,
+            parent_kind: Some("season".into()),
+            parent_metadata: Some(json!({"index":2})),
+            grandparent_kind: Some("series".into()),
+            grandparent_metadata: Some(json!({"title":"Series title"})),
+        };
+        assert_eq!(
+            episode_subtitle(&row, Some(&context)),
+            "Series title · S02E05"
+        );
+        row.metadata["index"] = json!(0);
+        context.parent_metadata = Some(json!({"index":0}));
+        assert_eq!(
+            episode_subtitle(&row, Some(&context)),
+            "Series title · S00E00"
+        );
+        row.metadata["index"] = json!(105);
+        context.parent_metadata = Some(json!({"index":12}));
+        assert_eq!(
+            episode_subtitle(&row, Some(&context)),
+            "Series title · S12E105"
+        );
+        for index in [
+            json!(null),
+            json!(-1),
+            json!("5"),
+            json!(1.5),
+            json!(4294967296u64),
+        ] {
+            row.metadata["index"] = index;
+            assert_eq!(
+                episode_subtitle(&row, Some(&context)),
+                "Existing mock subtitle"
+            );
+        }
+        row.metadata["index"] = json!(5);
+        context.parent_metadata = Some(json!({}));
+        assert_eq!(
+            episode_subtitle(&row, Some(&context)),
+            "Existing mock subtitle"
+        );
+        context.parent_metadata = Some(json!({"index":2}));
+        for series in [None, Some(json!({})), Some(json!({"title":" "}))] {
+            context.grandparent_metadata = series;
+            assert_eq!(
+                episode_subtitle(&row, Some(&context)),
+                "Existing mock subtitle"
+            );
+        }
+        context.parent_kind = Some("series".into());
+        context.parent_metadata = Some(json!({"title":"Direct series", "index":2}));
+        assert_eq!(
+            episode_subtitle(&row, Some(&context)),
+            "Existing mock subtitle"
+        );
+        assert_eq!(episode_subtitle(&row, None), "Existing mock subtitle");
+        row.metadata["subtitle"] = json!("");
+        assert_eq!(episode_subtitle(&row, None), "");
+        row.kind = "movie".into();
+        row.metadata["subtitle"] = json!("Movie subtitle");
+        assert_eq!(episode_subtitle(&row, Some(&context)), "Movie subtitle");
     }
 }

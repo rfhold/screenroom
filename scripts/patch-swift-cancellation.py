@@ -148,18 +148,60 @@ fileprivate func uniffiRustCallAsync<T>(
 def patch(source, header):
     if source.count(ORIGINAL) != 1:
         raise ValueError("expected exactly one unmodified UniFFI 0.31.2 async bridge; inspect generator changes")
-    pattern = re.compile(r"(?m)^( +)completeFunc: ffi_screenroom_client_core_rust_future_complete_(\w+),$")
-    calls = list(pattern.finditer(source))
-    if len(calls) != 12 or source.count("await uniffiRustCallAsync(") != 12:
-        raise ValueError("expected exactly 12 async Client calls; inspect generator/API changes")
-    for match in calls:
-        if match[2] != "rust_buffer":
+    generated = source.replace(ORIGINAL, "")
+    methods = re.compile(
+        r"^(?:open|public) func [^\n]*\basync\b[^\n]*\{\n(?P<body>.*?)^\}",
+        re.MULTILINE | re.DOTALL,
+    )
+    call = re.compile(
+        r"    return\n"
+        r"        try {1,2}await uniffiRustCallAsync\(\n"
+        r"            rustFutureFunc: \{\n"
+        r"                uniffi_screenroom_client_core_fn_method_[a-z0-9_]+\(\n"
+        r"(?: {20}[^\n]*\n)+"
+        r"                \)\n"
+        r"            \},\n"
+        r"            pollFunc: ffi_screenroom_client_core_rust_future_poll_(?P<poll>\w+),\n"
+        r"            completeFunc: ffi_screenroom_client_core_rust_future_complete_(?P<complete>\w+),\n"
+        r"            freeFunc: ffi_screenroom_client_core_rust_future_free_(?P<free>\w+),\n"
+        r"            liftFunc: FfiConverter\w+(?:\.lift|_lift),\n"
+        r"            errorHandler: (?:FfiConverter\w+_lift|nil)\n"
+        r"        \)\n"
+    )
+    future_reference = re.compile(r"\b(?:uniffiRustCallAsync|ffi_screenroom_client_core_rust_future_\w+)\b")
+    found = list(methods.finditer(generated))
+    declarations = re.findall(r"(?m)^[^\n]*\bfunc\b[^\n]*\basync\b[^\n]*\{[ \t]*$", generated)
+    if not found or len(found) != len(declarations):
+        raise ValueError("missing or unmatched generated async methods; inspect generator/API changes")
+    for method in found:
+        body = method["body"]
+        match = call.fullmatch(body)
+        if match is None:
+            raise ValueError("unrecognized generated async callsite; inspect generator/API changes")
+        suffixes = [match[name] for name in ("poll", "complete", "free")]
+        expected = ["uniffiRustCallAsync"] + [
+            f"ffi_screenroom_client_core_rust_future_{operation}_{suffix}"
+            for operation, suffix in zip(("poll", "complete", "free"), suffixes)
+        ]
+        if future_reference.findall(body) != expected:
+            raise ValueError("unmatched async or future references; inspect generator/API changes")
+        if any(suffix != "rust_buffer" for suffix in suffixes):
             raise ValueError("Swift cancellation ownership correction only supports RustBuffer futures")
-        symbol = f"ffi_screenroom_client_core_rust_future_cancel_{match[2]}"
-        if len(re.findall(r"\b" + symbol + r"\s*\(", header)) != 1:
-            raise ValueError(f"missing or ambiguous exported cancellation symbol: {symbol}")
+    if future_reference.search(methods.sub("", generated)):
+        raise ValueError("unmatched async or future references; inspect generator/API changes")
+    symbol = "ffi_screenroom_client_core_rust_future_cancel_rust_buffer"
+    if len(re.findall(r"\b" + symbol + r"\s*\(", header)) != 1:
+        raise ValueError(f"missing or ambiguous exported cancellation symbol: {symbol}")
+    if not re.search(r"(?m)^void " + symbol + r"\(uint64_t handle\s*\);$", header):
+        raise ValueError(f"unrecognized exported cancellation signature: {symbol}")
+    pattern = re.compile(r"(?m)^( +)completeFunc: ffi_screenroom_client_core_rust_future_complete_rust_buffer,$")
+    if len(list(pattern.finditer(generated))) != len(found):
+        raise ValueError("incomplete generated async callsite coverage; inspect generator/API changes")
     source = source.replace(ORIGINAL, REPLACEMENT)
-    return pattern.sub(lambda m: f"{m[0]}\n{m[1]}cancelFunc: ffi_screenroom_client_core_rust_future_cancel_{m[2]},", source)
+    updated, count = pattern.subn(lambda m: f"{m[0]}\n{m[1]}cancelFunc: {symbol},", source)
+    if count != len(found):
+        raise ValueError("incomplete generated async cancellation coverage; inspect generator/API changes")
+    return updated
 
 
 if __name__ == "__main__":

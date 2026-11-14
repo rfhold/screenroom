@@ -2,10 +2,16 @@ syntax = "proto3";
 
 package screenroom.user.v1;
 
-// Public trusted-local read API. x-screenroom-user-id metadata must contain one
-// UUID string selecting an enabled local user. It is not authentication.
+// Public trusted-local API. Every method requires x-screenroom-user-id metadata
+// containing one UUID selecting an enabled local user. It is not authentication;
+// requests never select another local user. Operator mapping APIs remain private.
 service UserService {
   rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse);
+  rpc ListJellyfinSources(ListJellyfinSourcesRequest) returns (ListJellyfinSourcesResponse);
+  rpc ListJellyfinProfiles(ListJellyfinProfilesRequest) returns (ListJellyfinProfilesResponse);
+  rpc GetJellyfinLink(GetJellyfinLinkRequest) returns (GetJellyfinLinkResponse);
+  rpc SetJellyfinLink(SetJellyfinLinkRequest) returns (SetJellyfinLinkResponse);
+  rpc ClearJellyfinLink(ClearJellyfinLinkRequest) returns (ClearJellyfinLinkResponse);
 }
 
 message User {
@@ -14,3 +20,62 @@ message User {
 }
 message GetCurrentUserRequest {}
 message GetCurrentUserResponse { User user = 1; }
+
+message Page {
+  // Zero selects 50; maximum 200. Larger sizes are invalid. Tokens are opaque,
+  // bound to the operation, selected local user, and source (where applicable).
+  uint32 size = 1;
+  string token = 2;
+}
+// Public installation source key and label only; no upstream URL or credentials.
+message JellyfinSource {
+  string id = 1;
+  string display_name = 2;
+}
+// Eligible enabled upstream profile. Hidden profiles are allowed; disabled
+// profiles are excluded. No credentials or private policy are exposed.
+message JellyfinProfile {
+  string id = 1;
+  string display_name = 2;
+}
+// Persisted mapping, not a claim of current upstream eligibility. Remains readable
+// if the upstream is unavailable or the linked profile has been deleted/disabled.
+// Display names are obtained separately from eligible profile discovery.
+message JellyfinLink {
+  string source_id = 1;
+  string jellyfin_user_id = 2;
+}
+message ListJellyfinSourcesRequest { Page page = 1; }
+message ListJellyfinSourcesResponse {
+  // Enabled Jellyfin installation sources only.
+  repeated JellyfinSource sources = 1;
+  string next_page_token = 2;
+}
+message ListJellyfinProfilesRequest {
+  string source_id = 1;
+  Page page = 2;
+}
+message ListJellyfinProfilesResponse {
+  repeated JellyfinProfile profiles = 1;
+  string next_page_token = 2;
+}
+message GetJellyfinLinkRequest { string source_id = 1; }
+message GetJellyfinLinkResponse {
+  // Absent means no persisted mapping for this source and selected local user.
+  JellyfinLink link = 1;
+}
+message SetJellyfinLinkRequest {
+  string source_id = 1;
+  // Must identify an eligible enabled profile; hidden profiles are allowed.
+  string jellyfin_user_id = 2;
+}
+message SetJellyfinLinkResponse {
+  // Authoritative persisted mapping after the mutation succeeds.
+  JellyfinLink link = 1;
+}
+message ClearJellyfinLinkRequest { string source_id = 1; }
+message ClearJellyfinLinkResponse {
+  // Authoritatively unlinked source. Idempotent and independent of upstream
+  // availability or profile eligibility.
+  string source_id = 1;
+}

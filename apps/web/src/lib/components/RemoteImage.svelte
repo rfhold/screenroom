@@ -2,12 +2,13 @@
   import { acquireArtwork } from '../core/client';
   import type { Artwork } from '../core/models';
   let { art }: { art: Artwork } = $props();
+  const artworkUrl = $derived(art.url);
   let source = $state('');
   let missing = $state(false);
   $effect(() => {
     source = ''; missing = false;
     let active = true;
-    const image = acquireArtwork(art.url);
+    const image = acquireArtwork(artworkUrl);
     image.loaded.then(url => { if (active) source = url; }, () => { if (active) missing = true; });
     return () => { active = false; image.release(); };
   });

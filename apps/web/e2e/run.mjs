@@ -35,6 +35,11 @@ if (!countTests(report.suites)) {
   console.error('No tests found. No artifacts or runtime preparation changed.');
   process.exit(1);
 }
+if (args.includes('--list')) {
+  process.stdout.write(discovery.stdout);
+  process.exit(0);
+}
+await import('./backend-server.mjs');
 await import('./clean-screenshots.mjs');
 const result = spawnSync(process.execPath, [cli, 'test', ...args], { stdio: 'inherit' });
 if (result.error) console.error(result.error);

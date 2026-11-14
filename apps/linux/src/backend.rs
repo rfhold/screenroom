@@ -94,6 +94,7 @@ pub struct Snapshot {
     pub catalog: Catalog,
     pub art: HashMap<String, Pixels>,
     pub capabilities: core::SearchCapabilities,
+    pub next: String,
 }
 pub async fn load(
     client: Arc<Client>,
@@ -121,18 +122,12 @@ async fn load_snapshot(
     })
     .await?;
     let capabilities = client.clone().get_search_capabilities().await?;
-    let info = client.clone().get_catalog_info().await?;
-    eprintln!(
-        "core GetCatalogInfo: {} branding, {} notices",
-        info.branding.len(),
-        info.notices.len()
-    );
     let mut data = Catalog {
         libraries,
-        info,
         ..Default::default()
     };
     let items;
+    let mut next = String::new();
     if let Some(id) = target {
         let item = client.clone().get_item(id.clone(), scope.clone()).await?;
         let credits = if detail {
@@ -163,22 +158,29 @@ async fn load_snapshot(
         items = if detail {
             Vec::new()
         } else {
-            let children = paginate(|page| {
-                let client = client.clone();
-                let id = id.clone();
-                let scope = scope.clone();
-                async move {
-                    let r = client.list_children(id, page, scope).await?;
-                    Ok((r.items, r.next_page_token))
-                }
-            })
+            let response = item_page(
+                client.clone(),
+                scope.clone(),
+                Some(id.clone()),
+                String::new(),
+            )
             .await?;
+            next = response.next_page_token;
+            let children = response.items;
             data.children
                 .insert(id, children.iter().map(|i| i.id.clone()).collect());
             children
         };
     } else if screen == Screen::Home {
         let rows = client.clone().get_home(scope.clone()).await?;
+        for row in &rows {
+            if let Some(error) = &row.read_error {
+                data.home_errors.insert(
+                    row.title.clone(),
+                    crate::presentation::row_error(&error.code).into(),
+                );
+            }
+        }
         data.homes.insert(
             scope.library_id.clone(),
             rows.iter()
@@ -195,22 +197,12 @@ async fn load_snapshot(
         );
         items = rows.into_iter().flat_map(|r| r.items).collect();
     } else if screen == Screen::Browse {
-        items = paginate(|page| {
-            let client = client.clone();
-            let scope = scope.clone();
-            async move {
-                let r = client.list_library_items(scope, page).await?;
-                Ok((r.items, r.next_page_token))
-            }
-        })
-        .await?;
+        let response = item_page(client.clone(), scope.clone(), None, String::new()).await?;
+        next = response.next_page_token;
+        items = response.items;
         data.members.insert(
             scope.library_id.clone(),
-            items
-                .iter()
-                .filter(|i| i.parent_id.is_none())
-                .map(|i| i.id.clone())
-                .collect(),
+            items.iter().map(|i| i.id.clone()).collect(),
         );
     } else {
         items = Vec::new();
@@ -220,8 +212,35 @@ async fn load_snapshot(
             data.items.push(catalog::map_item(item, Vec::new()));
         }
     }
-    let records = data
-        .items
+    eprintln!(
+        "Core catalog ready: {} items; artwork follows incrementally",
+        data.items.len()
+    );
+    Ok(Snapshot {
+        catalog: data,
+        art: HashMap::new(),
+        capabilities,
+        next,
+    })
+}
+pub async fn item_page(
+    client: Arc<Client>,
+    scope: SourceLibraryScope,
+    parent: Option<String>,
+    token: String,
+) -> Result<core::ItemPage, core::ClientError> {
+    operation(async move {
+        let page = Page { size: 100, token };
+        if let Some(parent) = parent {
+            client.list_children(parent, page, scope).await
+        } else {
+            client.list_library_items(scope, page).await
+        }
+    })
+    .await
+}
+pub fn artwork_records(data: &Catalog) -> Vec<serde_json::Value> {
+    data.items
         .iter()
         .filter_map(|i| i.art.clone())
         .chain(data.items.iter().flat_map(|i| {
@@ -233,38 +252,16 @@ async fn load_snapshot(
                     .filter_map(catalog::person_art)
             })
         }))
-        .chain(data.info.branding.iter().map(catalog::art_record))
-        .collect::<Vec<_>>();
-    let art = load_artwork_records(&records, |url| client.clone().load_artwork(url)).await?;
-    eprintln!(
-        "Core catalog ready: {} items, {} decoded artwork records",
-        data.items.len(),
-        art.len()
-    );
-    Ok(Snapshot {
-        catalog: data,
-        art,
-        capabilities,
-    })
+        .collect::<Vec<_>>()
 }
-pub async fn artwork_credits(
+pub async fn artwork(
     client: Arc<Client>,
-    scope: SourceLibraryScope,
-) -> Result<Vec<serde_json::Value>, core::ClientError> {
-    let records = paginate(|page| {
-        let client = client.clone();
-        let scope = scope.clone();
-        async move {
-            let r = client.list_artwork(scope, page).await?;
-            Ok((r.artwork, r.next_page_token))
-        }
-    })
-    .await?;
-    eprintln!(
-        "core ListArtwork complete: {} source artwork records",
-        records.len()
-    );
-    Ok(records.iter().map(catalog::art_record).collect())
+    record: serde_json::Value,
+) -> Result<HashMap<String, Pixels>, core::ClientError> {
+    operation(load_artwork_records(&[record], |url| {
+        client.clone().load_artwork(url)
+    }))
+    .await
 }
 pub async fn search_artwork(
     client: Arc<Client>,
