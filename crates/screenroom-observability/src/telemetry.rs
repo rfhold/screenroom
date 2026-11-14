@@ -1,5 +1,8 @@
+use crate::metrics::MetricsConfig;
+use opentelemetry::metrics::{Meter, MeterProvider as _};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig as _;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use std::{error::Error, fmt};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberInitExt as _};
@@ -7,7 +10,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt as _, util::SubscriberI
 pub use tonic_tracing_opentelemetry::middleware::server::OtelGrpcLayer;
 
 #[derive(Debug)]
-pub struct TelemetryError(&'static str);
+pub struct TelemetryError(pub(crate) &'static str);
 
 impl fmt::Display for TelemetryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -78,13 +81,29 @@ impl TelemetryConfig {
 
 pub struct Telemetry {
     provider: SdkTracerProvider,
+    meter_provider: SdkMeterProvider,
 }
 
 impl Telemetry {
     pub fn init(service_name: &str, config: TelemetryConfig) -> Result<Self, TelemetryError> {
+        Self::init_with_metrics(service_name, config, MetricsConfig::from_env()?)
+    }
+
+    pub fn init_with_metrics(
+        service_name: &str,
+        config: TelemetryConfig,
+        metrics: MetricsConfig,
+    ) -> Result<Self, TelemetryError> {
         let filter = EnvFilter::try_new(&config.filter)
             .map_err(|_| TelemetryError("invalid RUST_LOG filter"))?;
-        let provider = config.build_provider(service_name)?;
+        let meter_provider = metrics.build_provider(service_name)?;
+        let provider = match config.build_provider(service_name) {
+            Ok(provider) => provider,
+            Err(error) => {
+                let _ = meter_provider.shutdown();
+                return Err(error);
+            }
+        };
         let subscriber = tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::filter::filter_fn(|metadata| {
@@ -92,8 +111,10 @@ impl Telemetry {
                 if matches!(
                     metadata.target(),
                     "opentelemetry-otlp" | "opentelemetry_otlp"
-                ) && metadata.name() == "HttpTraceClient.PartialSuccess"
-                {
+                ) && matches!(
+                    metadata.name(),
+                    "HttpTraceClient.PartialSuccess" | "HttpMetricsClient.PartialSuccess"
+                ) {
                     return false;
                 }
                 // Transport debug output can contain endpoints, headers, and response bodies.
@@ -118,16 +139,32 @@ impl Telemetry {
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("screenroom-rpc")));
         if subscriber.try_init().is_err() {
             let _ = provider.shutdown();
+            let _ = meter_provider.shutdown();
             return Err(TelemetryError("tracing subscriber already initialized"));
         }
         opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-        Ok(Self { provider })
+        Ok(Self {
+            provider,
+            meter_provider,
+        })
+    }
+
+    pub fn meter(&self) -> Meter {
+        self.meter_provider.meter("screenroom-worker")
+    }
+
+    pub fn force_flush(&self) -> Result<(), TelemetryError> {
+        let traces = self.provider.force_flush();
+        let metrics = self.meter_provider.force_flush();
+        traces.map_err(|_| TelemetryError("trace provider flush failed"))?;
+        metrics.map_err(|_| TelemetryError("metric provider flush failed"))
     }
 
     pub fn shutdown(self) -> Result<(), TelemetryError> {
-        self.provider
-            .shutdown()
-            .map_err(|_| TelemetryError("trace provider shutdown failed"))
+        let traces = self.provider.shutdown();
+        let metrics = self.meter_provider.shutdown();
+        traces.map_err(|_| TelemetryError("trace provider shutdown failed"))?;
+        metrics.map_err(|_| TelemetryError("metric provider shutdown failed"))
     }
 }
 
@@ -189,14 +226,16 @@ mod tests {
             filter: "info".into(),
             traces_endpoint: None,
         };
-        let telemetry = Telemetry::init("init-test", config()).unwrap();
+        let telemetry =
+            Telemetry::init_with_metrics("init-test", config(), MetricsConfig::default()).unwrap();
         assert_eq!(
-            Telemetry::init("init-test", config())
+            Telemetry::init_with_metrics("init-test", config(), MetricsConfig::default())
                 .err()
                 .unwrap()
                 .to_string(),
             "tracing subscriber already initialized"
         );
+        telemetry.force_flush().unwrap();
         telemetry.shutdown().unwrap();
     }
 
