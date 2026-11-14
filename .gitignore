@@ -20,3 +20,6 @@ xcuserdata/
 .gradle/
 local.properties
 .worktrees/
+.playwright-mcp/
+__pycache__/
+*.py[cod]
