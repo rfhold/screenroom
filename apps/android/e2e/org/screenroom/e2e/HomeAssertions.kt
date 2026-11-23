@@ -136,7 +136,7 @@ private fun ComposeTestRule.openDetail(selection: RealSelection, tv: Boolean) {
         onAllNodes(hasTestTag("art-ready") and hasAnyAncestor(hasTestTag("detail-poster"))).fetchSemanticsNodes().isNotEmpty()
     }
     selection.item.artwork?.let { onNode(hasContentDescription(it.label) and hasAnyAncestor(hasTestTag("detail-poster"))).assertExists() }
-    onNodeWithText("Play", substring = false).assertDoesNotExist()
+    onNodeWithText("Play", substring = false).assertExists()
     onNodeWithText("Resume", substring = false).assertDoesNotExist()
     val header = onNodeWithTag("detail-header").fetchSemanticsNode().boundsInRoot
     val poster = onNodeWithTag("detail-poster").fetchSemanticsNode().boundsInRoot

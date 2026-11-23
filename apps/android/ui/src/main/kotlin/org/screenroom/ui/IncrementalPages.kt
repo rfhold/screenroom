@@ -10,6 +10,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 
 internal class IncrementalPages<T>(private val id: (T) -> String) {
+    var status by mutableStateOf("")
     var records by mutableStateOf(emptyList<T>())
         private set
     var token by mutableStateOf("")

@@ -38,6 +38,38 @@ for category in unknown ''; do
 done
 echo "$before"
 
+for journey in unknown ''; do
+  if E2E_CATEGORY=happy-path SCREENROOM_E2E_JOURNEY="$journey" PATH="$fixture/bin:$PATH" /bin/bash "$fixture/scripts/e2e.sh" > "$fixture/rejection.log" 2>&1; then exit 1; else [ "$?" -eq 2 ]; fi
+  grep -Fq 'Invalid SCREENROOM_E2E_JOURNEY' "$fixture/rejection.log"
+  [ ! -e "$TEST_COMMAND_MARKER" ]
+  [ "$before" = "$(shasum -a 256 "$fixture"/build/e2e/*.png)" ]
+done
+for category in all retry regression; do
+  if E2E_CATEGORY="$category" SCREENROOM_E2E_JOURNEY=playback PATH="$fixture/bin:$PATH" /bin/bash "$fixture/scripts/e2e.sh" > "$fixture/rejection.log" 2>&1; then exit 1; else [ "$?" -eq 2 ]; fi
+  grep -Fq 'Playback journey requires E2E_CATEGORY=happy-path' "$fixture/rejection.log"
+  [ ! -e "$TEST_COMMAND_MARKER" ]
+  [ "$before" = "$(shasum -a 256 "$fixture"/build/e2e/*.png)" ]
+done
+if E2E_CATEGORY=happy-path SCREENROOM_E2E_JOURNEY=playback SCREENROOM_SHOWCASE_ITEM_ID='' PATH="$fixture/bin:$PATH" /bin/bash "$fixture/scripts/e2e.sh" > "$fixture/rejection.log" 2>&1; then exit 1; else [ "$?" -eq 2 ]; fi
+grep -Fq 'Playback journey requires SCREENROOM_SHOWCASE_ITEM_ID' "$fixture/rejection.log"
+[ ! -e "$TEST_COMMAND_MARKER" ]
+for rejection in instance endpoint attach project; do
+  instance=test-instance endpoint=http://127.0.0.1:50052 attach=1 project=screenroom-jellyfin-local
+  case "$rejection" in
+    instance) instance='' ;;
+    endpoint) endpoint=http://127.0.0.1:50051 ;;
+    attach) attach=0 ;;
+    project) project=prototype ;;
+  esac
+  if E2E_CATEGORY=happy-path SCREENROOM_E2E_JOURNEY=playback SCREENROOM_SHOWCASE_ITEM_ID=explicit-item \
+    SCREENROOM_SHOWCASE_TITLE=Nosferatu SCREENROOM_SHOWCASE_YEAR=1922 SCREENROOM_BACKEND_INSTANCE_ID="$instance" \
+    SCREENROOM_API_ENDPOINT="$endpoint" SCREENROOM_BACKEND_ATTACH="$attach" SCREENROOM_BACKEND_PROJECT="$project" \
+    PATH="$fixture/bin:$PATH" /bin/bash "$fixture/scripts/e2e.sh" > "$fixture/rejection.log" 2>&1; then exit 1; else [ "$?" -eq 2 ]; fi
+  [ ! -e "$TEST_COMMAND_MARKER" ]
+  [ "$before" = "$(shasum -a 256 "$fixture"/build/e2e/*.png)" ]
+done
+echo 'Playback rejects invalid journeys, incompatible categories and missing selectors before any command or cleanup'
+
 # An unset category must get past validation; the fixture has no SDK or devices.
 if env -u E2E_CATEGORY JAVA_HOME="$fixture/missing-jdk" ANDROID_HOME="$fixture/missing-sdk" /bin/bash "$fixture/scripts/e2e.sh" > "$fixture/unset.log" 2>&1; then
   echo 'Unset-category fixture unexpectedly reached instrumentation' >&2

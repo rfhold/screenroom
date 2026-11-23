@@ -49,10 +49,11 @@ internal fun SearchCapabilities.toggleTitleOnly(current: Methods): Methods {
 internal fun SearchCapabilities.allowedTypes(types: SearchTypes?) = this.types.filter { when (it) { "Movie" -> types?.movie == true; "Series" -> types?.series == true; "Episode" -> types?.episode == true; else -> false } }.toSet()
 internal fun SearchCapabilities.allowedSource(source: String) = sources.firstOrNull { it == source } ?: sources.firstOrNull().orEmpty()
 internal fun sourceLabel(source: String) = if (source == "all") "All" else source.replaceFirstChar { it.uppercase() }
-internal fun validLink(url: String): Boolean = try { java.net.URI(url).let { it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() && it.userInfo == null } } catch (_: Exception) { false }
+internal fun validLink(url: String): Boolean = try { java.net.URI(url).let { it.scheme in setOf("http", "https") && !it.host.isNullOrBlank() && it.userInfo == null && it.port in -1..65535 && url.none(Char::isISOControl) } } catch (_: Exception) { false }
+internal fun providerStatus(status: String) = if (status == "source_supplied") "Identifier supplied by Jellyfin" else status.replace('_', ' ')
 internal data class ProviderPresentation(val label: String, val url: String?)
 internal fun ProviderReference.presentation(rating: Rating?, score: String): ProviderPresentation = ProviderPresentation(
-    if (rating?.provider?.equals(provider, ignoreCase = true) == true) "$provider · $score" else "$provider: $status",
+    if (rating?.provider?.equals(provider, ignoreCase = true) == true) "$provider · $score" else "$provider: ${providerStatus(status)}",
     url.takeIf(::validLink))
 
 internal class CoreStore(endpoint: String, userId: String, private val settingsStore: SettingsStore) {

@@ -1,3 +1,5 @@
+@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package org.screenroom.ui
 
 import androidx.compose.foundation.Canvas
@@ -18,6 +20,7 @@ import androidx.compose.foundation.gestures.BringIntoViewSpec
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,19 +55,29 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import org.screenroom.core.SearchRequest
 import org.screenroom.core.SearchTypes
 import org.screenroom.core.SearchMethods
 
 private data class SearchState(val query: String = "", val methods: Methods = Methods(), val settings: Boolean = false, val source: String = "", val types: Set<String> = emptySet())
-private data class Page(val screen: String = "home", val library: String = "", val id: String? = null, val search: SearchState = SearchState())
+private data class Page(val screen: String = "home", val library: String = "", val id: String? = null, val search: SearchState = SearchState(), val entry: String = java.util.UUID.randomUUID().toString())
 private val LocalTvFocusReturn = compositionLocalOf<((FocusRequester) -> Unit)?> { null }
+private class FocusReturn(val target: String?, val record: (String) -> Unit)
+private val LocalFocusReturn = compositionLocalOf<FocusReturn?> { null }
+private class EntryRead(val entry: String, val epoch: Int, val pages: EntryPages<Title>)
+private val LocalEntryRead = staticCompositionLocalOf<EntryRead> { error("Missing navigation read owner") }
 
 @Composable
-private fun returnableTvFocus(): Modifier {
+private fun returnableTvFocus(identity: String? = null, enabled: Boolean = true): Modifier {
     val record = LocalTvFocusReturn.current ?: return Modifier
+    val restoration = LocalFocusReturn.current
     val requester = remember { FocusRequester() }
-    return Modifier.focusRequester(requester).onFocusChanged { if (it.isFocused) record(requester) }
+    LaunchedEffect(identity, enabled) { if (enabled && identity != null && restoration?.target == identity) requester.requestFocus() }
+    return Modifier.focusRequester(requester).onFocusChanged {
+        if (it.isFocused) { record(requester); if (identity != null) restoration?.record?.invoke(identity) }
+    }
 }
 
 private object NearestVisibleFocus : BringIntoViewSpec {
@@ -99,6 +112,25 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
     val store = LocalCore.current
     val catalog = store.catalog
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var playback by remember { mutableStateOf<NativePlayback?>(null) }
+    val recovery = remember { ProfileRecovery<NativePlayback>() }
+    var playbackOwner by remember { mutableLongStateOf(recovery.capture()) }
+    val presentation = remember { PlaybackPresentation() }
+    var playbackTitle by remember { mutableStateOf("") }
+    val views = rememberSaveableStateHolder()
+    val focusedControls = remember { mutableMapOf<String, String>() }
+    val scrollPositions = remember { mutableMapOf<String, Int>() }
+    val entryPages = remember { EntryPages<Title>(id = { it.id }) }
+    val readEpoch by store.readRefresh.generation.collectAsState()
+    DisposableEffect(store) { onDispose { playback?.stop("client_changed") } }
+    fun play(item: Title, library: String) {
+        if (playback != null || recovery.visible?.cleanupOpen == true) return
+        playbackOwner = recovery.capture()
+        presentation.fullscreen = false
+        playbackTitle = item.title
+        playback = NativePlayback(context, store.profileClient(), item.id, store.requestScope(library))
+    }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var reload by remember { mutableIntStateOf(0) }
@@ -109,7 +141,7 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
         loading = store.catalog.isEmpty() || store.homeScope != homeScope; error = null
         try { store.bootstrap(homeScope); if (reload > 0) status = "Catalog refreshed." } catch (e: CancellationException) { throw e } catch (_: Exception) { error = "Unable to read catalog. Retry to read server state."; status = "Catalog read failed." } finally { loading = false }
     }
-    val history = remember { mutableStateListOf<Page>() }
+    val history = remember { NavigationHistory<Page>() }
     var expanded by rememberSaveable { mutableStateOf(false) }
     val preferredTypes = store.capabilities?.allowedTypes(store.preferences.types).orEmpty()
     val refresh: () -> Unit = { store.refreshReads(); reload++; status = "Reading catalog…" }
@@ -137,20 +169,36 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
         persist { store.update(library = next.library) }
         if (next.screen == "home") homeScope = store.requestScope(next.library)
     }
-    fun navigate(next: Page) { history.add(page); changePage(next) }
+    fun forget(entry: Page) { views.removeState(entry.entry); focusedControls.remove(entry.entry); scrollPositions.remove(entry.entry); entryPages.remove(entry.entry) }
+    fun navigate(next: Page) { history.push(page)?.let(::forget); changePage(next) }
+    fun returnToPrevious() { val departed = page; changePage(history.pop()); forget(departed) }
     val back: () -> Boolean = {
-        when { page.search.settings && page.screen == "search" -> { page = page.copy(search = page.search.copy(settings = false)); true }
+        when { playback != null && presentation.exitFullscreen() -> true
+            playback != null -> { playback?.let { it.stop("back"); recovery.retain(playbackOwner, it) }; playback = null; store.refreshReads(); reload++; true }
+            page.search.settings && page.screen == "search" -> { page = page.copy(search = page.search.copy(settings = false)); true }
             expanded -> { expanded = false; true }
-            history.isNotEmpty() -> { changePage(history.removeAt(history.lastIndex)); true }
-            page.screen != "home" -> { changePage(Page()); true }
+            history.canGoBack -> { returnToPrevious(); true }
+            page.screen != "home" -> { forget(page); changePage(Page()); true }
             else -> false }
     }
     SideEffect { registerBack(back) }
+    if (playback != null) {
+        val currentPlayback = playback!!
+        val currentOwner = playbackOwner
+        PlaybackScreen(currentPlayback, playbackTitle, television, presentation) {
+            if (recovery.current(currentOwner) && playback === currentPlayback) {
+                recovery.retain(currentOwner, currentPlayback)
+                playback = null
+                store.refreshReads(); reload++
+            }
+        }
+        return
+    }
     val menu: @Composable () -> Unit = {
         val navigateMenu: (String) -> Unit = { target ->
             expanded = false
             when (target) {
-                "Home" -> { history.clear(); changePage(Page()); status = "" }
+                "Home" -> { history.clear().forEach(::forget); forget(page); changePage(Page()); status = "" }
                 "Search titles" -> navigate(Page("search", page.library, page.id, SearchState(types = preferredTypes, methods = store.preferences.methods?.let { Methods(it.text, it.fuzzy, it.semantic, it.titleOnly) } ?: Methods(), source = store.preferences.source)))
                 "Jellyfin profile" -> navigate(Page("profile", page.library))
                 else -> navigate(Page("browse", target))
@@ -163,17 +211,40 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
         else Sidebar(false, expanded, status, { expanded = !expanded }, refresh, navigateMenu)
     }
     val content: @Composable () -> Unit = {
-        key(page.screen, page.library, page.id) { Column(Modifier.fillMaxSize().testTag("content").verticalScroll(rememberScrollState()).padding(if (television) 28.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+        CompositionLocalProvider(LocalEntryRead provides EntryRead(page.entry, readEpoch, entryPages)) {
+        views.SaveableStateProvider(page.entry) { key(page.screen, page.library, page.id) {
+            val entry = page.entry
+            val scroll = rememberScrollState()
+            val restore = remember(entry) { scrollPositions[entry] ?: scroll.value }
+            DisposableEffect(entry, scroll) {
+                onDispose { if (page.entry == entry || history.any { it.entry == entry }) scrollPositions[entry] = scroll.value }
+            }
+            LaunchedEffect(entry, scroll) {
+                if (restore > 0) {
+                    withTimeoutOrNull(1500) { snapshotFlow { scroll.maxValue }.first { it != Int.MAX_VALUE && it >= restore } }
+                    scroll.scrollTo(restore.coerceAtMost(scroll.maxValue.coerceAtLeast(0)))
+                }
+            }
+            Column(Modifier.fillMaxSize().testTag("content").verticalScroll(scroll).padding(if (television) 28.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+            recovery.visible?.let { stopped ->
+                val owner = recovery.capture()
+                if (stopped.stopOutcome != StopOutcome.CONFIRMED) {
+                    Label(stopped.message)
+                    if (stopped.cleanupOpen) Label("Resolve this session before starting another. Recovery is available for up to one minute.")
+                    StopRecoveryActions(stopped) { recovery.owns(owner, stopped) }
+                }
+            }
             if (page.screen != "home" && page.screen != "profile") Breadcrumbs(page,
-                if (page.screen == "detail" && history.lastOrNull()?.screen == "search") ({ changePage(history.removeAt(history.lastIndex)) }) else null) { navigate(it) }
+                if (page.screen == "detail" && history.lastOrNull()?.screen == "search") ({ returnToPrevious() }) else null) { navigate(it) }
             if (loading) Label("Loading catalog…", Modifier.testTag("data-loading"))
             else if (error != null && (store.homeRows.isEmpty() || store.homeScope != homeScope)) { PageReadError(error!!, "Retry") { reload++ } }
             else when (page.screen) {
-                "profile" -> JellyfinSettings { refresh() }
+                "profile" -> JellyfinSettings(onReplacing = { recovery.replaceProfile() }, onChanged = { refresh() })
                 "home" -> {
                     if (error != null) PageReadError(error!!, "Retry catalog") { reload++ }
                     val entryFocus = remember { FocusRequester() }
-                    LaunchedEffect(Unit) { if (television) entryFocus.requestFocus() }
+                    val returning = LocalFocusReturn.current?.target != null
+                    LaunchedEffect(Unit) { if (television && !returning) entryFocus.requestFocus() }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                         Heading("Home", modifier = Modifier.testTag("home-scope").semantics { stateDescription = store.homeScope?.let { "${it.sourceId}|${it.libraryId}" }.orEmpty() })
                         Action("Browse libraries", Modifier.focusRequester(entryFocus).then(if (television) Modifier.focusProperties { left = sidebarFocus } else Modifier)) { navigate(Page("browse")) }
@@ -183,7 +254,7 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
                             Heading(name, small = true)
                             if (rowError != null) PageReadError(rowError, "Retry $name") { refresh() }
                             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                items.forEach { item -> PosterCard(item, if (television) 220.dp else 144.dp) { navigate(Page("detail", page.library, item.id)) } }
+                                items.forEach { item -> PosterCard(item, if (television) 220.dp else 144.dp, focusKey = "$name:${item.id}") { navigate(Page("detail", page.library, item.id)) } }
                             }
                         }
                     }
@@ -204,7 +275,7 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
                             Detail(item, television)
                             ChildrenGrid(item, page.library, television, reload) { navigate(Page("detail", page.library, it.id)) }
                         }
-                        else -> Detail(item, television)
+                        else -> Detail(item, television) { play(item, page.library) }
                     }
                 }
             }
@@ -213,11 +284,11 @@ private fun CoreHomeScreen(television: Boolean, registerBack: (() -> Boolean) ->
                 PageReadError(warning, "Retry saving settings") { scope.launch { store.retrySettings() } }
             }
             Spacer(Modifier.height(12.dp))
-        } }
+        } } } }
     }
     val base = Modifier.fillMaxSize().background(LocalScreenroomColors.current.background).safeDrawingPadding()
     CompositionLocalProvider(LocalBringIntoViewSpec provides NearestVisibleFocus) {
-        if (television) Row(base) { menu(); Box(Modifier.weight(1f).focusRequester(contentFocus).onFocusChanged { if (it.hasFocus) expanded = false }.focusGroup()) { CompositionLocalProvider(LocalTvFocusReturn provides { lastContentFocus = it }) { content() } } }
+        if (television) Row(base) { menu(); Box(Modifier.weight(1f).focusRequester(contentFocus).onFocusChanged { if (it.hasFocus) expanded = false }.focusGroup()) { CompositionLocalProvider(LocalTvFocusReturn provides { lastContentFocus = it }, LocalFocusReturn provides FocusReturn(focusedControls[page.entry]) { focusedControls[page.entry] = it }) { content() } } }
         else Column(base.imePadding()) { menu(); Box(Modifier.weight(1f)) { content() } }
     }
 }
@@ -275,23 +346,23 @@ private fun TvSidebarRow(label: String, icon: String, expanded: Boolean, modifie
 }
 
 @Composable
-private fun Label(text: String, modifier: Modifier = Modifier, muted: Boolean = false, size: Int = 14) {
+internal fun Label(text: String, modifier: Modifier = Modifier, muted: Boolean = false, size: Int = 14) {
     val colors = LocalScreenroomColors.current
     BasicText(text, modifier, style = BodyStyle.copy(color = if (muted) colors.secondary else colors.text, fontSize = size.sp, lineHeight = (size + 6).sp))
 }
 
 @Composable
-private fun Heading(text: String, small: Boolean = false, modifier: Modifier = Modifier) {
+internal fun Heading(text: String, small: Boolean = false, modifier: Modifier = Modifier) {
     BasicText(text, modifier.semantics { heading() }, style = BodyStyle.copy(color = LocalScreenroomColors.current.text, fontSize = if (small) 21.sp else 28.sp, lineHeight = if (small) 28.sp else 36.sp, fontWeight = FontWeight.SemiBold))
 }
 
 @Composable
-private fun Action(label: String, modifier: Modifier = Modifier, selected: Boolean = false, enabled: Boolean = true, visible: String = label, quiet: Boolean = false, click: () -> Unit) {
+internal fun Action(label: String, modifier: Modifier = Modifier, selected: Boolean = false, enabled: Boolean = true, visible: String = label, quiet: Boolean = false, click: () -> Unit) {
     var focus by remember { mutableStateOf(false) }
     val colors = LocalScreenroomColors.current
     val keyboard = LocalInputModeManager.current.inputMode == InputMode.Keyboard
     val showFocus = focus && keyboard
-    Box(modifier.then(returnableTvFocus()).onFocusChanged { focus = it.isFocused }.clip(RoundedCornerShape(8.dp))
+    Box(modifier.then(returnableTvFocus("action:$label", enabled)).onFocusChanged { focus = it.isFocused }.clip(RoundedCornerShape(8.dp))
         .background(if (selected || showFocus) Color(0xff303030) else Color.Transparent)
         .border(if (showFocus) 2.dp else 1.dp, if (showFocus) colors.accent else if (quiet) Color.Transparent else Color(0x22ffffff), RoundedCornerShape(8.dp))
         .semantics { contentDescription = label; if (selected) stateDescription = "Selected" }
@@ -380,12 +451,17 @@ private fun Poster(item: Title, width: Dp, decorative: Boolean = false, seasonCo
     }
 }
 
+private fun catalogItemTestTag(id: String): String = "screenroom_item_" +
+    id.toByteArray(Charsets.UTF_8).joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
-private fun PosterCard(item: Title, width: Dp, modifier: Modifier = Modifier, seasonContext: Boolean = false, open: () -> Unit) {
+private fun PosterCard(item: Title, width: Dp, modifier: Modifier = Modifier, seasonContext: Boolean = false, focusKey: String = item.id, open: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     val labels = item.labels(seasonContext)
-    Column(modifier.width(width).then(returnableTvFocus()).onFocusChanged { focused = it.isFocused }.border(if (focused) 2.dp else 0.dp, if (focused) LocalScreenroomColors.current.accent else Color.Transparent, RoundedCornerShape(10.dp))
-        .semantics { contentDescription = item.accessibility(seasonContext) }.clickable(role = Role.Button, onClick = open), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+    Column(modifier.width(width).then(returnableTvFocus("item:$focusKey")).onFocusChanged { focused = it.isFocused }.border(if (focused) 2.dp else 0.dp, if (focused) LocalScreenroomColors.current.accent else Color.Transparent, RoundedCornerShape(10.dp))
+        .testTag(catalogItemTestTag(item.id))
+        .semantics { testTagsAsResourceId = true; contentDescription = item.accessibility(seasonContext) }.clickable(role = Role.Button, onClick = open), verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Box(Modifier.clearAndSetSemantics {}) { Poster(item, width, decorative = true, seasonContext = seasonContext) }
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically, modifier = Modifier.clearAndSetSemantics {}) {
             if (labels.primary.isNotEmpty()) Label(labels.primary, Modifier.weight(1f, fill = false))
@@ -398,7 +474,8 @@ private fun PosterCard(item: Title, width: Dp, modifier: Modifier = Modifier, se
 @Composable
 private fun PosterGrid(items: List<Title>, tv: Boolean, entryFocus: Boolean = true, season: Title? = null, open: (Title) -> Unit) {
     val requester = remember { FocusRequester() }
-    LaunchedEffect(items.isNotEmpty()) { if (tv && entryFocus && items.isNotEmpty()) requester.requestFocus() }
+    val returning = LocalFocusReturn.current?.target != null
+    LaunchedEffect(items.isNotEmpty()) { if (tv && entryFocus && !returning && items.isNotEmpty()) requester.requestFocus() }
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val columns = maxOf(1, ((maxWidth.value + 16) / (if (tv) 236 else 156)).toInt())
         val width = minOf(if (tv) 220.dp else 180.dp, (maxWidth - 16.dp * (columns - 1)) / columns)
@@ -412,12 +489,13 @@ private fun PosterGrid(items: List<Title>, tv: Boolean, entryFocus: Boolean = tr
 }
 
 @Composable
-private fun Detail(item: Title, tv: Boolean) {
+private fun Detail(item: Title, tv: Boolean, play: (() -> Unit)? = null) {
     val info: @Composable () -> Unit = {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.widthIn(max = if (tv) 680.dp else 760.dp).testTag("title-details")) {
             Label("${item.kind} · ${item.year}", muted = true, size = 12); Heading(item.title)
             Label(item.meta + if (item.kind == "Episode") " · Aired ${item.date}" else "", muted = true)
             ProviderInfo(item, tv)
+            if (play != null && item.kind in setOf("Movie", "Episode")) Action("Play", Modifier.testTag("play-title"), click = play)
             Label(item.overview)
         }
     }
@@ -442,14 +520,15 @@ private fun SearchPanel(library: String, query: String, update: (String) -> Unit
         if (supported.isNotEmpty() && supported != source) setSource(supported)
     }
     val libraryName = store.libraryTitle(library)
-    val pages = remember(query, library, types, methods, source) { IncrementalPages<Title> { it.id } }
+    val owner = LocalEntryRead.current
+    val pages = owner.pages.get(owner.entry, listOf("search", query, library, types.toSet(), methods, source, store.requestScope(library), owner.epoch))
     val results = pages.records
     val searching = pages.busy
     val failure = pages.failure
     val scope = rememberCoroutineScope()
     val appendScope = remember(pages) { CoroutineScope(scope.coroutineContext + Job(scope.coroutineContext[Job])) }
     DisposableEffect(appendScope) { onDispose { appendScope.cancel() } }
-    var searchStatus by remember { mutableStateOf("") }
+    var searchStatus by pages::status
     val read: suspend (String) -> Pair<List<Title>, String> = { token ->
         val supportedSource = requireNotNull(store.capabilities) { "Search capabilities unavailable" }.allowedSource(source)
         check(supportedSource.isNotEmpty()) { "No search sources available" }
@@ -458,16 +537,14 @@ private fun SearchPanel(library: String, query: String, update: (String) -> Unit
         searchStatus = "Effective search: " + listOfNotNull("Text".takeIf { actual?.text == true }, "Fuzzy".takeIf { actual?.fuzzy == true }, "Semantic".takeIf { actual?.semantic == true }).joinToString(", ") + result.degradationReason.takeIf { it.isNotBlank() }?.let { " · Fallback: $it" }.orEmpty()
         result.items.map { it.ui() } to result.nextPageToken
     }
-    LaunchedEffect(query, library, types, methods, source) {
-        store.readRefresh.repeatOnRefresh {
-            if (query.isBlank()) return@repeatOnRefresh
+    LaunchedEffect(pages) {
+            if (query.isBlank() || pages.loaded) return@LaunchedEffect
             delay(350)
             pages.load(reset = true, read = read)
-        }
     }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         var focused by remember { mutableStateOf(false) }
-        BasicTextField(query, { update(it.take(capabilities?.maximumQueryLength?.coerceAtMost(Int.MAX_VALUE.toUInt())?.toInt() ?: 0)) }, Modifier.fillMaxWidth().heightIn(min = 52.dp).then(returnableTvFocus()).onFocusChanged { focused = it.isFocused }
+        BasicTextField(query, { update(it.take(capabilities?.maximumQueryLength?.coerceAtMost(Int.MAX_VALUE.toUInt())?.toInt() ?: 0)) }, Modifier.fillMaxWidth().heightIn(min = 52.dp).then(returnableTvFocus("search")).onFocusChanged { focused = it.isFocused }
             .border(if (focused) 2.dp else 1.dp, if (focused) LocalScreenroomColors.current.accent else Color(0x33ffffff), RoundedCornerShape(10.dp))
             .background(Color(0xff171717)).padding(14.dp).semantics { contentDescription = "Search $libraryName" }.testTag("search-query"), singleLine = true,
             textStyle = BodyStyle.copy(color = LocalScreenroomColors.current.text), cursorBrush = Brush.verticalGradient(listOf(Color.White, Color.White)),
@@ -514,7 +591,7 @@ private fun Choice(name: String, checked: Boolean, enabled: Boolean = true, clic
 }
 
 @Composable
-private fun JellyfinSettings(onChanged: () -> Unit) {
+private fun JellyfinSettings(onReplacing: () -> Unit, onChanged: () -> Unit) {
     val store = LocalCore.current
     val client = remember(store) { store.profileClient() }
     val scope = rememberCoroutineScope()
@@ -561,6 +638,8 @@ private fun JellyfinSettings(onChanged: () -> Unit) {
         val request = operations.next()
         val current = { operations.current(request) }
         busy = true; known = false; error = ""; status = ""; store.pendingProfileSource = source
+        // A dispatched mutation can replace personal identity even if its receipt is lost.
+        onReplacing()
         scope.launch {
             try {
                 val result = reconcileProfileChange(
@@ -627,28 +706,33 @@ private fun ArtImage(art: Art, modifier: Modifier) {
 private fun Link(label: String, url: String) {
     if (!validLink(url)) return
     val handler = LocalUriHandler.current
-    Action(label) { handler.openUri(url) }
+    var unavailable by remember(url) { mutableStateOf(false) }
+    Action(label) { try { handler.openUri(url) } catch (_: Exception) { unavailable = true } }
+    if (unavailable) Label("No application is available to open this link.")
 }
 
 @Composable
 private fun ProviderInfo(item: Title, tv: Boolean) {
-    var info by remember(item.id) { mutableStateOf(false) }
+    var info by rememberSaveable(item.id) { mutableStateOf(false) }
     val rating = ratingPresentation(item.record.rating, item.record.metadataRetrievedAt)
     val entryFocus = remember { FocusRequester() }
-    LaunchedEffect(item.id) { if (tv) entryFocus.requestFocus() }
+    val returning = LocalFocusReturn.current?.target != null
+    LaunchedEffect(item.id) { if (tv && !returning) entryFocus.requestFocus() }
     val score = rating.score
     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         val handler = LocalUriHandler.current
+        var linkError by remember(item.id) { mutableStateOf(false) }
         item.record.providerReferences.forEachIndexed { index, provider ->
             val hasRating = item.record.rating?.provider?.equals(provider.provider, ignoreCase = true) == true
             val presentation = provider.presentation(item.record.rating, score)
             val label = presentation.label
             val modifier = if (index == 0) Modifier.focusRequester(entryFocus) else Modifier
-            if (presentation.url != null) Action(label, modifier, visible = if (hasRating) "★ $label" else "${provider.provider} · ${provider.status}") { handler.openUri(presentation.url) }
-            else Label(if (hasRating) label else "${provider.provider} · ${provider.status}", Modifier.semantics { contentDescription = label }, muted = true, size = 12)
+            if (presentation.url != null) Action(label, modifier, visible = if (hasRating) "★ $label" else "${provider.provider} · ${providerStatus(provider.status)}") { try { handler.openUri(presentation.url) } catch (_: Exception) { linkError = true } }
+            else Label(if (hasRating) label else "${provider.provider} · ${providerStatus(provider.status)}", Modifier.semantics { contentDescription = label }, muted = true, size = 12)
         }
         item.record.rating?.let { value -> if (item.record.providerReferences.none { it.provider.equals(value.provider, true) }) Label("${value.provider} · $score") }
         Action("Rating and catalog details", if (item.record.providerReferences.firstOrNull()?.let { validLink(it.url) } != true) Modifier.focusRequester(entryFocus) else Modifier, visible = "ⓘ", selected = info, quiet = true) { info = !info }
+        if (linkError) Label("No application is available to open this link.")
     }
     if (info) Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Label(rating.disclosure, muted = true, size = 12)
@@ -682,7 +766,7 @@ private fun People(title: String, people: List<Person>, tv: Boolean) {
 @Composable
 private fun LibraryGrid(library: String, tv: Boolean, reload: Int, open: (Title) -> Unit) {
     val store = LocalCore.current
-    ItemPages(library, reload, tv, read = { token ->
+    ItemPages(listOf("library", store.requestScope(library)), reload, tv, read = { token ->
         coreRequest { store.client.listLibraryItems(store.requestScope(library), org.screenroom.core.Page(100u, token)) }.let { it.items.map { item -> item.ui() } to it.nextPageToken }
     }, open = open)
 }
@@ -690,21 +774,22 @@ private fun LibraryGrid(library: String, tv: Boolean, reload: Int, open: (Title)
 @Composable
 private fun ChildrenGrid(item: Title, library: String, tv: Boolean, reload: Int, open: (Title) -> Unit) {
     val store = LocalCore.current
-    ItemPages("${item.id}|$library", reload, tv, entryFocus = false, season = item, read = { token ->
+    ItemPages(listOf("children", item.id, store.requestScope(library)), reload, tv, entryFocus = false, season = item, read = { token ->
         coreRequest { store.client.listChildren(item.id, org.screenroom.core.Page(100u, token), store.requestScope(library)) }
             .let { it.items.map { child -> child.ui() } to it.nextPageToken }
     }, open = open)
 }
 
 @Composable
-private fun ItemPages(identity: String, reload: Int, tv: Boolean, entryFocus: Boolean = true, season: Title? = null,
+private fun ItemPages(identity: Any, reload: Int, tv: Boolean, entryFocus: Boolean = true, season: Title? = null,
     read: suspend (String) -> Pair<List<Title>, String>, open: (Title) -> Unit) {
     val store = LocalCore.current
-    val state = remember(identity, reload) { IncrementalPages<Title> { it.id } }
+    val owner = LocalEntryRead.current
+    val state = owner.pages.get(owner.entry, listOf(identity, owner.epoch, reload))
     val scope = rememberCoroutineScope()
     val appendScope = remember(state) { CoroutineScope(scope.coroutineContext + Job(scope.coroutineContext[Job])) }
     DisposableEffect(appendScope) { onDispose { appendScope.cancel() } }
-    LaunchedEffect(state) { store.readRefresh.repeatOnRefresh { state.load(reset = true, read = read) } }
+    LaunchedEffect(state) { if (!state.loaded) state.load(reset = true, read = read) }
     PosterGrid(state.records, tv, entryFocus = entryFocus, season = season, open = open)
     PageContinuation(state) { appendScope.launch { state.load(read = read) } }
 }

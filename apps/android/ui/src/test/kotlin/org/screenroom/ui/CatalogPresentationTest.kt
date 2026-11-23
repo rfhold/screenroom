@@ -87,7 +87,7 @@ class CatalogPresentationTest {
         assertEquals("jellyfin", caps.copy(sources = listOf("jellyfin")).allowedSource("all"))
         assertEquals("", caps.copy(sources = emptyList()).allowedSource("tmdb"))
         for (provider in listOf("Imdb", "Tmdb")) {
-            assertEquals(ProviderPresentation("$provider: source_supplied", "https://example.test/item"),
+            assertEquals(ProviderPresentation("$provider: Identifier supplied by Jellyfin", "https://example.test/item"),
                 ProviderReference(provider, "source_supplied", "https://example.test/item").presentation(null, "—"))
         }
     }

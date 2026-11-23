@@ -8,6 +8,23 @@ case "${E2E_CATEGORY-all}" in
   all) categories=(happy-path retry regression); methods=(happyPath retry regression) ;;
   *) echo 'Invalid E2E_CATEGORY; expected happy-path, retry, regression, or all' >&2; exit 2 ;;
 esac
+journey=${SCREENROOM_E2E_JOURNEY-browse}
+case "$journey" in
+  browse) ;;
+  playback)
+    [ "${E2E_CATEGORY-all}" = happy-path ] || { echo 'Playback journey requires E2E_CATEGORY=happy-path' >&2; exit 2; }
+    methods=(playbackShowcase)
+    for selector in SCREENROOM_SHOWCASE_ITEM_ID SCREENROOM_SHOWCASE_TITLE SCREENROOM_SHOWCASE_YEAR SCREENROOM_BACKEND_INSTANCE_ID; do
+      [ -n "${!selector:-}" ] || { echo "Playback journey requires $selector" >&2; exit 2; }
+    done
+    [[ "$SCREENROOM_SHOWCASE_YEAR" =~ ^[0-9]{4}$ ]] || { echo 'Invalid showcase year' >&2; exit 2; }
+    [ "${SCREENROOM_API_ENDPOINT:-}" = http://127.0.0.1:50052 ] || [ "${SCREENROOM_API_ENDPOINT:-}" = http://localhost:50052 ] \
+      || { echo 'Playback requires the attached real endpoint on port 50052' >&2; exit 2; }
+    [ "${SCREENROOM_BACKEND_ATTACH:-}" = 1 ] && [ "${SCREENROOM_BACKEND_PROJECT:-}" = screenroom-jellyfin-local ] \
+      || { echo 'Playback requires the real attached backend project' >&2; exit 2; }
+    ;;
+  *) echo 'Invalid SCREENROOM_E2E_JOURNEY; expected browse or playback' >&2; exit 2 ;;
+esac
 capture=false
 for category in "${categories[@]}"; do [ "$category" != happy-path ] || capture=true; done
 
@@ -23,6 +40,9 @@ OUT="$ROOT/build/e2e"
 profile_prefix=${SCREENROOM_E2E_SETTINGS_NAMESPACE:-${SCREENROOM_E2E_PROFILE_PREFIX:-android-$(uuidgen | tr '[:upper:]' '[:lower:]')}}
 [[ "$profile_prefix" =~ ^[a-zA-Z0-9_-]{1,90}$ ]] || { echo 'Invalid E2E profile prefix' >&2; exit 2; }
 flows=(home sidebar library search detail)
+playback_stage=
+playback_run=
+if [ "$journey" = playback ]; then flows=(); fi
 mkdir -p "$OUT"
 for profile in "${profiles[@]}"; do
   for flow in "${flows[@]}"; do
@@ -57,6 +77,13 @@ source "$ROOT/scripts/instrumentation.sh"
 cleanup() {
   status=$?
   stop_owned_instrumentation
+  if [ -n "$playback_stage" ]; then rm -rf "$playback_stage"; fi
+  if [ -n "$playback_run" ]; then
+    for ((index = 0; index < ${#verified_serials[@]}; index++)); do
+      timeout 15 "$ADB" -s "${verified_serials[$index]}" shell run-as "${verified_packages[$index]}" \
+        rm -rf "files/screenshots/playback/$playback_run" >/dev/null 2>&1 || true
+    done
+  fi
   for reverse_serial in "${owned_reverses[@]}"; do "$ADB" -s "$reverse_serial" reverse --remove "tcp:$api_port" >/dev/null 2>&1 || true; done
   for profile in "${profiles[@]}"; do
     for flow in "${flows[@]}"; do
@@ -85,6 +112,12 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ "$journey" = playback ]; then
+  playback_run=$(uuidgen | tr '[:upper:]' '[:lower:]')
+  playback_stage="$OUT/playback-stage-$playback_run"
+  mkdir "$playback_stage"
+  rm -f "$OUT/playback/manifest.json"
+fi
 
 : "${SCREENROOM_API_ENDPOINT:?Set the caller-owned backend endpoint}"
 : "${SCREENROOM_USER_ID:?Set the explicit local user UUID}"
@@ -194,10 +227,23 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
     method=${methods[$category_index]}
     log="$OUT/$profile-$category-instrumentation.txt"
     echo "Android E2E: $profile category=$category method=$method"
-    run_owned_instrumentation 300 "$serial" "$package" "$log" -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-$category" -e class \
+    showcase_args=()
+    if [ "$journey" = playback ]; then
+      for selector in SCREENROOM_SHOWCASE_ITEM_ID SCREENROOM_SHOWCASE_TITLE SCREENROOM_SHOWCASE_YEAR SCREENROOM_BACKEND_INSTANCE_ID; do
+        printf -v quoted_selector '%q' "${!selector}"
+        showcase_args+=(-e "$selector" "$quoted_selector")
+      done
+      showcase_args+=(-e SCREENROOM_SHOWCASE_RUN "$playback_run")
+    fi
+    run_owned_instrumentation 300 "$serial" "$package" "$log" "${showcase_args[@]}" -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-$category" -e class \
       "$package.e2e.HomeE2ETest#$method"
     cat "$log" >> "$OUT/$profile-instrumentation.txt"
     grep -Eq '^OK \(1 test\)' "$log" || fail "$profile $category E2E failed; no screenshot exported"
+    if [ "$journey" = playback ]; then
+      grep -Fxq 'INSTRUMENTATION_STATUS: test=playbackShowcase' "$log" || fail 'Playback method did not execute'
+      grep -Fxq "INSTRUMENTATION_STATUS: class=$package.e2e.HomeE2ETest" "$log" || fail 'Unexpected playback test class'
+      ! grep -Eq '^INSTRUMENTATION_STATUS_CODE: -[34]' "$log" || fail 'Skipped playback test cannot export captures'
+    fi
     if [ "$category" = regression ]; then
       run_owned_instrumentation 180 "$serial" "$package" "$OUT/$profile-correction-edges-instrumentation.txt" \
         -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" \
@@ -214,6 +260,21 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
     fi
   done
   [ "$capture" = true ] || continue
+  if [ "$journey" = playback ]; then
+    slug=android
+    [ "$profile" != tv ] || slug=android-tv
+    mkdir "$playback_stage/$slug"
+    timeout 30 "$ADB" -s "$serial" exec-out run-as "$package" cat "files/screenshots/playback/$playback_run/manifest.json" \
+      > "$playback_stage/manifest.json"
+    python3 "$ROOT/scripts/playback-showcase.py" paths "$playback_stage" "$slug" > "$playback_stage/paths.txt"
+    while IFS= read -r image; do
+      timeout 30 "$ADB" -s "$serial" exec-out run-as "$package" cat "files/screenshots/playback/$playback_run/${image##*/}" \
+        > "$playback_stage/$image"
+    done < "$playback_stage/paths.txt"
+    mv "$playback_stage/manifest.json" "$playback_stage/$slug.json"
+    rm "$playback_stage/paths.txt"
+    continue
+  fi
   for flow in "${flows[@]}"; do
     timeout 30 "$ADB" -s "$serial" exec-out run-as "$package" cat "files/screenshots/$flow.png" \
       >"$OUT/$profile-$flow.png.tmp"
@@ -224,6 +285,16 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
       || fail "$profile $flow PNG dimensions are invalid"
   done
 done
+
+if [ "$journey" = playback ]; then
+  slugs=()
+  for profile in "${profiles[@]}"; do
+    if [ "$profile" = tv ]; then slugs+=(android-tv); else slugs+=(android); fi
+  done
+  python3 "$ROOT/scripts/playback-showcase.py" promote "$playback_stage" "${slugs[@]}"
+  echo "Android E2E: playback evidence and cleanup report in $OUT/playback/manifest.json (not media acceptance)"
+  exit 0
+fi
 
 for profile in "${profiles[@]}"; do
   if [ "$capture" != true ]; then

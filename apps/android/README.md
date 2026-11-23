@@ -2,7 +2,7 @@
 
 Native Compose clients for Android mobile and Android TV. Both activities use the shared `ui` library and an isolated neutral dark theme.
 
-The Rust UniFFI client core supplies Browse, Catalog, Search, User, and artwork through the persistent local backend.
+The Rust UniFFI client core supplies Browse, Catalog, Search, User, artwork, and playback controls through the persistent local backend.
 See [the client API contract](../../docs/client-api.md). No provider credentials are required.
 Catalog RPCs use `screenroom.catalog.v1`; UserService uses `screenroom.user.v1`.
 Immutable ClientConfig holds endpoint, local user UUID selector, and timeout. Each scoped read carries explicit source/library scope.
@@ -29,7 +29,7 @@ Cancellation detaches individual consumers and preserves reads that other consum
 The sidebar expands within the layout. Mobile uses a fixed top toggle with horizontally scrollable navigation links.
 TV uses a 72 dp side rail that expands to 19% of the configured dp screen width, bounded to 180–260 dp.
 Its 48 dp navigation rows keep destination selection separate from remote-focus outlines.
-Libraries can scroll within the sidebar while Refresh remains below navigation. No subtitle controls exist.
+Libraries can scroll within the sidebar while Refresh remains below navigation. Playback settings contain subtitle controls.
 Left from the Home entry control enters the sidebar. Right returns to the last focused content control and collapses the sidebar without activating a destination.
 The sidebar returns to its top whenever it expands or collapses.
 Library grids lead through shows, seasons, episodes, and title details. Breadcrumbs and Android Back retain navigation context.
@@ -66,10 +66,34 @@ Old settings files ignore the obsolete subtitle field. The shared core normalize
 Library IDs are opaque; literal `movies` or `tv` values imply no media type or navigation behavior.
 Refresh invalidates core reads and fetches them again.
 The refresh status reports actual catalog read success or failure, not a local counter.
-There is no Welcome/logout flow, authentication, synchronization, transcription, or playback.
+There is no Welcome/logout flow, authentication, synchronization, transcription, or operator UI.
 Navigation history is presentation state; local preferences survive app restarts independently of backend state.
 Loading, error, and retry states do not block the UI thread. Superseded read jobs are canceled and guarded against stale results.
 Native deep links are not implemented.
+
+## Playback
+
+Movie and Episode details expose Play. Both apps use Media3 ExoPlayer for MP4, HLS, and gateway WebVTT subtitles.
+The ordinary shared Client controls sessions; the player reads media directly from gateway URLs.
+The apps never send playback requests directly to Jellyfin.
+The gateway reads the current personal profile's resume position; catalog percentages never supply seek positions.
+Playback settings offer gateway audio/subtitle choices, explicit Off, session checks, exact-request retries, and one compatible-transcode fallback.
+Unknown personal-state outcomes stop media and block automatic report replay.
+Controls include a seek bar, touch input, keyboard focus, Android TV remote buttons, and media play/pause/seek keys.
+Catalog history retains bounded entry-owned results, continuation tokens, query/options/scope, scroll positions, and the last focused TV control across detail and player visits.
+Refresh and profile/client changes invalidate those reads. Scroll restoration has a finite wait.
+Enter fullscreen hides system bars on mobile and TV without replacing the player or session. Back first exits fullscreen.
+
+Exit, Android Back, background, disposal, and client changes stop local media and submit a fixed final position.
+Local media stopping does not imply server confirmation. Pending or uncertain cleanup retains its exact stop request in memory for up to one minute.
+The player and same-profile catalog offer explicit stop retry and read-only cleanup checks; unknown stops never retry automatically.
+New playback waits while same-profile recovery is open. Dispatching a profile save/unlink advances UI ownership immediately: old recovery actions disappear and cannot reattach or block the replacement profile.
+Ordinary catalog reloads do not advance that ownership. Profile replacement/client disposal leave the old controller's bounded private cleanup running independently.
+After the recovery deadline, the client closes and authority is discarded without claiming confirmation.
+The player retains session authority only in memory. Process restoration never resumes playback.
+After a background stop, return to details and select Play for a new session.
+Picture-in-picture, background playback, downloads, casting, and external-player handoff remain unsupported.
+Isolated checks do not establish device, decoder, or live-provider playback acceptance.
 
 ## Build
 
@@ -81,6 +105,7 @@ cd apps/android
 export JAVA_HOME=/path/to/jdk-17
 export ANDROID_HOME=/path/to/android/sdk
 ./gradlew --build-cache :mobile:assembleDebug :tv:assembleDebug \
+  :ui:testDebugUnitTest \
   :mobile:lintDebug :tv:lintDebug \
   :mobile:assembleDebugAndroidTest :tv:assembleDebugAndroidTest
 ```
@@ -213,9 +238,9 @@ Gradle retains `apps/android/.gradle`, module `build/` directories, and `$GRADLE
 AVDs retain their data and snapshots under `ANDROID_AVD_HOME`.
 
 Each test launches the real `MainActivity` through an intent-aware `AndroidComposeTestRule`.
-Shared assertions discover libraries and a movie with published artwork through the public core. Real-data journeys fail with an explicit prerequisite message when none exists; they do not seed a catalog or assume titles, library IDs, counts, notices, or branding. Hierarchy regression also requires an indexed series with a season and episode. Unit tests independently cover episode/season poster fallback, nullable watched state, profile-generation isolation, pagination/cancellation and presentation boundaries.
+Shared assertions discover libraries and a movie with published artwork through the public core. Real-data journeys fail with an explicit prerequisite message when none exists; they do not seed a catalog or assume titles, library IDs, counts, notices, or branding. Hierarchy regression also requires an indexed series with a season and episode. Unit tests independently cover episode/season poster fallback, nullable watched state, profile-generation isolation, pagination/cancellation, presentation boundaries, and native playback ownership/retries.
 Only the happy-path test writes the five showcase flows with `UiAutomation`.
-The regression test writes no PNGs. Captures follow Compose and accessibility idle; they use the discovered library and movie title, not a fixed result count. Detail assertions retain poster aspect ratio, responsive placement and absent playback. Device E2E execution is separate from local unit and instrumentation compilation checks and requires explicit device authority.
+The regression test writes no PNGs. Captures follow Compose and accessibility idle; they use the discovered library and movie title, not a fixed result count. Detail assertions retain poster aspect ratio, responsive placement, and the Play action. These checks do not activate playback. Device E2E execution is separate from local unit and instrumentation compilation checks and requires explicit device authority.
 
 The script exports the PNG from the debug app's private test output through serial-specific `adb exec-out run-as`.
 Outputs relative to `apps/android`:
