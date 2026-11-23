@@ -42,6 +42,10 @@ Native apps supply no setup UI. These controls add no authentication, edit, rota
 
 Discovery requests authenticated `System/Info`, libraries, and profiles. Public version information alone does not prove access.
 Discovery persists no connection, key, policy, or queue job.
+Operator logs report failed or cancelled probe steps with elapsed time. Failures include a safe category and, where available, a numeric HTTP status.
+Use the `Jellyfin connection probe` event to distinguish server identity, library, profile, and response validation failures.
+The event excludes provider URLs, credentials, response bodies, server names, and identifiers.
+Successful steps appear at debug level. The [shared telemetry configuration](backend.md#shared-telemetry) controls RPC trace export.
 Save probes again with the exact submitted key and verifies the selected server identity, profile, and libraries.
 A stale discovery response cannot substitute for that check.
 

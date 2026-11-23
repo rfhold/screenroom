@@ -3,6 +3,7 @@ use super::{
     validate_config,
 };
 use serde::Deserialize;
+use std::time::Instant;
 
 /// API keys have no display/serialization surface and never enter URLs.
 pub struct ApiKey(String);
@@ -110,9 +111,20 @@ impl LiveJellyfin {
     /// All three operations require the supplied API key; public version info is insufficient.
     /// No indexing, persistence, enqueue, or credential return occurs.
     pub async fn probe_connection(&self) -> Result<ConnectionProbe> {
-        let server = self.server_identity().await?;
-        let mut libraries = self.libraries().await?;
-        let mut profiles = self.profiles().await?;
+        let server = observe_probe_stage("server_identity", self.server_identity()).await?;
+        let libraries = observe_probe_stage("libraries", self.libraries()).await?;
+        let profiles = observe_probe_stage("profiles", self.profiles()).await?;
+        observe_probe_stage("validate_response", async {
+            Self::validate_probe_response(server, libraries, profiles)
+        })
+        .await
+    }
+
+    fn validate_probe_response(
+        server: ServerIdentity,
+        mut libraries: Vec<Library>,
+        mut profiles: Vec<Profile>,
+    ) -> Result<ConnectionProbe> {
         let mut ids = std::collections::BTreeSet::new();
         if libraries.len() > 4096 || profiles.len() > 4096 {
             return Err(Error::InvalidResponse);
@@ -148,6 +160,79 @@ impl LiveJellyfin {
             profiles,
         })
     }
+}
+
+async fn observe_probe_stage<T>(
+    stage: &'static str,
+    operation: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    struct Attempt {
+        stage: &'static str,
+        started: Instant,
+        completed: bool,
+    }
+    impl Drop for Attempt {
+        fn drop(&mut self) {
+            if !self.completed {
+                tracing::info!(
+                    stage = self.stage,
+                    outcome = "cancelled",
+                    elapsed_ms = self.started.elapsed().as_secs_f64() * 1000.0,
+                    "Jellyfin connection probe"
+                );
+            }
+        }
+    }
+
+    let mut attempt = Attempt {
+        stage,
+        started: Instant::now(),
+        completed: false,
+    };
+    let result = operation.await;
+    attempt.completed = true;
+    let elapsed_ms = attempt.started.elapsed().as_secs_f64() * 1000.0;
+    match &result {
+        Ok(_) => tracing::debug!(
+            stage,
+            outcome = "ok",
+            elapsed_ms,
+            "Jellyfin connection probe"
+        ),
+        Err(error) => {
+            let category = match error {
+                Error::InvalidConfig => "invalid_config",
+                Error::Secret => "invalid_credentials",
+                Error::InvalidScope => "invalid_scope",
+                Error::Transport => "transport",
+                Error::Resolution => "dns_resolution",
+                Error::DestinationRejected => "destination_rejected",
+                Error::Deadline => "deadline",
+                Error::TooLarge => "response_too_large",
+                Error::Unauthorized => "unauthorized",
+                Error::NotFound => "not_found",
+                Error::RateLimited { .. } => "rate_limited",
+                Error::Http(_) => "http_status",
+                Error::InvalidResponse => "invalid_response",
+                Error::InvalidServerIdentity => "invalid_server_identity",
+                Error::UnsupportedCollection => "unsupported_collection",
+                Error::Hierarchy => "invalid_hierarchy",
+            };
+            let http_status = match error {
+                Error::Http(status) => Some(*status),
+                _ => None,
+            };
+            tracing::warn!(
+                stage,
+                outcome = "failed",
+                category,
+                http_status,
+                elapsed_ms,
+                "Jellyfin connection probe"
+            );
+        }
+    }
+    result
 }
 
 #[derive(Deserialize)]

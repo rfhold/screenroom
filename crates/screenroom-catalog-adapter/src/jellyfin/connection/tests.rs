@@ -206,6 +206,21 @@ async fn authenticated_discovery_preserves_basepath_identity_and_profile_eligibi
 
 #[tokio::test]
 async fn public_success_or_partial_permissions_never_establish_connection() {
+    use tracing::instrument::WithSubscriber;
+
+    #[derive(Clone, Default)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     for rows in [
         vec![("System/Info", "401 Unauthorized", "secret upstream error")],
         vec![
@@ -222,11 +237,42 @@ async fn public_success_or_partial_permissions_never_establish_connection() {
             ("Users", "401 Unauthorized", "secret upstream error"),
         ],
     ] {
+        let stage = match rows.len() {
+            1 => "server_identity",
+            2 => "libraries",
+            _ => "profiles",
+        };
         let (provider, server) = provider(rows).await;
+        let log = Log::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_writer(move || writer.clone())
+            .finish();
         assert_eq!(
-            provider.probe_connection().await.unwrap_err(),
+            provider
+                .probe_connection()
+                .with_subscriber(subscriber)
+                .await
+                .unwrap_err(),
             Error::Unauthorized
         );
+        let bytes = log.0.lock().unwrap();
+        let event: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(event["fields"]["stage"], stage);
+        assert_eq!(event["fields"]["category"], "unauthorized");
+        assert_eq!(event["fields"]["outcome"], "failed");
+        assert!(event["fields"]["elapsed_ms"].as_f64().unwrap() >= 0.0);
+        let serialized = std::str::from_utf8(&bytes).unwrap();
+        for private in [
+            "only-test-key",
+            "secret upstream error",
+            "localhost",
+            "server123",
+        ] {
+            assert!(!serialized.contains(private));
+        }
+        drop(bytes);
         server.await.unwrap();
     }
 }

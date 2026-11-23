@@ -13,6 +13,8 @@ sha2 = "0.10"
 libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 tokio = { version = "1", features = ["fs", "time", "io-util", "net"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tracing-subscriber.workspace = true
