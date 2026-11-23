@@ -3,7 +3,7 @@ kind: PipelineRun
 metadata:
   name: screenroom-release
   annotations:
-    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-promote-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/dd9fb85475775bc68b751aad9bf5d4c66c718d48/src/components/tekton-tasks/service-promote-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/dd9fb85475775bc68b751aad9bf5d4c66c718d48/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
     pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch.matches("^refs/tags/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")'
     pipelinesascode.tekton.dev/max-keep-runs: "10"
 spec:
@@ -98,7 +98,8 @@ spec:
               {"key":"userImage","repository":"cr.holdenitdown.net/rfhold/screenroom-user","platforms":["amd64","arm64"],"user":"10001:10001"},
               {"key":"workerImage","repository":"cr.holdenitdown.net/rfhold/screenroom-worker","platforms":["amd64","arm64"],"user":"10001:10001"},
               {"key":"playbackGatewayImage","repository":"cr.holdenitdown.net/rfhold/screenroom-playback-gateway","platforms":["amd64","arm64"],"user":"10001:10001"},
-              {"key":"indexOperatorImage","repository":"cr.holdenitdown.net/rfhold/screenroom-index-operator","platforms":["amd64","arm64"],"user":"10001:10001"}]
+              {"key":"indexOperatorImage","repository":"cr.holdenitdown.net/rfhold/screenroom-index-operator","platforms":["amd64","arm64"],"user":"10001:10001"},
+              {"key":"webImage","repository":"cr.holdenitdown.net/rfhold/screenroom-web","platforms":["amd64","arm64"],"user":"10001:10001"}]
 
       - name: deploy-production
         runAfter: [promote-release]

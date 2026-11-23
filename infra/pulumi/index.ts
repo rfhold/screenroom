@@ -23,6 +23,7 @@ type Component = keyof typeof components;
 const images = Object.fromEntries(Object.entries(components).map(([name, key]) => [
   name, config.require(key),
 ]));
+const webImage = config.require("webImage");
 const gatewayNamespace = "ingress";
 const gatewayName = "default-gateway";
 const labels = {
@@ -346,6 +347,36 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
     env("SCREENROOM_OPERATOR_ORIGIN", "http://127.0.0.1:50072"),
   ], [], [jellyfin], [], { credentials: "write" });
 
+  const webPort = { name: "http", containerPort: 8080 };
+  const webConfig = new k8s.core.v1.ConfigMap("screenroom-web-config", {
+    metadata: metadata("screenroom-web-config"),
+    data: { "screenroom-config.js": initialUser.apply(id => `window.__SCREENROOM_USER_ID__ = ${JSON.stringify(id)};\n`) },
+  });
+  const webPolicy = network("web", [{
+    from: [{ ...gateway, podSelector: { matchLabels: { "gateway.networking.k8s.io/gateway-name": gatewayName } } }],
+    ports: port(webPort.containerPort),
+  }], []);
+  const webLabels = componentLabels("web");
+  new k8s.apps.v1.Deployment("web", {
+    metadata: metadata("web"),
+    spec: {
+      replicas: 1, selector: { matchLabels: webLabels },
+      template: {
+        metadata: { labels: webLabels },
+        spec: {
+          automountServiceAccountToken: false, securityContext: podSecurity,
+          volumes: [{ name: "config", configMap: { name: webConfig.metadata.name } }],
+          containers: [{
+            name: "web", image: webImage, ports: [webPort], securityContext: appSecurity,
+            volumeMounts: [{ name: "config", mountPath: "/etc/screenroom/web", readOnly: true }],
+            readinessProbe: { httpGet: { path: "/screenroom-config.js", port: "http" } },
+          }],
+        },
+      },
+    },
+  }, { dependsOn: [webPolicy] });
+  const web = service("web", [webPort]);
+
   const match = (value: string) => ({ path: { type: "PathPrefix", value } });
   new k8s.apiextensions.CustomResource("screenroom-route", {
     apiVersion: "gateway.networking.k8s.io/v1", kind: "HTTPRoute",
@@ -375,6 +406,10 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
           matches: ["GET", "HEAD", "OPTIONS"].map(method => ({ ...match("/playback/v1/media"), method })),
           backendRefs: [{ name: playback!.metadata.name, port: 50054 }],
           timeouts: { request: "0s" },
+        },
+        {
+          matches: ["GET", "HEAD"].map(method => ({ ...match("/"), method })),
+          backendRefs: [{ name: web.metadata.name, port: webPort.containerPort }],
         },
       ],
     },

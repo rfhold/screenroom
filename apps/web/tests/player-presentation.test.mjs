@@ -20,7 +20,11 @@ test('isolated player presentation keeps geometry, dismisses menus and hides onl
       resolveDir: root,
     },
     bundle: true, write: false, format: 'iife', platform: 'browser', conditions: ['browser'],
-    define: { 'import.meta.env.VITE_SCREENROOM_API_ENDPOINT': '""' },
+    define: {
+      'import.meta.env.VITE_SCREENROOM_SAME_ORIGIN': '""',
+      'import.meta.env.VITE_SCREENROOM_API_ENDPOINT': '""',
+      'import.meta.env.VITE_SCREENROOM_USER_ID': '""'
+    },
     plugins: [{ name: 'isolated-player', setup(build) {
       build.onResolve({ filter: /\/core\/client$/ }, () => ({ path: 'client', namespace: 'fixture' }));
       build.onResolve({ filter: /\/core\/playback$/ }, () => ({ path: 'playback', namespace: 'fixture' }));

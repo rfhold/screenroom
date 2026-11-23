@@ -3,7 +3,7 @@ kind: PipelineRun
 metadata:
   name: screenroom-preview
   annotations:
-    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/dd9fb85475775bc68b751aad9bf5d4c66c718d48/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
     pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch in ["main", "refs/heads/main"]'
     pipelinesascode.tekton.dev/max-keep-runs: "2"
 spec:
@@ -62,7 +62,7 @@ spec:
                 git checkout --detach "$REVISION"
                 test "$(git rev-parse HEAD)" = "$REVISION"
                 status=0
-                git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi docker/backend crates migrations .tekton || status=$?
+                git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi docker/backend crates migrations .tekton apps/web || status=$?
                 test "$status" -eq 1 || { echo "private material scan did not pass" >&2; exit 1; }
           params:
             - name: repo-url
@@ -296,8 +296,52 @@ spec:
           - name: sources
             value: '[{"arch":"amd64","image":"$(tasks.index-operator-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.index-operator-arm64.results.image)"}]'
 
+      - name: web-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-web"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: apps/web/Dockerfile}
+          - {name: target, value: web}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: web-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-web"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: apps/web/Dockerfile}
+          - {name: target, value: web}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: web-manifest
+        runAfter: [web-amd64, web-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-web"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.web-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.web-arm64.results.image)"}]'
+
       - name: deploy-preview
-        runAfter: [catalog-manifest, user-manifest, worker-manifest, playback-gateway-manifest, index-operator-manifest]
+        runAfter: [catalog-manifest, user-manifest, worker-manifest, playback-gateway-manifest, index-operator-manifest, web-manifest]
         taskRef: {name: service-pulumi-up-v1}
         params:
           - {name: source-subdir, value: infra/pulumi}
@@ -308,7 +352,8 @@ spec:
               "userImage":"$(tasks.user-manifest.results.image)",
               "workerImage":"$(tasks.worker-manifest.results.image)",
               "playbackGatewayImage":"$(tasks.playback-gateway-manifest.results.image)",
-              "indexOperatorImage":"$(tasks.index-operator-manifest.results.image)"}
+              "indexOperatorImage":"$(tasks.index-operator-manifest.results.image)",
+              "webImage":"$(tasks.web-manifest.results.image)"}
           - {name: authentik-enabled, value: "false"}
           - {name: grafana-enabled, value: "false"}
           - {name: openbao-enabled, value: "false"}

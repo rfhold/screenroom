@@ -5,10 +5,11 @@
   import { OwnedReads } from '../core/owned-reads';
   import { SessionAction, operatorError } from '../core/operator-state';
   import { selectionError, connectionUrlError } from '../core/connection-selection';
+  import { webConfig } from '../core/config';
   let { onSaved }: {onSaved:(result:OperatorSavedConnection)=>void} = $props();
   let client:OperatorClient|undefined, reads:OwnedReads|undefined;
   const owner = new ReadOwner(), listOwner = new ReadOwner();
-  const localUser = import.meta.env.VITE_SCREENROOM_USER_ID || '';
+  const { user_id: localUser } = webConfig();
   const configuredUser = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(localUser);
   let connections = $state<OperatorConnection[]>([]), after = $state<string|null>(null), listing = $state(false), listError = $state('');
   let opened = $state(false), url = $state(''), key = $state(''), discovery = $state<OperatorConnectionDiscovery|null>(null), profile = $state(''), libraries = $state<string[]>([]);

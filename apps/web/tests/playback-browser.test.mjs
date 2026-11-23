@@ -141,7 +141,11 @@ for (const mode of ['mp4', 'hls']) test(`mounted real WASM ${mode} decodes owned
     const result = await build({
       stdin: { contents: `import { mount, unmount } from 'svelte'; import App from './PlaybackTest.svelte'; const app = mount(App, {target:document.body}); window.dispose = () => unmount(app);`, resolveDir: root },
       bundle: true, write: false, format: 'iife', platform: 'browser', conditions: ['browser'],
-      define: { 'import.meta.env.VITE_SCREENROOM_API_ENDPOINT': JSON.stringify(origin), 'import.meta.env.VITE_SCREENROOM_USER_ID': JSON.stringify(id) },
+      define: {
+        'import.meta.env.VITE_SCREENROOM_SAME_ORIGIN': '""',
+        'import.meta.env.VITE_SCREENROOM_API_ENDPOINT': JSON.stringify(origin),
+        'import.meta.env.VITE_SCREENROOM_USER_ID': JSON.stringify(id)
+      },
       plugins: [{ name: 'playback-owned', setup(build) {
         build.onResolve({ filter: /PlaybackTest\.svelte$/ }, () => ({ path: 'wrapper', namespace: 'owned' }));
         build.onLoad({ filter: /.*/, namespace: 'owned' }, () => ({ contents: compile(wrapper, { filename: `${root}/PlaybackTest.svelte`, generate: 'client', css: 'injected' }).js.code, resolveDir: root }));

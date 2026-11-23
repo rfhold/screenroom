@@ -71,7 +71,9 @@ Public artwork URLs must share that origin; backend CORS must permit the exact b
 Jellyfin setup requires the actual enabled local user's UUID; an absent or invalid selector disables setup submission.
 The backend creates that selector once; use the installation descriptor, not a fixed demo identity.
 Vite accepts `SCREENROOM_API_ENDPOINT` and `SCREENROOM_USER_ID` aliases when explicit `VITE_` values are absent.
-Production builds compile these public settings; preview environment changes do not update them.
+Ordinary Vite builds compile these public settings; preview environment changes do not update them.
+The [Pantheon Web image](../../docs/deployment.md) uses the browser origin and a runtime configuration file for the local user selector.
+The image does not include the Vite operator proxy.
 Validated localStorage settings use an origin/endpoint/user/namespace key; failed writes retain in-memory choices and show a warning.
 
 `predev`, `prebuild` and `precheck` run [`scripts/prepare-core.mjs`](scripts/prepare-core.mjs), which checks freshness and rebuilds stale artifacts through the root WASM build script. Cargo checks source changes incrementally, not just output-file existence. Install Rust's `wasm32-unknown-unknown` target and the matching `wasm-bindgen` CLI from the [client API guide](../../docs/client-api.md#build-the-core). Generated JS/types/WASM stay under `target/client-core/wasm`. Vite bundles the imported WASM asset into production output. Generated binaries stay outside Git.

@@ -1,17 +1,19 @@
 # Pantheon deployment
 
-[`infra/pulumi/`](../infra/pulumi/) defines the private backend for two Pantheon stacks. The local Compose workflow remains separate. The Web SPA, website, and native packaging are outside this deployment.
+[`infra/pulumi/`](../infra/pulumi/) defines the private backend and Web SPA for two Pantheon stacks. The local Compose workflow remains separate. This deployment excludes the static website and native packages.
 
 | Stack | Namespace | HTTPS host | Pipeline |
 | --- | --- | --- | --- |
 | `preview` | `screenroom-preview` | `preview-screenroom.holdenitdown.net` | Push to `main` |
 | `prod` | `screenroom` | `screenroom.holdenitdown.net` | Signed `vMAJOR.MINOR.PATCH` tag |
 
-The [Tekton pipelines](../.tekton/) use the shared BuildKit, manifest, promotion, and Pulumi tasks. Preview builds five service images in parallel for `amd64` and `arm64`, then deploys their digests together. Production promotes the same five revision digests without a rebuild. The tag must name an ancestor of `main` and match the workspace version.
+The [Tekton pipelines](../.tekton/) use the shared BuildKit, manifest, promotion, and Pulumi tasks. Preview builds six images in parallel for `amd64` and `arm64`, then deploys their digests together. Production promotes the same revision digests without a rebuild. The tag must name an ancestor of `main` and match the workspace version.
 
-Use the shared Pulumi backend and deployment task. The task expects the stack state record to exist, as it does for sibling projects. For a manual preview, pass `--config` for each immutable image: `catalogImage`, `userImage`, `workerImage`, `playbackGatewayImage`, and `indexOperatorImage`.
+Use the shared Pulumi backend and deployment task. The task expects the stack state record to exist, as it does for sibling projects. For a manual preview, pass `--config` for each immutable image: `catalogImage`, `userImage`, `workerImage`, `playbackGatewayImage`, `indexOperatorImage`, and `webImage`.
 
 The shared HTTPS Gateway terminates TLS and routes directly to catalog, user, and playback over h2c. The worker and index operator have no Gateway routes. Envoy and `/__screenroom_instance` belong to local Compose and do not form part of the Pantheon deployment.
+
+The same host serves the [Web SPA](../apps/web/) at `/` and supports direct navigation to SPA routes. The browser uses its own origin for API and media requests. A mounted configuration file supplies the same local user selector as backend setup. The selector does not authenticate requests. The Web image serves static files only; it returns 404 for `/__operator/` paths and does not run the local Vite proxy.
 
 ## Before activation
 
@@ -33,7 +35,7 @@ The shared HTTPS Gateway terminates TLS and routes directly to catalog, user, an
 
 Setup does not import provider data or copy the local instance's credentials. The operator has no Service or Gateway route. Its maintenance access requires a separate approved procedure.
 
-The first deployment sets no cross-origin browser allowlist. If a separate Web origin enters scope, review an explicit origin allowlist first. Keep the media capability query parameter out of Gateway logs and traces.
+The deployment sets no cross-origin browser allowlist. If a separate Web origin enters scope, review an explicit origin allowlist first. Keep the media capability query parameter out of Gateway logs and traces.
 
 ## Local verification
 

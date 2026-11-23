@@ -2,6 +2,7 @@
   import Hls from 'hls.js';
   import { flushSync, onMount, tick } from 'svelte';
   import { client, newClient, records } from '../core/client';
+  import { webConfig } from '../core/config';
   import { Playback, mediaURL, seconds } from '../core/playback';
   import { registerPlayback } from '../core/playback-lifecycle';
   import PlayerIcon from './PlayerIcon.svelte';
@@ -125,7 +126,7 @@
   let hls: Hls | undefined;
   let installing = false;
   let mediaGeneration = 0;
-  const endpoint = import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051';
+  const { endpoint } = webConfig();
   function detach() {
     mediaGeneration++;
     installing = true;

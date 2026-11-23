@@ -5,6 +5,7 @@ import { collectPages } from './pagination';
 import { writable } from 'svelte/store';
 import { MetadataOperation } from './operation.mjs';
 import { createArtworkLoader } from './artwork';
+import { webConfig } from './config';
 
 let initialized: Promise<unknown> | undefined;
 let instance: Promise<Client> | undefined;
@@ -13,9 +14,7 @@ export function client(): Promise<Client> {
 }
 export async function newClient(): Promise<Client> {
     await (initialized ??= init({ module_or_path: wasmUrl }));
-    const endpoint = import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051';
-    const user_id = import.meta.env.VITE_SCREENROOM_USER_ID || '';
-    return new Client({ endpoint, user_id, timeout_ms: 3000 });
+    return new Client({ ...webConfig(), timeout_ms: 3000 });
 }
 export let libraries: MediaLibrary[] = [];
 export let capabilities: SearchCapabilities | undefined;
@@ -55,7 +54,8 @@ function settingsKey() {
   let namespace = 'default';
   try { namespace = localStorage.getItem('screenroom.settingsNamespace') || namespace; }
   catch { settingsWarning.set(persistenceWarning); }
-  return `screenroom.settings.v1:${JSON.stringify([location.origin, import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051', import.meta.env.VITE_SCREENROOM_USER_ID || '', namespace])}`;
+  const { endpoint, user_id } = webConfig();
+  return `screenroom.settings.v1:${JSON.stringify([location.origin, endpoint, user_id, namespace])}`;
 }
 export async function loadSettings(operation = new MetadataOperation()): Promise<ClientSettings> {
   await operation.read(client);
