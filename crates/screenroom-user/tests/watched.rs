@@ -425,7 +425,11 @@ async fn persisted_watched_engine_and_all_public_reads() {
         },
     ] {
         repository
-            .publish(&binding, &conflicting, Utc::now())
+            .publish(
+                &repository.begin_acquisition(&binding).await.unwrap(),
+                &conflicting,
+                Utc::now(),
+            )
             .await
             .unwrap();
     }
@@ -457,6 +461,7 @@ async fn persisted_watched_engine_and_all_public_reads() {
         Some(false)
     );
 
+    let old_acquisition = repository.begin_acquisition(&binding).await.unwrap();
     support::set_link(&user_pool, alice, "chosen", "changed")
         .await
         .unwrap();
@@ -467,7 +472,7 @@ async fn persisted_watched_engine_and_all_public_reads() {
     assert!(
         repository
             .publish(
-                &binding,
+                &old_acquisition,
                 &provider.acquire_watched(&acquisition).await.unwrap(),
                 Utc::now()
             )

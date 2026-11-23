@@ -243,6 +243,25 @@ END IF;
 END $$;""")
 
 
+def initialize_playback_secrets():
+    script = '''set -eu
+d=/run/screenroom/playback
+test -d "$d" && test ! -L "$d"
+if [ "$(stat -c '%u:%g:%a' "$d")" = '0:0:755' ] && [ -z "$(ls -A "$d")" ]; then
+  chown 10001:10001 "$d"
+  chmod 700 "$d"
+fi
+test "$(stat -c '%u:%g:%a' "$d")" = '10001:10001:700'
+'''
+    compose('run', '--rm', '--no-deps', '--user', '0:0', '--entrypoint', '/bin/sh',
+            'playback-gateway', '-ec', script, capture=True)
+
+
+def playback_ready():
+    compose('exec', '-T', 'playback-gateway', 'curl', '--fail', '--silent',
+            '--max-time', '3', 'http://127.0.0.1:50054/ready', capture=True)
+
+
 def worker_command(command, timeout=1800):
     name = f'{PROJECT}-operation-{uuid.uuid4().hex}'
     try:
@@ -275,9 +294,10 @@ def wait():
             expected = read_config(RUNTIME / 'identity.json')
             if identity != expected or current.get('user', {}).get('id') != installation_user():
                 raise RuntimeError('public identity or RPC mismatch')
+            playback_ready()
             descriptor = dict(expected, userID=installation_user(),
                 clientUpstream='edge:50051', ready=True,
-                checks=dict(native=True, grpcWeb=True, identity=True))
+                checks=dict(native=True, grpcWeb=True, identity=True, playback=True))
             temporary = RUNTIME / f'.descriptor-{uuid.uuid4()}.json'
             temporary.write_text(json.dumps(descriptor, indent=2))
             temporary.replace(RUNTIME / 'descriptor.json')
@@ -438,9 +458,10 @@ def main():
             if build == '1':
                 compose('build', 'catalog')
             initialize_credentials()
+            initialize_playback_secrets()
             compose('run', '--rm', '--no-deps', 'user', 'screenroom-user-init', '--create-missing', '/runtime/users.json')
             provision_operator_role()
-            compose('up', '-d', 'user', 'catalog', 'worker', 'edge')
+            compose('up', '-d', 'user', 'catalog', 'worker', 'playback-gateway', 'edge')
             wait()
         elif args.command == 'initialize':
             initialize_files()
@@ -451,7 +472,7 @@ def main():
         else:
             if args.owner_file and (not args.owner_file.is_file() or args.owner_file.read_text() != PROJECT):
                 raise RuntimeError('teardown owner mismatch')
-            compose('down', '--timeout', '15')
+            compose('down', '--timeout', '75')
             (RUNTIME / 'descriptor.json').unlink(missing_ok=True)
 
 

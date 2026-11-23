@@ -10,6 +10,20 @@ static_resources:
                 "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
                 stat_prefix: public
                 codec_type: AUTO
+                request_headers_timeout: 10s
+                stream_idle_timeout: 60s
+                max_request_headers_kb: 32
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        json_format:
+                          method: "%REQ(:METHOD)%"
+                          path: "%PATH(NQ:PATH)%"
+                          status: "%RESPONSE_CODE%"
+                          flags: "%RESPONSE_FLAGS%"
+                          duration_ms: "%DURATION%"
                 route_config:
                   name: client
                   virtual_hosts:
@@ -26,11 +40,42 @@ static_resources:
                           route: {cluster: catalog, timeout: 60s}
                         - match: {prefix: /screenroom.user.v1.UserService/}
                           route: {cluster: user, timeout: 60s}
+                        - match: {prefix: /screenroom.playback_gateway.v1.PlaybackService/}
+                          route: {cluster: playback, timeout: 35s}
+                        - match:
+                            prefix: /playback/v1/media/
+                            headers:
+                              - name: ":method"
+                                string_match: {safe_regex: {regex: "GET|HEAD|OPTIONS"}}
+                          route: {cluster: playback, timeout: 0s, idle_timeout: 60s}
+                          # Never export media URL spans, including forced/client sampling.
+                          tracing:
+                            client_sampling: {numerator: 0}
+                            random_sampling: {numerator: 0}
+                            overall_sampling: {numerator: 0}
+                          request_headers_to_remove:
+                            - x-envoy-original-path
+                            - x-envoy-decorator-operation
+                            - x-client-trace-id
+                            - x-envoy-force-trace
+                            - traceparent
+                            - tracestate
                 http_filters:
                   - name: envoy.filters.http.router
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
   clusters:
+    - name: playback
+      connect_timeout: 5s
+      type: STRICT_DNS
+      http2_protocol_options: {}
+      load_assignment:
+        cluster_name: playback
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: playback-gateway, port_value: 50054}
     - name: catalog
       connect_timeout: 5s
       type: STRICT_DNS

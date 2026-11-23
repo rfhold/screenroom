@@ -1,4 +1,4 @@
-//! Bounded, read-only Jellyfin catalog and personal-state adapters.
+//! Bounded Jellyfin catalog, personal-state, and private playback adapters.
 
 pub mod catalog_delta;
 pub mod jellyfin;

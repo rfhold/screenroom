@@ -11,6 +11,11 @@ pub mod common {
         include!("generated/screenroom/common/v1/screenroom.common.v1.rs");
     }
 }
+pub mod playback_gateway {
+    pub mod v1 {
+        include!("generated/screenroom/playback_gateway/v1/screenroom.playback_gateway.v1.rs");
+    }
+}
 pub mod user {
     pub mod v1 {
         include!("generated/screenroom/user/v1/screenroom.user.v1.rs");

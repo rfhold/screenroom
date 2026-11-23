@@ -21,6 +21,7 @@ pub async fn sync_binding(
         repository.invalidate(binding).await?;
         return Ok(());
     }
+    let acquisition = repository.begin_acquisition(binding).await?;
     let started = Utc::now();
     match tokio::time::timeout(
         Duration::from_secs(ACQUISITION_SECONDS),
@@ -28,7 +29,7 @@ pub async fn sync_binding(
     )
     .await
     {
-        Ok(Ok(snapshot)) => repository.publish(binding, &snapshot, started).await,
+        Ok(Ok(snapshot)) => repository.publish(&acquisition, &snapshot, started).await,
         Ok(Err(Error::ProfileUnavailable | Error::Unsupported)) => {
             repository.invalidate(binding).await
         }

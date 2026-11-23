@@ -1,3 +1,225 @@
 syntax = "proto3";
 
 package screenroom.playback_gateway.v1;
+
+import "screenroom/common/v1/common.proto";
+
+// Every call requires x-screenroom-user-id selecting an enabled local user, not
+// authenticating one. Except Create, calls also require the session's distinct
+// control capability. Neither capability nor media URL is a provider credential.
+service PlaybackService {
+  rpc CreatePlaybackSession(CreatePlaybackSessionRequest) returns (CreatePlaybackSessionResponse);
+  rpc GetPlaybackSession(GetPlaybackSessionRequest) returns (GetPlaybackSessionResponse);
+  rpc UpdatePlaybackSession(UpdatePlaybackSessionRequest) returns (UpdatePlaybackSessionResponse);
+  rpc ReportPlaybackEvent(ReportPlaybackEventRequest) returns (ReportPlaybackEventResponse);
+  rpc StopPlaybackSession(StopPlaybackSessionRequest) returns (StopPlaybackSessionResponse);
+}
+
+// UNSPECIFIED and unknown enum values are invalid inputs, not defaults.
+enum PlaybackStartPolicy {
+  PLAYBACK_START_POLICY_UNSPECIFIED = 0;
+  PLAYBACK_START_POLICY_RESUME = 1;
+  PLAYBACK_START_POLICY_BEGINNING = 2;
+  PLAYBACK_START_POLICY_POSITION = 3;
+}
+enum PlaybackState {
+  PLAYBACK_STATE_UNSPECIFIED = 0;
+  PLAYBACK_STATE_PREPARING = 1;
+  PLAYBACK_STATE_READY = 2;
+  PLAYBACK_STATE_PLAYING = 3;
+  PLAYBACK_STATE_PAUSED = 4;
+  PLAYBACK_STATE_STOPPING = 5;
+  PLAYBACK_STATE_STOPPED = 6;
+  PLAYBACK_STATE_EXPIRED = 7;
+  PLAYBACK_STATE_FAILED = 8;
+  PLAYBACK_STATE_UNCERTAIN = 9;
+}
+enum PlaybackReportOutcome {
+  PLAYBACK_REPORT_OUTCOME_UNSPECIFIED = 0;
+  PLAYBACK_REPORT_OUTCOME_NOT_SENT = 1;
+  PLAYBACK_REPORT_OUTCOME_PENDING = 2;
+  PLAYBACK_REPORT_OUTCOME_CONFIRMED = 3;
+  PLAYBACK_REPORT_OUTCOME_UNCERTAIN = 4;
+  PLAYBACK_REPORT_OUTCOME_FAILED = 5;
+}
+enum PlaybackEventKind {
+  PLAYBACK_EVENT_KIND_UNSPECIFIED = 0;
+  PLAYBACK_EVENT_KIND_STARTED = 1;
+  PLAYBACK_EVENT_KIND_PROGRESS = 2;
+  PLAYBACK_EVENT_KIND_PAUSED = 3;
+  PLAYBACK_EVENT_KIND_RESUMED = 4;
+  PLAYBACK_EVENT_KIND_SEEKED = 5;
+  PLAYBACK_EVENT_KIND_HEARTBEAT = 6;
+}
+enum PlaybackMethod {
+  PLAYBACK_METHOD_UNSPECIFIED = 0;
+  PLAYBACK_METHOD_DIRECT_PLAY = 1;
+  PLAYBACK_METHOD_DIRECT_STREAM = 2;
+  PLAYBACK_METHOD_TRANSCODE = 3;
+}
+enum PlaybackTrackKind {
+  PLAYBACK_TRACK_KIND_UNSPECIFIED = 0;
+  PLAYBACK_TRACK_KIND_AUDIO = 1;
+  PLAYBACK_TRACK_KIND_SUBTITLE = 2;
+}
+enum PlaybackSubtitleMode {
+  PLAYBACK_SUBTITLE_MODE_UNSPECIFIED = 0;
+  PLAYBACK_SUBTITLE_MODE_WEBVTT = 1;
+  PLAYBACK_SUBTITLE_MODE_BURN_IN = 2;
+  PLAYBACK_SUBTITLE_MODE_UNAVAILABLE = 3;
+}
+enum PlaybackErrorCode {
+  PLAYBACK_ERROR_CODE_UNSPECIFIED = 0;
+  PLAYBACK_ERROR_CODE_PROFILE_REQUIRED = 1;
+  PLAYBACK_ERROR_CODE_PROFILE_CHANGED = 2;
+  PLAYBACK_ERROR_CODE_SOURCE_UNAVAILABLE = 3;
+  PLAYBACK_ERROR_CODE_ITEM_UNAVAILABLE = 4;
+  PLAYBACK_ERROR_CODE_UNSUPPORTED_MEDIA = 5;
+  PLAYBACK_ERROR_CODE_TRANSCODING_UNAVAILABLE = 6;
+  PLAYBACK_ERROR_CODE_PLAYBACK_AUTHORIZATION_UNAVAILABLE = 7;
+  PLAYBACK_ERROR_CODE_PLAYBACK_CONFLICT = 8;
+  PLAYBACK_ERROR_CODE_SESSION_EXPIRED = 9;
+  PLAYBACK_ERROR_CODE_OPERATION_CONFLICT = 10;
+  PLAYBACK_ERROR_CODE_CAPACITY_EXHAUSTED = 11;
+  PLAYBACK_ERROR_CODE_UPSTREAM_UNAVAILABLE = 12;
+}
+
+// Conservative observations only, not arbitrary provider device-profile JSON.
+// False means unsupported or unknown. The server owns profile construction.
+message PlaybackClientCapabilities {
+  bool mp4 = 1;
+  bool h264 = 2;
+  bool aac = 3;
+  bool native_hls = 4;
+  bool mse_hls = 5;
+  bool webvtt = 6;
+}
+message PlaybackMediaSource {
+  // Session-scoped opaque choice, never a provider media-source identifier.
+  string id = 1;
+  string display_name = 2;
+}
+message PlaybackTrack {
+  // Session-scoped opaque choice, never an unchecked provider stream index.
+  string id = 1;
+  PlaybackTrackKind kind = 2;
+  string display_name = 3;
+  optional string language = 4;
+  bool selected = 5;
+  bool available = 6;
+  // Present for subtitle tracks only.
+  optional PlaybackSubtitleMode subtitle_mode = 7;
+  // Present only for an available WebVTT rendition, under gateway media routes.
+  optional string media_url = 8;
+}
+message PlaybackTrackChoices {
+  // Absent retains the current choice. Subtitle off is explicit and mutually
+  // exclusive with subtitle_track_id. All IDs must belong to this session.
+  optional string audio_track_id = 1;
+  optional string subtitle_track_id = 2;
+  bool subtitles_off = 3;
+}
+message PlaybackTransport {
+  PlaybackMethod method = 1;
+  string mime_type = 2;
+  // Gateway URL with a media-only capability, not the control capability.
+  string media_url = 3;
+  uint32 revision = 4;
+  // All *_ms fields are nonnegative decimal millisecond strings. Parse with
+  // checked integer arithmetic; never pass through JavaScript Number or ticks.
+  optional string duration_ms = 5;
+  string start_position_ms = 6;
+  string timeline_offset_ms = 7;
+}
+message PlaybackOperation {
+  // Mutation UUID; absent when reporting an ordered event instead.
+  optional string request_id = 1;
+  optional uint32 sequence = 2;
+  PlaybackReportOutcome outcome = 3;
+}
+message PlaybackSession {
+  string session_id = 1;
+  // At least 256 random bits. Memory only; never log or persist in clients.
+  string control_capability = 2;
+  PlaybackState state = 3;
+  PlaybackMediaSource selected_source = 4;
+  repeated PlaybackTrack tracks = 5;
+  // Absent while preparing, after revocation, or when no transport is ready.
+  PlaybackTransport transport = 6;
+  uint32 transport_revision = 7;
+  uint32 last_accepted_sequence = 8;
+  PlaybackReportOutcome report_outcome = 9;
+  // RFC 3339 UTC timestamps, not numeric JavaScript timestamps.
+  string lease_expires_at = 10;
+  string expires_at = 11;
+  // Pending/uncertain work must remain visible; absence means no such work.
+  PlaybackOperation pending_operation = 12;
+  bool cleanup_pending = 13;
+  optional PlaybackErrorCode failure_code = 14;
+}
+message CreatePlaybackSessionRequest {
+  // UUID receipt: identical normalized body reuses the result, changed body
+  // conflicts. Item must resolve to an available Movie/Episode in this scope.
+  string request_id = 1;
+  string item_id = 2;
+  screenroom.common.v1.SourceLibraryScope scope = 3;
+  PlaybackClientCapabilities client_capabilities = 4;
+  PlaybackStartPolicy start_policy = 5;
+  // Required exactly for POSITION. RESUME reads current provider personal state;
+  // BEGINNING starts at zero. Catalog percentages are never seek positions.
+  optional string position_ms = 6;
+}
+message CreatePlaybackSessionResponse {
+  PlaybackSession session = 1;
+}
+message GetPlaybackSessionRequest {
+  string session_id = 1;
+  string control_capability = 2;
+}
+message GetPlaybackSessionResponse {
+  PlaybackSession session = 1;
+}
+message UpdatePlaybackSessionRequest {
+  string session_id = 1;
+  string control_capability = 2;
+  string request_id = 3;
+  uint32 expected_transport_revision = 4;
+  string position_ms = 5;
+  PlaybackTrackChoices track_choices = 6;
+  // At most one controlled compatible-transcode fallback, never a retry loop.
+  optional bool compatible_transcode_fallback = 7;
+}
+message UpdatePlaybackSessionResponse {
+  PlaybackSession session = 1;
+}
+message ReportPlaybackEventRequest {
+  string session_id = 1;
+  string control_capability = 2;
+  uint32 transport_revision = 3;
+  // Ordered by player events, not by position. Backward seeks remain valid.
+  uint32 sequence = 4;
+  PlaybackEventKind kind = 5;
+  string position_ms = 6;
+  bool paused = 7;
+  bool muted = 8;
+  // Finite in [0, 1].
+  double volume = 9;
+}
+message ReportPlaybackEventResponse {
+  uint32 accepted_sequence = 1;
+  PlaybackReportOutcome report_outcome = 2;
+  PlaybackSession session = 3;
+}
+message StopPlaybackSessionRequest {
+  string session_id = 1;
+  string control_capability = 2;
+  string request_id = 3;
+  uint32 final_sequence = 4;
+  uint32 transport_revision = 5;
+  string position_ms = 6;
+  // Client reason label only; never an upstream error body or private locator.
+  string stop_reason = 7;
+}
+message StopPlaybackSessionResponse {
+  PlaybackSession session = 1;
+}

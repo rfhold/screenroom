@@ -1,4 +1,4 @@
-//! Backend-only read access. No retries, writes, playback, or authoritative removal evidence.
+//! Backend-only provider access. Metadata reads and private playback use separate transports.
 
 use crate::MediaKind;
 use reqwest::{Client, Url, header};
@@ -12,6 +12,7 @@ use std::{
 mod connection;
 mod delta;
 mod network;
+pub mod playback;
 mod revision;
 mod secret;
 mod watched;

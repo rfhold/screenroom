@@ -11,6 +11,7 @@ pub use queue_admin::{
     JobSummary, QueueBlockers, QueueObservation, QueueSnapshot, RedriveEligibility,
 };
 pub mod media;
+pub mod playback;
 pub mod search;
 pub mod storage;
 pub mod watched;

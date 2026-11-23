@@ -82,6 +82,26 @@ services:
       SCREENROOM_EMBEDDING_DIMENSIONS:
       SCREENROOM_EMBEDDING_REVISION:
       SCREENROOM_EMBEDDING_API_KEY:
+  playback-gateway:
+    <<: *backend
+    command: [screenroom-playback-gateway]
+    stop_grace_period: 75s
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --max-time, "3", http://127.0.0.1:50054/ready]
+      interval: 5s
+      timeout: 4s
+      retries: 24
+    volumes:
+      - backend-jellyfin-credentials:/run/screenroom/credentials:ro
+      - backend-playback-secrets:/run/screenroom/playback
+    environment:
+      <<: *common
+      DATABASE_URL: postgres://playback_runtime:playback-local-only@postgres/screenroom
+      SCREENROOM_PLAYBACK_GATEWAY_LISTEN: 0.0.0.0:50054
+      SCREENROOM_PLAYBACK_API_ORIGIN: ${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
+      SCREENROOM_PLAYBACK_GATEWAY_CORS_ORIGINS: http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:4176,http://localhost:4176,http://127.0.0.1:5173,http://localhost:5173
+      SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY: /run/screenroom/credentials
+      SCREENROOM_PLAYBACK_SECRET_DIRECTORY: /run/screenroom/playback
   index-operator:
     image: ${SCREENROOM_OPERATOR_IMAGE:-screenroom-backend:local}
     build: {context: ., dockerfile: docker/backend/Dockerfile}
@@ -116,3 +136,4 @@ volumes:
   backend-garage-meta:
   backend-garage-data:
   backend-jellyfin-credentials:
+  backend-playback-secrets:

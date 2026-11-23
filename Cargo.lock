@@ -2791,6 +2791,7 @@ dependencies = [
 name = "screenroom-catalog-adapter"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "libc",
  "reqwest 0.12.28",
  "screenroom-observability",
@@ -2880,11 +2881,25 @@ dependencies = [
 name = "screenroom-playback-gateway"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "bytes",
+ "chrono",
+ "futures-util",
+ "hmac 0.12.1",
+ "opentelemetry",
+ "screenroom-backend",
+ "screenroom-catalog-adapter",
  "screenroom-observability",
+ "screenroom-proto",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-web",
+ "tower",
  "tower-http",
  "tracing",
 ]
