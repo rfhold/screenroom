@@ -1,0 +1,6 @@
+name: screenroom
+runtime:
+  name: nodejs
+  options:
+    packagemanager: bun
+description: Private Screenroom backend deployment on Pantheon

@@ -1,0 +1,328 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: screenroom-preview
+  annotations:
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
+    pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch in ["main", "refs/heads/main"]'
+    pipelinesascode.tekton.dev/max-keep-runs: "2"
+spec:
+  taskRunSpecs:
+    - pipelineTaskName: deploy-preview
+      podTemplate:
+        nodeSelector:
+          kubernetes.io/arch: amd64
+  timeouts:
+    pipeline: 2h0m0s
+  params:
+    - name: repo-url
+      value: '{{ repo_url }}'
+    - name: revision
+      value: '{{ revision }}'
+    - name: base-image
+      value: '{{ CONTAINER_REGISTRY }}/{{ repo_owner }}/screenroom'
+  pipelineSpec:
+    params:
+      - name: repo-url
+        type: string
+      - name: revision
+        type: string
+      - name: base-image
+        type: string
+    workspaces:
+      - name: source
+      - name: git-credentials
+    tasks:
+      - name: fetch-repository
+        taskSpec:
+          workspaces:
+            - name: source
+            - name: git-credentials
+          steps:
+            - name: clone
+              image: docker.io/alpine/git:2.49.1@sha256:c0280cf9572316299b08544065d3bf35db65043d5e3963982ec50647d2746e26
+              workingDir: $(workspaces.source.path)
+              env:
+                - name: REPOSITORY
+                  value: $(params.repo-url)
+                - name: REVISION
+                  value: $(params.revision)
+              script: |
+                #!/bin/sh
+                set -eu
+                case "$REPOSITORY" in
+                  https://git.holdenitdown.net/rfhold/screenroom|https://git.holdenitdown.net/rfhold/screenroom.git) ;;
+                  *) exit 1 ;;
+                esac
+                test "${#REVISION}" -eq 40
+                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
+                cp "$(workspaces.git-credentials.path)/.gitconfig" /root/.gitconfig
+                cp "$(workspaces.git-credentials.path)/.git-credentials" /root/.git-credentials
+                git clone --no-checkout "$REPOSITORY" .
+                git checkout --detach "$REVISION"
+                test "$(git rev-parse HEAD)" = "$REVISION"
+                status=0
+                git grep -q -E 'BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|AKIA[0-9A-Z]{16}' -- infra/pulumi docker/backend crates migrations .tekton || status=$?
+                test "$status" -eq 1 || { echo "private material scan did not pass" >&2; exit 1; }
+          params:
+            - name: repo-url
+              type: string
+            - name: revision
+              type: string
+        params:
+          - {name: repo-url, value: "$(params.repo-url)"}
+          - {name: revision, value: "$(params.revision)"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: catalog-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-catalog"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: catalog}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: catalog-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-catalog"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: catalog}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: user-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-user"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: user}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: user-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-user"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: user}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: worker-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-worker"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: worker}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: worker-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-worker"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: worker}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: playback-gateway-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-playback-gateway"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: playback-gateway}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: playback-gateway-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-playback-gateway"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: playback-gateway}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: index-operator-amd64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-index-operator"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: amd64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_AMD64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: index-operator}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: index-operator-arm64
+        runAfter: [fetch-repository]
+        taskRef: {name: service-build-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-index-operator"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: arch, value: arm64}
+          - {name: builder-address, value: "tcp://{{ BUILDKIT_ARM64_ADDR }}"}
+          - {name: context, value: "."}
+          - {name: dockerfile, value: docker/backend/Dockerfile}
+          - {name: target, value: index-operator}
+          - {name: revision-arg, value: REVISION}
+          - {name: expected-user, value: "10001:10001"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: catalog-manifest
+        runAfter: [catalog-amd64, catalog-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-catalog"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.catalog-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.catalog-arm64.results.image)"}]'
+
+      - name: user-manifest
+        runAfter: [user-amd64, user-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-user"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.user-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.user-arm64.results.image)"}]'
+
+      - name: worker-manifest
+        runAfter: [worker-amd64, worker-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-worker"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.worker-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.worker-arm64.results.image)"}]'
+
+      - name: playback-gateway-manifest
+        runAfter: [playback-gateway-amd64, playback-gateway-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-playback-gateway"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.playback-gateway-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.playback-gateway-arm64.results.image)"}]'
+
+      - name: index-operator-manifest
+        runAfter: [index-operator-amd64, index-operator-arm64]
+        taskRef: {name: service-manifest-v1}
+        params:
+          - {name: repository, value: "$(params.base-image)-index-operator"}
+          - {name: revision, value: "$(params.revision)"}
+          - {name: expected-user, value: "10001:10001"}
+          - name: sources
+            value: '[{"arch":"amd64","image":"$(tasks.index-operator-amd64.results.image)"},{"arch":"arm64","image":"$(tasks.index-operator-arm64.results.image)"}]'
+
+      - name: deploy-preview
+        runAfter: [catalog-manifest, user-manifest, worker-manifest, playback-gateway-manifest, index-operator-manifest]
+        taskRef: {name: service-pulumi-up-v1}
+        params:
+          - {name: source-subdir, value: infra/pulumi}
+          - {name: stack, value: preview}
+          - name: image-config
+            value: >-
+              {"catalogImage":"$(tasks.catalog-manifest.results.image)",
+              "userImage":"$(tasks.user-manifest.results.image)",
+              "workerImage":"$(tasks.worker-manifest.results.image)",
+              "playbackGatewayImage":"$(tasks.playback-gateway-manifest.results.image)",
+              "indexOperatorImage":"$(tasks.index-operator-manifest.results.image)"}
+          - {name: authentik-enabled, value: "false"}
+          - {name: grafana-enabled, value: "false"}
+          - {name: openbao-enabled, value: "false"}
+        workspaces:
+          - {name: source, workspace: source}
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: shared-fs
+          resources:
+            requests:
+              storage: 20Gi
+    - name: git-credentials
+      secret:
+        secretName: '{{ git_auth_secret }}'

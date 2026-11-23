@@ -1,0 +1,18 @@
+config:
+  kubernetes:context: pantheon
+  screenroom:namespace: screenroom-preview
+  screenroom:hostname: preview-screenroom.holdenitdown.net
+  screenroom:protectData: "false"
+  screenroom:jellyfinPodLabels:
+    app: jellyfin
+  screenroom:databaseImage: ghcr.io/cloudnative-pg/postgresql:18.0-system-trixie@sha256:8221c6455c5b90bcdc739ebf2bb977fcb9525db4f3ff2339dd88054f920b1413
+  screenroom:s3Endpoint: https://s3.pantheon.holdenitdown.net
+  screenroom:s3EgressCidr: 172.16.3.52/32
+  screenroom:s3Region: us-east-1
+  screenroom:storageClass: database
+  screenroom:databaseStorageSize: 10Gi
+  screenroom:bucketStorageClass: default-bucket
+  screenroom:credentialStorageClass: shared-fs
+  screenroom:backupRetention: 14d
+  screenroom:backupSchedule: 0 0 2 * * *
+encryptionsalt: v1:Vme/yzxqCjQ=:v1:HE7iyX7e6GruYP7E:1h7E+fPRMlQsnX6Ja6RQ80MM0wdmVw==

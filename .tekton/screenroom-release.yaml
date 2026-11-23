@@ -1,0 +1,126 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  name: screenroom-release
+  annotations:
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-promote-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
+    pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch.matches("^refs/tags/v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")'
+    pipelinesascode.tekton.dev/max-keep-runs: "10"
+spec:
+  taskRunSpecs:
+    - pipelineTaskName: deploy-production
+      podTemplate:
+        nodeSelector:
+          kubernetes.io/arch: amd64
+  timeouts:
+    pipeline: 2h0m0s
+  params:
+    - {name: revision, value: '{{ revision }}'}
+    - {name: source-branch, value: '{{ source_branch }}'}
+  pipelineSpec:
+    params:
+      - {name: revision, type: string}
+      - {name: source-branch, type: string}
+    workspaces:
+      - name: source
+      - name: git-credentials
+    tasks:
+      - name: validate-release
+        taskSpec:
+          params:
+            - {name: revision, type: string}
+            - {name: source-branch, type: string}
+          results:
+            - name: tag
+          workspaces:
+            - name: source
+            - name: git-credentials
+          volumes:
+            - name: trusted-signers
+              secret:
+                secretName: screenroom-release-trusted-signers
+          steps:
+            - name: verify
+              image: cr.holdenitdown.net/rfhold/general-ci:latest
+              imagePullPolicy: Always
+              workingDir: $(workspaces.source.path)
+              env:
+                - {name: REVISION, value: "$(params.revision)"}
+                - {name: SOURCE_BRANCH, value: "$(params.source-branch)"}
+              volumeMounts:
+                - {name: trusted-signers, mountPath: /etc/release-signers, readOnly: true}
+              script: |
+                #!/bin/sh
+                set -eu
+                test "${#REVISION}" -eq 40
+                case "$REVISION" in *[!0-9a-f]*|'') exit 1 ;; esac
+                case "$SOURCE_BRANCH" in refs/tags/v*) tag="${SOURCE_BRANCH#refs/tags/}" ;; *) exit 1 ;; esac
+                printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+                cp "$(workspaces.git-credentials.path)/.gitconfig" /root/.gitconfig
+                cp "$(workspaces.git-credentials.path)/.git-credentials" /root/.git-credentials
+                git clone --no-checkout https://git.holdenitdown.net/rfhold/screenroom.git .
+                git fetch origin "refs/tags/$tag:refs/tags/$tag"
+                git merge-base --is-ancestor "$REVISION" refs/remotes/origin/main
+                test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$REVISION"
+                test "$(git cat-file -t "refs/tags/$tag")" = tag
+                export GNUPGHOME
+                GNUPGHOME=$(mktemp -d)
+                trap 'rm -r -- "$GNUPGHOME"' EXIT
+                gpg --batch --no-autostart --import /etc/release-signers/signing-key.asc
+                git -c gpg.format=openpgp -c gpg.program=gpg verify-tag "refs/tags/$tag"
+                git checkout --detach "$REVISION"
+                test "$(git rev-parse HEAD)" = "$REVISION"
+                awk -v expected="${tag#v}" '
+                  /^\[/ { package = ($0 == "[workspace.package]"); next }
+                  package && /^version[[:space:]]*=/ {
+                    count++
+                    if ($0 != "version = \"" expected "\"") exit 1
+                  }
+                  END { if (count != 1) exit 1 }
+                ' Cargo.toml
+                printf '%s' "$tag" > "$(results.tag.path)"
+        params:
+          - {name: revision, value: "$(params.revision)"}
+          - {name: source-branch, value: "$(params.source-branch)"}
+        workspaces:
+          - {name: source, workspace: source}
+          - {name: git-credentials, workspace: git-credentials}
+
+      - name: promote-release
+        runAfter: [validate-release]
+        taskRef: {name: service-promote-v1}
+        params:
+          - {name: revision, value: "$(params.revision)"}
+          - {name: version, value: "$(tasks.validate-release.results.tag)"}
+          - name: images
+            value: >-
+              [{"key":"catalogImage","repository":"cr.holdenitdown.net/rfhold/screenroom-catalog","platforms":["amd64","arm64"],"user":"10001:10001"},
+              {"key":"userImage","repository":"cr.holdenitdown.net/rfhold/screenroom-user","platforms":["amd64","arm64"],"user":"10001:10001"},
+              {"key":"workerImage","repository":"cr.holdenitdown.net/rfhold/screenroom-worker","platforms":["amd64","arm64"],"user":"10001:10001"},
+              {"key":"playbackGatewayImage","repository":"cr.holdenitdown.net/rfhold/screenroom-playback-gateway","platforms":["amd64","arm64"],"user":"10001:10001"},
+              {"key":"indexOperatorImage","repository":"cr.holdenitdown.net/rfhold/screenroom-index-operator","platforms":["amd64","arm64"],"user":"10001:10001"}]
+
+      - name: deploy-production
+        runAfter: [promote-release]
+        taskRef: {name: service-pulumi-up-v1}
+        params:
+          - {name: source-subdir, value: infra/pulumi}
+          - {name: stack, value: prod}
+          - {name: image-config, value: "$(tasks.promote-release.results.images)"}
+          - {name: authentik-enabled, value: "false"}
+          - {name: grafana-enabled, value: "false"}
+          - {name: openbao-enabled, value: "false"}
+        workspaces:
+          - {name: source, workspace: source}
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteMany]
+          storageClassName: shared-fs
+          resources:
+            requests:
+              storage: 20Gi
+    - name: git-credentials
+      secret:
+        secretName: '{{ git_auth_secret }}'
