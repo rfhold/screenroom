@@ -648,8 +648,18 @@ impl Client {
         {
             self.channel
                 .get_or_try_init(|| async {
-                    tonic::transport::Endpoint::from_shared(self.config.endpoint.clone())
-                        .map_err(|e| invalid(e.to_string()))?
+                    use tonic::transport::{ClientTlsConfig, Endpoint};
+
+                    let endpoint = Endpoint::from_shared(self.config.endpoint.clone())
+                        .map_err(|e| invalid(e.to_string()))?;
+                    let endpoint = if endpoint.uri().scheme_str() == Some("https") {
+                        endpoint
+                            .tls_config(ClientTlsConfig::new().with_webpki_roots())
+                            .map_err(|e| invalid(e.to_string()))?
+                    } else {
+                        endpoint
+                    };
+                    endpoint
                         .connect_timeout(std::time::Duration::from_millis(budget.into()))
                         .connect()
                         .await
@@ -1003,6 +1013,43 @@ mod wasm;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    #[test]
+    fn native_rpc_transport_selects_tls_by_scheme() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            use std::time::Duration;
+            use tokio::io::AsyncReadExt;
+
+            for scheme in ["http", "https"] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let client = Client::new(ClientConfig {
+                    endpoint: format!("{scheme}://{}", listener.local_addr().unwrap()),
+                    user_id: String::new(),
+                    timeout_ms: 1000,
+                })
+                .unwrap();
+                let read_prefix = async {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut prefix = [0; 6];
+                    stream.read_exact(&mut prefix).await.unwrap();
+                    prefix
+                };
+                let (transport, prefix) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(client.transport(), read_prefix)
+                })
+                .await
+                .unwrap();
+                if scheme == "https" {
+                    assert_eq!(prefix[0], 0x16); // TLS handshake record
+                    assert_eq!(prefix[5], 0x01); // ClientHello
+                    assert!(matches!(transport, Err(ClientError::Unavailable { .. })));
+                } else {
+                    assert_eq!(&prefix, b"PRI * ");
+                    assert!(transport.is_ok());
+                }
+            }
+        });
+    }
+
     #[test]
     fn cancellation_after_artwork_transport_cannot_populate_cache() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {

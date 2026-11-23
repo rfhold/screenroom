@@ -54,25 +54,28 @@ Browser Back/Forward restore bounded in-memory catalog/search pages and view pos
 The shared layout loads global styles on every route. Static hosts must serve the generated `index.html` fallback for deep routes.
 
 Use Node `^22.17.0 || >=24.0.0` and pnpm `12.18.0` from the root package manifest.
-Run these commands from the repository root:
+For local development with the default Compose backend port, run these commands from the repository root:
 
 ```sh
 pnpm install --frozen-lockfile
 # In a separate terminal, from the repository root:
 bash scripts/backend.sh up
 # Then:
-pnpm --filter @screenroom/web dev
+VITE_SCREENROOM_API_ENDPOINT=http://127.0.0.1:50051 pnpm --filter @screenroom/web dev
 ```
 
 Backend startup requires explicit approval and the [backend prerequisites](../../docs/backend.md#persistent-local-instance).
-The default API endpoint is `http://127.0.0.1:50051`. `VITE_SCREENROOM_API_ENDPOINT` selects another approved instance origin.
-Public artwork URLs must share that origin; backend CORS must permit the exact browser origin.
+Standalone Web defaults to `https://preview-screenroom.holdenitdown.net`. `VITE_SCREENROOM_API_ENDPOINT` selects another approved instance origin.
+Public artwork URLs must share the API origin.
+If the standalone app uses a different origin from the API, the backend must allow the app's exact origin through CORS.
+The preview deployment sets no cross-origin browser allowlist.
 `VITE_SCREENROOM_USER_ID` selects a local UUID, not authentication. Empty means anonymous catalog access.
 Jellyfin setup requires the actual enabled local user's UUID; an absent or invalid selector disables setup submission.
 The backend creates that selector once; use the installation descriptor, not a fixed demo identity.
 Vite accepts `SCREENROOM_API_ENDPOINT` and `SCREENROOM_USER_ID` aliases when explicit `VITE_` values are absent.
 Ordinary Vite builds compile these public settings; preview environment changes do not update them.
-The [Pantheon Web image](../../docs/deployment.md) uses the browser origin and a runtime configuration file for the local user selector.
+The [Pantheon Web image](../../docs/deployment.md) sets `VITE_SCREENROOM_SAME_ORIGIN=1` and uses the browser origin instead of the standalone endpoint.
+Its runtime configuration file supplies the local user selector and also selects the browser origin.
 The shared Gateway routes operator RPCs directly to the operator service.
 Validated localStorage settings use an origin/endpoint/user/namespace key; failed writes retain in-memory choices and show a warning.
 

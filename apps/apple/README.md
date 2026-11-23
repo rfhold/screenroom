@@ -32,8 +32,9 @@ profile and target options, resolved active/nightly toolchains, Xcode/compiler/S
 and generated products. Changed inputs or replaced products trigger preparation again.
 
 For manual runs, use an approved persistent instance from the [backend guide](../../docs/backend.md#persistent-local-instance).
-The app defaults to `http://127.0.0.1:50051`. Override it with `SCREENROOM_API_ENDPOINT`
-or the launch arguments `--SCREENROOM_API_ENDPOINT http://127.0.0.1:<port>`.
+All builds default to `https://preview-screenroom.holdenitdown.net`.
+Set the `SCREENROOM_API_ENDPOINT` environment variable to override the default.
+The launch arguments `--SCREENROOM_API_ENDPOINT <origin>` take precedence over the environment variable.
 `SCREENROOM_USER_ID` (or the matching launch argument) selects an enabled local UUID; it is not authentication.
 The selector defaults to empty. Use the UUID from the configured installation; no demo-user fallback exists. Web setup owns provider credentials and initial connection configuration. Native clients consume the public core only.
 `SCREENROOM_E2E_SETTINGS_NAMESPACE` isolates local settings files, not backend users.

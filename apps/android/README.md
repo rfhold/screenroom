@@ -119,16 +119,17 @@ Install the root helper's Rust targets and Android NDK r29 before the first buil
 Run `bash scripts/test-build-core-cache.sh` to check cache invalidation with mock compilers and no native cross-build.
 JNA 5.17.0 is packaged as an AAR.
 
-Debug apps default to `http://127.0.0.1:50051`. Launch intent string extras `SCREENROOM_API_ENDPOINT` and
+All mobile and TV builds default to `https://preview-screenroom.holdenitdown.net`.
+Launch intent string extras `SCREENROOM_API_ENDPOINT` and
 `SCREENROOM_USER_ID` override the endpoint and local user UUID selector. The selector is not authentication.
 The selector defaults to empty. Supply the configured installation UUID; no demo-user fallback exists. Provider setup belongs to the Web app, not a native credential form.
 `SCREENROOM_E2E_SETTINGS_NAMESPACE` selects a local preference namespace, not a backend user.
 Android validates the endpoint before core construction because native sockets bypass Android network security configuration.
-Release builds require HTTPS. Their default HTTP endpoint displays a configuration error and never creates a core client.
+Release builds require HTTPS.
 Debug builds permit HTTP only for the exact hosts `127.0.0.1` and `localhost`; IPv6 loopback is not enabled.
 Both build types reject credentials, paths, query strings, fragments, and malformed hosts.
 Refresh restarts active search and artwork reads without a navigation, query, or focus reset.
-For an approved backend instance, use `adb -s <serial> reverse tcp:50051 tcp:50051` so artwork shares the API origin.
+For a debug override of `http://127.0.0.1:50051`, use `adb -s <serial> reverse tcp:50051 tcp:50051` so artwork shares the API origin.
 For an alternate backend port, use that same port on both sides of ADB reverse.
 
 ## E2E suite

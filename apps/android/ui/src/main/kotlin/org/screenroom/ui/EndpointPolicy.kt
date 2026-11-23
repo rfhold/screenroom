@@ -2,6 +2,8 @@ package org.screenroom.ui
 
 import java.net.URI
 
+const val DEFAULT_API_ENDPOINT = "https://preview-screenroom.holdenitdown.net"
+
 internal fun endpointError(endpoint: String, debug: Boolean): String? {
     val uri = try { URI(endpoint) } catch (_: Exception) { return "Invalid API endpoint." }
     val scheme = uri.scheme?.lowercase()

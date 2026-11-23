@@ -10,7 +10,7 @@ export function webConfig() {
     return { endpoint: window.location.origin, user_id: selector ?? '' };
   }
   return {
-    endpoint: import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051',
+    endpoint: import.meta.env.VITE_SCREENROOM_API_ENDPOINT || 'https://preview-screenroom.holdenitdown.net',
     user_id: import.meta.env.VITE_SCREENROOM_USER_ID || ''
   };
 }

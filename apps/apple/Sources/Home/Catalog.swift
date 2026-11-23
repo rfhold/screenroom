@@ -653,7 +653,7 @@ final class CatalogStore {
             return env[name] ?? fallback
         }
         do {
-            let endpoint = config("SCREENROOM_API_ENDPOINT", "http://127.0.0.1:50051")
+            let endpoint = config("SCREENROOM_API_ENDPOINT", "https://preview-screenroom.holdenitdown.net")
             try Self.validateEndpoint(endpoint)
             let context = ClientConfig(endpoint: endpoint, userId: config("SCREENROOM_USER_ID", ""), timeoutMs: 5000)
             let reads = try Client(config: context)

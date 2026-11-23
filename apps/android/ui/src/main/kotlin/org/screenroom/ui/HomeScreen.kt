@@ -90,7 +90,7 @@ private object NearestVisibleFocus : BringIntoViewSpec {
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-fun HomeScreen(television: Boolean = false, endpoint: String = "http://127.0.0.1:50051", userId: String = "", settingsNamespace: String = "default", debug: Boolean = false, settings: SettingsStore? = null, registerBack: (() -> Boolean) -> Unit = {}) {
+fun HomeScreen(television: Boolean = false, endpoint: String = DEFAULT_API_ENDPOINT, userId: String = "", settingsNamespace: String = "default", debug: Boolean = false, settings: SettingsStore? = null, registerBack: (() -> Boolean) -> Unit = {}) {
     val configurationError = remember(endpoint, debug) { endpointError(endpoint, debug) }
     if (configurationError != null) {
         Column(Modifier.fillMaxSize().background(LocalScreenroomColors.current.background).padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {

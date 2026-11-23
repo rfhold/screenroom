@@ -60,7 +60,9 @@ bash scripts/backend.sh wait
 ```
 
 The [backend guide](backend.md#persistent-local-instance) defines dependencies, lifecycle ownership, model configuration, and non-destructive restart behavior.
-Clients default to `http://127.0.0.1:50051`. Public artwork URLs must use that same configured origin.
+Native apps and standalone Web builds default to `https://preview-screenroom.holdenitdown.net`. Deployed Web builds use their own origin.
+To use the local instance, set the platform's endpoint override. Use `http://127.0.0.1:50051` where the platform allows loopback HTTP; Apple and Android release builds require HTTPS.
+Public artwork URLs must use the configured API origin.
 Standalone client suites attach to the persistent descriptor; they do not start a substitute API server.
 Loopback addresses refer to the client device itself. Emulator, container, and physical-device routes require their own reachable address.
 The app guides own those routes and platform cleartext exceptions.
@@ -95,7 +97,7 @@ Create one core `Client` with an explicit `ClientConfig`:
 
 | Field | Contract |
 | --- | --- |
-| `endpoint` | HTTP(S) origin without credentials, path, query, fragment, or trailing slash; manual loopback default: `http://127.0.0.1:50051`. |
+| `endpoint` | Required HTTP(S) origin without credentials, path, query, fragment, or trailing slash. Native HTTPS RPCs verify the server certificate against WebPKI roots. |
 | `user_id` | Empty for anonymous catalog reads, otherwise a trusted-local UUID selector. |
 | `timeout_ms` | Required deadline from 1 through 120000 milliseconds per network operation. |
 

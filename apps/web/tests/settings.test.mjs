@@ -14,7 +14,7 @@ test('load migrates retired settings without losing scope or filters; saves rema
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/lib/core/client.ts', import.meta.url))],
     bundle: true, write: false, format: 'esm', platform: 'node',
-    define: { 'import.meta.env': '{}' },
+    define: { 'import.meta.env': JSON.stringify({ VITE_SCREENROOM_API_ENDPOINT: 'http://127.0.0.1:50051' }) },
     plugins: [{ name: 'settings-core', setup(build) {
       build.onResolve({ filter: /screenroom_client_core/ }, args => ({ path: args.path, namespace: 'fixture' }));
       build.onLoad({ filter: /.*/, namespace: 'fixture' }, ({ path }) => ({ contents: path.endsWith('?url')

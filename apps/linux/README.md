@@ -103,7 +103,7 @@ These lifecycle commands require explicit approval and the [backend prerequisite
 In another terminal:
 
 ```sh
-cargo run --manifest-path apps/linux/Cargo.toml --locked
+SCREENROOM_API_ENDPOINT=http://127.0.0.1:50051 cargo run --manifest-path apps/linux/Cargo.toml --locked
 cargo fmt --manifest-path apps/linux/Cargo.toml --all -- --check
 cargo check --manifest-path apps/linux/Cargo.toml --locked
 cargo test --manifest-path apps/linux/Cargo.toml --locked --bin screenroom-linux
@@ -111,8 +111,9 @@ cargo test --manifest-path apps/linux/Cargo.toml --locked --no-default-features 
 ```
 
 The native run needs a desktop session and the persistent backend.
-`SCREENROOM_API_ENDPOINT` defaults to `http://127.0.0.1:50051`; endpoint aliases must equal it when set.
-Those aliases are `SCREENROOM_ENDPOINT` and `SCREENROOM_E2E_API_ENDPOINT`.
+All builds default to `https://preview-screenroom.holdenitdown.net`.
+Set `SCREENROOM_API_ENDPOINT` to override the default.
+If you set `SCREENROOM_ENDPOINT` or `SCREENROOM_E2E_API_ENDPOINT`, it must match the selected endpoint.
 `SCREENROOM_USER_ID` selects an enabled local UUID, not an account credential or authentication.
 The selector defaults to empty; use the configured installation UUID. Web setup owns provider credentials and initial connection configuration. The native shell consumes the public core only.
 The core uses a three-second request timeout.

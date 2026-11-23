@@ -5,6 +5,11 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class EndpointPolicyTest {
+    @Test fun defaultEndpointIsAllowedInBothBuildTypes() {
+        assertNull(endpointError(DEFAULT_API_ENDPOINT, true))
+        assertNull(endpointError(DEFAULT_API_ENDPOINT, false))
+    }
+
     @Test fun debugAllowsOnlyExactLoopbackHttp() {
         listOf("http://127.0.0.1:50051", "http://localhost:50062", "http://LOCALHOST:50062/").forEach { assertNull(endpointError(it, true)) }
         listOf("http://example.com", "http://127.1", "http://2130706433", "http://127.0.0.1.evil.test", "http://localhost.", "http://[::1]").forEach { assertNotNull(it, endpointError(it, true)) }

@@ -21,8 +21,8 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 pub fn client() -> Result<Arc<Client>, core::ClientError> {
-    let endpoint =
-        std::env::var("SCREENROOM_API_ENDPOINT").unwrap_or("http://127.0.0.1:50051".into());
+    let endpoint = std::env::var("SCREENROOM_API_ENDPOINT")
+        .unwrap_or_else(|_| "https://preview-screenroom.holdenitdown.net".into());
     for alias in ["SCREENROOM_ENDPOINT", "SCREENROOM_E2E_API_ENDPOINT"] {
         if std::env::var(alias).is_ok_and(|value| value != endpoint) {
             return Err(core::ClientError::InvalidResponse {
