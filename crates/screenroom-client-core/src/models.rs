@@ -2,6 +2,156 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackStartPolicy {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "resume")]
+    Resume,
+    #[serde(rename = "beginning")]
+    Beginning,
+    #[serde(rename = "position")]
+    Position,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackState {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "preparing")]
+    Preparing,
+    #[serde(rename = "ready")]
+    Ready,
+    #[serde(rename = "playing")]
+    Playing,
+    #[serde(rename = "paused")]
+    Paused,
+    #[serde(rename = "stopping")]
+    Stopping,
+    #[serde(rename = "stopped")]
+    Stopped,
+    #[serde(rename = "expired")]
+    Expired,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "uncertain")]
+    Uncertain,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackReportOutcome {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "not_sent")]
+    NotSent,
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "confirmed")]
+    Confirmed,
+    #[serde(rename = "uncertain")]
+    Uncertain,
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackEventKind {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "started")]
+    Started,
+    #[serde(rename = "progress")]
+    Progress,
+    #[serde(rename = "paused")]
+    Paused,
+    #[serde(rename = "resumed")]
+    Resumed,
+    #[serde(rename = "seeked")]
+    Seeked,
+    #[serde(rename = "heartbeat")]
+    Heartbeat,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackMethod {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "direct_play")]
+    DirectPlay,
+    #[serde(rename = "direct_stream")]
+    DirectStream,
+    #[serde(rename = "transcode")]
+    Transcode,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackTrackKind {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "audio")]
+    Audio,
+    #[serde(rename = "subtitle")]
+    Subtitle,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackSubtitleMode {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "webvtt")]
+    Webvtt,
+    #[serde(rename = "burn_in")]
+    BurnIn,
+    #[serde(rename = "unavailable")]
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PlaybackErrorCode {
+    #[default]
+    #[serde(rename = "unspecified")]
+    Unspecified,
+    #[serde(rename = "profile_required")]
+    ProfileRequired,
+    #[serde(rename = "profile_changed")]
+    ProfileChanged,
+    #[serde(rename = "source_unavailable")]
+    SourceUnavailable,
+    #[serde(rename = "item_unavailable")]
+    ItemUnavailable,
+    #[serde(rename = "unsupported_media")]
+    UnsupportedMedia,
+    #[serde(rename = "transcoding_unavailable")]
+    TranscodingUnavailable,
+    #[serde(rename = "playback_authorization_unavailable")]
+    PlaybackAuthorizationUnavailable,
+    #[serde(rename = "playback_conflict")]
+    PlaybackConflict,
+    #[serde(rename = "session_expired")]
+    SessionExpired,
+    #[serde(rename = "operation_conflict")]
+    OperationConflict,
+    #[serde(rename = "capacity_exhausted")]
+    CapacityExhausted,
+    #[serde(rename = "upstream_unavailable")]
+    UpstreamUnavailable,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
 pub struct Rights {
     pub label: String,
@@ -199,6 +349,172 @@ pub struct JellyfinProfile {
 pub struct JellyfinLink {
     pub source_id: String,
     pub jellyfin_user_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackClientCapabilities {
+    pub mp4: bool,
+    pub h264: bool,
+    pub aac: bool,
+    pub native_hls: bool,
+    pub mse_hls: bool,
+    pub webvtt: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackMediaSource {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackTrack {
+    pub id: String,
+    pub kind: PlaybackTrackKind,
+    pub display_name: String,
+    pub language: Option<String>,
+    pub selected: bool,
+    pub available: bool,
+    pub subtitle_mode: Option<PlaybackSubtitleMode>,
+    pub media_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackTrackChoices {
+    pub audio_track_id: Option<String>,
+    pub subtitle_track_id: Option<String>,
+    pub subtitles_off: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackTransport {
+    pub method: PlaybackMethod,
+    pub mime_type: String,
+    pub media_url: String,
+    pub revision: u32,
+    pub duration_ms: Option<String>,
+    pub start_position_ms: String,
+    pub timeline_offset_ms: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackOperation {
+    pub request_id: Option<String>,
+    pub sequence: Option<u32>,
+    pub outcome: PlaybackReportOutcome,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct PlaybackSession {
+    pub session_id: String,
+    pub control_capability: String,
+    pub state: PlaybackState,
+    pub selected_source: Option<PlaybackMediaSource>,
+    pub tracks: Vec<PlaybackTrack>,
+    pub transport: Option<PlaybackTransport>,
+    pub transport_revision: u32,
+    pub last_accepted_sequence: u32,
+    pub report_outcome: PlaybackReportOutcome,
+    pub lease_expires_at: String,
+    pub expires_at: String,
+    pub pending_operation: Option<PlaybackOperation>,
+    pub cleanup_pending: bool,
+    pub failure_code: Option<PlaybackErrorCode>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct CreatePlaybackSessionRequest {
+    pub request_id: String,
+    pub item_id: String,
+    pub scope: Option<SourceLibraryScope>,
+    pub client_capabilities: Option<PlaybackClientCapabilities>,
+    pub start_policy: PlaybackStartPolicy,
+    pub position_ms: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct CreatePlaybackSessionResponse {
+    pub session: Option<PlaybackSession>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct GetPlaybackSessionRequest {
+    pub session_id: String,
+    pub control_capability: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct GetPlaybackSessionResponse {
+    pub session: Option<PlaybackSession>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct UpdatePlaybackSessionRequest {
+    pub session_id: String,
+    pub control_capability: String,
+    pub request_id: String,
+    pub expected_transport_revision: u32,
+    pub position_ms: String,
+    pub track_choices: Option<PlaybackTrackChoices>,
+    pub compatible_transcode_fallback: Option<bool>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct UpdatePlaybackSessionResponse {
+    pub session: Option<PlaybackSession>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct ReportPlaybackEventRequest {
+    pub session_id: String,
+    pub control_capability: String,
+    pub transport_revision: u32,
+    pub sequence: u32,
+    pub kind: PlaybackEventKind,
+    pub position_ms: String,
+    pub paused: bool,
+    pub muted: bool,
+    pub volume: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct ReportPlaybackEventResponse {
+    pub accepted_sequence: u32,
+    pub report_outcome: PlaybackReportOutcome,
+    pub session: Option<PlaybackSession>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct StopPlaybackSessionRequest {
+    pub session_id: String,
+    pub control_capability: String,
+    pub request_id: String,
+    pub final_sequence: u32,
+    pub transport_revision: u32,
+    pub position_ms: String,
+    pub stop_reason: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Record))]
+pub struct StopPlaybackSessionResponse {
+    pub session: Option<PlaybackSession>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

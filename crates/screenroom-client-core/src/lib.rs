@@ -1,6 +1,7 @@
 mod models;
 mod operator;
 mod operator_models;
+mod playback;
 pub use operator::*;
 pub use operator_models::*;
 #[cfg(target_arch = "wasm32")]
@@ -36,6 +37,10 @@ uniffi::setup_scaffolding!();
 #[derive(Clone, Debug, thiserror::Error)]
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Error))]
 pub enum ClientError {
+    #[error("playback: {code:?}")]
+    Playback { code: PlaybackErrorCode },
+    #[error("playback outcome unknown; reconcile before another mutation")]
+    PlaybackUncertain,
     #[error("invalid argument: {reason}")]
     InvalidArgument { reason: String },
     #[error("not found: {reason}")]
@@ -241,6 +246,7 @@ pub struct Client {
     channel: Arc<tokio::sync::OnceCell<Transport>>,
     generation: AtomicU64,
     cancellation: AtomicU64,
+    playback_generation: AtomicU64,
     cache: Mutex<Cache>,
     mutation: futures::lock::Mutex<()>,
     mutation_waiters: AtomicUsize,
@@ -290,6 +296,7 @@ impl Client {
             channel: Arc::new(tokio::sync::OnceCell::new()),
             generation: AtomicU64::new(0),
             cancellation: AtomicU64::new(0),
+            playback_generation: AtomicU64::new(0),
             cache: Mutex::new(Cache::default()),
             mutation: futures::lock::Mutex::new(()),
             mutation_waiters: AtomicUsize::new(0),
@@ -367,6 +374,7 @@ impl Client {
         source_id: String,
         jellyfin_user_id: String,
     ) -> Result<JellyfinLink, ClientError> {
+        self.cancel_playback_requests();
         let response: wire::SetJellyfinLinkResponse = self
             .mutate(
                 "set_jellyfin_link",
@@ -384,6 +392,7 @@ impl Client {
         self: Arc<Self>,
         source_id: String,
     ) -> Result<String, ClientError> {
+        self.cancel_playback_requests();
         let response: wire::ClearJellyfinLinkResponse = self
             .mutate(
                 "clear_jellyfin_link",
@@ -628,15 +637,16 @@ impl Client {
         })
     }
     async fn transport(&self) -> Result<Transport, ClientError> {
+        self.transport_budget(self.config.timeout_ms).await
+    }
+    async fn transport_budget(&self, budget: u32) -> Result<Transport, ClientError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.channel
                 .get_or_try_init(|| async {
                     tonic::transport::Endpoint::from_shared(self.config.endpoint.clone())
                         .map_err(|e| invalid(e.to_string()))?
-                        .connect_timeout(std::time::Duration::from_millis(
-                            self.config.timeout_ms.into(),
-                        ))
+                        .connect_timeout(std::time::Duration::from_millis(budget.into()))
                         .connect()
                         .await
                         .map_err(|e| ClientError::Unavailable {
@@ -648,6 +658,7 @@ impl Client {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = budget;
             Ok(tonic_web_wasm_client::Client::new(
                 self.config.endpoint.clone(),
             ))
@@ -720,6 +731,7 @@ impl Client {
                     channel: self.channel.clone(),
                     generation: AtomicU64::new(0),
                     cancellation: AtomicU64::new(0),
+                    playback_generation: AtomicU64::new(0),
                     cache: Mutex::default(),
                     mutation: futures::lock::Mutex::new(()),
                     mutation_waiters: AtomicUsize::new(0),
@@ -768,9 +780,13 @@ impl Client {
         result
     }
     async fn call(&self, op: &str, value: Value) -> Result<Value, ClientError> {
-        timeout(self.config.timeout_ms, self.network(op, value)).await
+        let budget = playback::budget(op).unwrap_or(self.config.timeout_ms);
+        timeout(budget, self.network(op, value)).await
     }
     async fn network(&self, op: &str, value: Value) -> Result<Value, ClientError> {
+        if op.starts_with("playback_") {
+            return self.playback_network(op, value).await;
+        }
         if op == "art" {
             let url = value.as_str().ok_or_else(|| invalid("missing art URL"))?;
             #[cfg(target_arch = "wasm32")]

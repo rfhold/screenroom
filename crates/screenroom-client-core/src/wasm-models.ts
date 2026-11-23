@@ -1,4 +1,12 @@
 // Generated domain records; field names match Rust and the gRPC contracts.
+export type PlaybackStartPolicy = "unspecified" | "resume" | "beginning" | "position";
+export type PlaybackState = "unspecified" | "preparing" | "ready" | "playing" | "paused" | "stopping" | "stopped" | "expired" | "failed" | "uncertain";
+export type PlaybackReportOutcome = "unspecified" | "not_sent" | "pending" | "confirmed" | "uncertain" | "failed";
+export type PlaybackEventKind = "unspecified" | "started" | "progress" | "paused" | "resumed" | "seeked" | "heartbeat";
+export type PlaybackMethod = "unspecified" | "direct_play" | "direct_stream" | "transcode";
+export type PlaybackTrackKind = "unspecified" | "audio" | "subtitle";
+export type PlaybackSubtitleMode = "unspecified" | "webvtt" | "burn_in" | "unavailable";
+export type PlaybackErrorCode = "unspecified" | "profile_required" | "profile_changed" | "source_unavailable" | "item_unavailable" | "unsupported_media" | "transcoding_unavailable" | "playback_authorization_unavailable" | "playback_conflict" | "session_expired" | "operation_conflict" | "capacity_exhausted" | "upstream_unavailable";
 export interface Rights {
   label: string;
   note: string;
@@ -135,6 +143,121 @@ export interface JellyfinProfile {
 export interface JellyfinLink {
   source_id: string;
   jellyfin_user_id: string;
+}
+export interface PlaybackClientCapabilities {
+  mp4: boolean;
+  h264: boolean;
+  aac: boolean;
+  native_hls: boolean;
+  mse_hls: boolean;
+  webvtt: boolean;
+}
+export interface PlaybackMediaSource {
+  id: string;
+  display_name: string;
+}
+export interface PlaybackTrack {
+  id: string;
+  kind: PlaybackTrackKind;
+  display_name: string;
+  language: string | null;
+  selected: boolean;
+  available: boolean;
+  subtitle_mode: PlaybackSubtitleMode | null;
+  media_url: string | null;
+}
+export interface PlaybackTrackChoices {
+  audio_track_id: string | null;
+  subtitle_track_id: string | null;
+  subtitles_off: boolean;
+}
+export interface PlaybackTransport {
+  method: PlaybackMethod;
+  mime_type: string;
+  media_url: string;
+  revision: number;
+  duration_ms: string | null;
+  start_position_ms: string;
+  timeline_offset_ms: string;
+}
+export interface PlaybackOperation {
+  request_id: string | null;
+  sequence: number | null;
+  outcome: PlaybackReportOutcome;
+}
+export interface PlaybackSession {
+  session_id: string;
+  control_capability: string;
+  state: PlaybackState;
+  selected_source: PlaybackMediaSource | null;
+  tracks: Array<PlaybackTrack>;
+  transport: PlaybackTransport | null;
+  transport_revision: number;
+  last_accepted_sequence: number;
+  report_outcome: PlaybackReportOutcome;
+  lease_expires_at: string;
+  expires_at: string;
+  pending_operation: PlaybackOperation | null;
+  cleanup_pending: boolean;
+  failure_code: PlaybackErrorCode | null;
+}
+export interface CreatePlaybackSessionRequest {
+  request_id: string;
+  item_id: string;
+  scope: SourceLibraryScope | null;
+  client_capabilities: PlaybackClientCapabilities | null;
+  start_policy: PlaybackStartPolicy;
+  position_ms: string | null;
+}
+export interface CreatePlaybackSessionResponse {
+  session: PlaybackSession | null;
+}
+export interface GetPlaybackSessionRequest {
+  session_id: string;
+  control_capability: string;
+}
+export interface GetPlaybackSessionResponse {
+  session: PlaybackSession | null;
+}
+export interface UpdatePlaybackSessionRequest {
+  session_id: string;
+  control_capability: string;
+  request_id: string;
+  expected_transport_revision: number;
+  position_ms: string;
+  track_choices: PlaybackTrackChoices | null;
+  compatible_transcode_fallback: boolean | null;
+}
+export interface UpdatePlaybackSessionResponse {
+  session: PlaybackSession | null;
+}
+export interface ReportPlaybackEventRequest {
+  session_id: string;
+  control_capability: string;
+  transport_revision: number;
+  sequence: number;
+  kind: PlaybackEventKind;
+  position_ms: string;
+  paused: boolean;
+  muted: boolean;
+  volume: number;
+}
+export interface ReportPlaybackEventResponse {
+  accepted_sequence: number;
+  report_outcome: PlaybackReportOutcome;
+  session: PlaybackSession | null;
+}
+export interface StopPlaybackSessionRequest {
+  session_id: string;
+  control_capability: string;
+  request_id: string;
+  final_sequence: number;
+  transport_revision: number;
+  position_ms: string;
+  stop_reason: string;
+}
+export interface StopPlaybackSessionResponse {
+  session: PlaybackSession | null;
 }
 export interface ItemPage {
   items: Array<Item>;

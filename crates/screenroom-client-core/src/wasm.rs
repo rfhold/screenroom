@@ -8,14 +8,21 @@ pub(super) use artwork::fetch_artwork;
 const DOMAIN_TYPES: &str = include_str!("wasm-models.ts");
 
 #[wasm_bindgen(typescript_custom_section)]
-const ERROR_TYPES: &str = "export interface ClientFailure extends Error { code: 'invalid_argument' | 'not_found' | 'unavailable' | 'deadline_exceeded' | 'cancelled' | 'resource_exhausted' | 'rpc' | 'invalid_response'; grpc_code?: number; }";
+const ERROR_TYPES: &str = "export interface ClientFailure extends Error { code: 'playback' | 'playback_uncertain' | 'invalid_argument' | 'not_found' | 'unavailable' | 'deadline_exceeded' | 'cancelled' | 'resource_exhausted' | 'rpc' | 'invalid_response'; grpc_code?: number; playback_code?: PlaybackErrorCode; }";
 
 fn js_error(error: ClientError) -> JsValue {
     let value = js_sys::Error::new(&error.to_string());
+    if let ClientError::Playback { code } = &error {
+        if let Ok(code) = to_js(code) {
+            let _ = js_sys::Reflect::set(&value, &"playback_code".into(), &code);
+        }
+    }
     if let ClientError::Rpc { code, .. } = &error {
         let _ = js_sys::Reflect::set(&value, &"grpc_code".into(), &JsValue::from(*code));
     }
     let code = match error {
+        ClientError::Playback { .. } => "playback",
+        ClientError::PlaybackUncertain => "playback_uncertain",
         ClientError::InvalidArgument { .. } => "invalid_argument",
         ClientError::NotFound { .. } => "not_found",
         ClientError::Unavailable { .. } => "unavailable",
@@ -47,6 +54,71 @@ pub struct WasmClient {
 }
 #[wasm_bindgen(js_class=Client)]
 impl WasmClient {
+    #[wasm_bindgen(unchecked_return_type = "CreatePlaybackSessionResponse")]
+    pub async fn create_playback_session(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "CreatePlaybackSessionRequest")] request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .create_playback_session(from_js(request)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "GetPlaybackSessionResponse")]
+    pub async fn get_playback_session(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "GetPlaybackSessionRequest")] request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .get_playback_session(from_js(request)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "UpdatePlaybackSessionResponse")]
+    pub async fn update_playback_session(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "UpdatePlaybackSessionRequest")] request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .update_playback_session(from_js(request)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "ReportPlaybackEventResponse")]
+    pub async fn report_playback_event(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "ReportPlaybackEventRequest")] request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .report_playback_event(from_js(request)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
+    #[wasm_bindgen(unchecked_return_type = "StopPlaybackSessionResponse")]
+    pub async fn stop_playback_session(
+        &self,
+        #[wasm_bindgen(unchecked_param_type = "StopPlaybackSessionRequest")] request: JsValue,
+    ) -> Result<JsValue, JsValue> {
+        to_js(
+            self.inner
+                .clone()
+                .stop_playback_session(from_js(request)?)
+                .await
+                .map_err(js_error)?,
+        )
+    }
     #[wasm_bindgen(constructor)]
     pub fn new(
         #[wasm_bindgen(unchecked_param_type = "ClientConfig")] config: JsValue,
