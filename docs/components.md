@@ -15,7 +15,7 @@ The [indexing architecture](indexing.md) owns shared-queue and incremental behav
 | `apps/web/` | Svelte SPA shell with pnpm and TypeScript. |
 | `crates/screenroom-client-core/` | Implemented shared Rust client core: domain models, transport, errors, cancellation, and memory caches. |
 
-Client shells own native layout, navigation, focus, and image decode. The web SPA uses the core through WASM.
+Client shells own native layout, navigation, focus, image decode, and player engines. The web SPA uses the core through WASM.
 When shells consume catalog data, media artwork, provider branding, or notices, those records come from the backend through the core.
 This origin contract requires no unused global branding or notice requests.
 Libraries, provider presence and status, search capabilities, rights, item colors, and rating providers and scales follow server records.
@@ -39,6 +39,7 @@ The app guides in the [documentation index](README.md) describe each shell's int
 | `proto/screenroom/catalog/v1/catalog.proto` | `screenroom.catalog.v1`: BrowseService, CatalogService, SearchService, and catalog messages. |
 | `proto/screenroom/user/v1/user.proto` | `screenroom.user.v1`: local user reads and validated Jellyfin profile links for a trusted-local UUID selector. |
 | `proto/screenroom/common/v1/common.proto` | `screenroom.common.v1`: shared SearchTypes and SearchMethods. |
+| `proto/screenroom/playback_gateway/v1/playback_gateway.proto` | Public PlaybackService control contract; ordinary clients receive session-scoped gateway media descriptors. |
 
 PostgreSQL persists shared catalog data, local users, source links, durable ingest state, search documents, and embeddings.
 Private managed connections bind Jellyfin server identity, selected libraries, and the installation profile.
@@ -48,14 +49,19 @@ Both APIs remain available unchanged; removal of global client credits UI does n
 An empty installation is healthy before source setup; startup performs no fixture import or provider acquisition.
 Runtime product mocks, TMDB feeds, demo-user bootstrap, and manual provider profiles are not supported.
 Isolated fault servers remain test support, not product adapters.
-Authentication, playback, transcoding, downloads, and remote orchestration remain absent.
+The [playback gateway](playback.md) implements Jellyfin VOD control, media delivery, and provider transcode negotiation.
+Web and native player source uses this gateway; media bytes bypass the core.
+Apple uses AVPlayer/AVKit, Android mobile/TV uses Media3, and Linux embeds GStreamer.
+The [native player contract](playback.md#native-players) defines engine dependencies, lifecycle differences, and acceptance limits.
+Authentication, downloads, casting, live TV, and remote orchestration remain absent.
 The [client API guide](client-api.md#artwork-and-provenance) defines image transport and attribution boundaries.
 The [Jellyfin guide](jellyfin.md) owns managed setup, private credentials, and unsupported edit/rotation paths.
 
 ## Services and worker
 
 The table describes intended business scope; implemented catalog and user reads use PostgreSQL through Tonic gRPC/gRPC-Web.
-Playback gateway exposes a Tonic listener with empty routes, not a playback API.
+Playback gateway exposes public control RPCs and capability-scoped HTTP media routes.
+Media bytes bypass the shared client core; control uses ordinary `Client` methods, not the operator capability.
 The worker resolves managed Jellyfin connections dynamically; it provides no complete external-catalog guarantee.
 The [backend development guide](backend.md) defines local startup and telemetry procedures.
 
@@ -63,7 +69,7 @@ The [backend development guide](backend.md) defines local startup and telemetry 
 | --- | --- |
 | `crates/screenroom-user/` | Rust user service: user accounts and association with playback providers where supported; Jellyfin initially. |
 | `crates/screenroom-catalog/` | Rust catalog service: a copy of the index in our database, embeddings, and links between items in other catalogs. |
-| `crates/screenroom-playback-gateway/` | Rust playback gateway executable: provider integration for Netflix, Amazon, HBO, Jellyfin, Plex, and others. |
+| `crates/screenroom-playback-gateway/` | Jellyfin playback sessions, media proxy, personal reports, and durable cleanup; other playback providers remain future scope. |
 | `crates/screenroom-index-worker/` | Rust index worker: embeddings, text search, and catalog sync from adapters. |
 
 ### Indexing boundary
@@ -91,7 +97,7 @@ DNS resolves the shared hostname; it does not route request paths.
 Each service independently validates authentication; ingress authentication alone does not establish trust.
 
 These requirements describe architecture only, not an ingress installation or an authentication implementation.
-The `screenroom.playback_gateway.v1` protobuf package remains empty, with no invented playback RPC contract.
+The [playback contract](playback.md) defines the implemented `screenroom.playback_gateway.v1.PlaybackService`.
 The [implemented local boundary](#implemented-local-boundary) provides no authentication or permission for production exposure.
 Envoy supplies local path routes on loopback; it does not satisfy the independent authentication requirement.
 
@@ -111,8 +117,8 @@ A custom remote adapter could turn on a TV, launch an app, then play an item.
 
 | Path | Component |
 | --- | --- |
-| `crates/screenroom-proto/`, `proto/`, `buf.yaml`, `buf.gen.yaml` | Protobuf library with Buf generation and Tonic; public catalog, user, and common packages define the client contract. |
+| `crates/screenroom-proto/`, `proto/`, `buf.yaml`, `buf.gen.yaml` | Protobuf library with Buf generation and Tonic; public catalog, user, common, and playback packages define the client contract. |
 | `crates/screenroom-observability/` | Shared telemetry setup and optional profiling support; see the [backend development guide](backend.md). |
-| `compose.yaml` | Persistent local PostgreSQL 18 with pgvector, Garage, Envoy, catalog, user, and worker; only the edge binds loopback. |
+| `compose.yaml` | Persistent local PostgreSQL 18 with pgvector, Garage, Envoy, catalog, user, worker, and playback gateway; only the edge binds loopback. |
 
 Screenroom remains standalone; shared telemetry uses community middleware and official OpenTelemetry SDK/exporter crates, not a Waltr runtime dependency.

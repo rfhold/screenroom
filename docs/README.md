@@ -4,6 +4,7 @@
 | --- | --- |
 | [Component outline](components.md) | Component ownership, server-driven client boundaries, intended service scope, and public deployment and authentication contracts. |
 | [Client API and core](client-api.md) | Public scoped reads, separate operator capability, local settings, artwork, provenance, and build procedures. |
+| [Playback](playback.md) | Jellyfin sessions, Web/native engines, gateway media, personal identity, lifecycle differences, uncertainty, and security limits. |
 | [Backend development](backend.md) | Persistent local instance, startup migrations, durable ingest, exact vector search, private artwork, and shared telemetry. |
 | [Indexing architecture](indexing.md) | Shared queue, supported backend policies and limits, retry/redrive, incremental Jellyfin, operator HTTP routes, diagnostics, and cutover boundaries. |
 | [Index maintenance](index-maintenance.md) | Canonical poster repair, complete-generation publication, operator security, and explicit Web attachment. |

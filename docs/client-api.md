@@ -1,15 +1,16 @@
 # Client API and core
 
 Screenroom's client boundary supports a persistent local backend, typed provider adapters, local user selectors, and device-local settings.
-Clients own no provider connections. The backend supports managed Jellyfin connections; it provides no authentication or playback.
-The wire contract separates catalog and user ownership:
+Clients own no provider connections.
+The backend supports managed Jellyfin connections and gateway playback for Web and native clients; it provides no authentication.
+The wire contract separates service ownership:
 
 | Package | Schema and ownership |
 | --- | --- |
 | `screenroom.catalog.v1` | [Catalog schema](../proto/screenroom/catalog/v1/catalog.proto): BrowseService, CatalogService, SearchService, and catalog messages. |
 | `screenroom.user.v1` | [User schema](../proto/screenroom/user/v1/user.proto): UserService local user records and Jellyfin profile links. |
 | `screenroom.common.v1` | [Common schema](../proto/screenroom/common/v1/common.proto): shared SearchTypes and SearchMethods. |
-| `screenroom.playback_gateway.v1` | [Empty playback gateway package](../proto/screenroom/playback_gateway/v1/playback_gateway.proto): no messages or RPC services. |
+| `screenroom.playback_gateway.v1` | [Playback schema](../proto/screenroom/playback_gateway/v1/playback_gateway.proto): PlaybackService sessions, events, tracks, and media descriptors. |
 
 This wire namespace cutover breaks old clients. The server provides no legacy namespace aliases.
 Native UniFFI and WASM transport retain their roles; immutable configuration now uses `user_id`, not a mock profile.
@@ -22,10 +23,10 @@ The intended backend [public deployment contract](components.md#intended-public-
 | [Rust client core](../crates/screenroom-client-core/src/lib.rs) | Domain records, RPC transport, deadlines, errors, request deduplication, cancellation, read caches, and artwork bytes. |
 | Native shells | Native layout, navigation, focus, view state, and image decode; Swift and Kotlin consume UniFFI, while Rust uses the crate directly. |
 | Web SPA | Browser UI and image decode; consumes the same Rust core through WASM. |
-| [Backend](backend.md) | Persistent catalog, local users, scoped search, bounded catalog information, paginated artwork credits, and same-origin artwork routes. |
+| [Backend](backend.md) | Persistent catalog, local users, scoped search, artwork, and gateway-owned playback sessions/media. |
 
 Native core transport uses Tonic gRPC. WASM uses `tonic-web-wasm-client` through browser fetch.
-The shared Envoy edge routes both protocols and artwork through one public origin.
+The shared Envoy edge routes both protocols, artwork, and playback media through one public origin.
 Prost wire types stay inside the core. Shells consume the [domain records](../crates/screenroom-client-core/src/models.rs).
 The [WASM adapter](../crates/screenroom-client-core/src/wasm.rs) exposes async methods and [TypeScript models](../crates/screenroom-client-core/src/wasm-models.ts).
 
@@ -39,6 +40,7 @@ The core also exposes backend branding and notices. If shells consume them, thos
 This origin contract requires no global provider-credit UI or unused branding and notice requests.
 Shells must not package catalog JSON, media artwork, or provider logos as runtime resources.
 Shells must not call provider APIs or fetch artwork outside the core.
+Playback control uses the core; video, HLS, and subtitles use validated gateway URLs outside gRPC and WASM.
 Runtime product fixtures and mock adapters are not supported server inputs either.
 
 Shells use server records for libraries, provider presence and status, search capabilities, rights, item colors, and rating providers and scales.
@@ -100,7 +102,7 @@ Create one core `Client` with an explicit `ClientConfig`:
 The core sends a nonempty `user_id` as `x-screenroom-user-id` on RPCs.
 It selects an enabled local user; it is not authentication, a token, or a security boundary.
 Construct another client when endpoint or user changes. Configuration remains immutable.
-The ordinary `Client` exposes public catalog/common/user contracts, not private operator/internal RPC bindings or backend SQLx dependencies.
+The ordinary `Client` exposes public catalog/common/user/playback contracts, not private operator/internal RPC bindings or backend SQLx dependencies.
 The bindings also expose the separate, explicit [operator capability](#operator-capability).
 
 `Item` carries hierarchy, metadata, tags, colors, artwork, ratings, runtime, provider references, rights, and optional personal progress.
@@ -126,7 +128,42 @@ The separate Home Continue Watching path can still read provider state; this ove
 Jellyfin supplies explicit `Played` values for movies and episodes. Series and seasons remain unknown; clients do not infer container completion.
 Web, Apple, Android, and Linux posters display a top-right checkmark only for `true`, with the accessible label `Watched`.
 Neither `false` nor unknown displays a checkmark. Progress bars remain independent.
-No watched controls or provider writes accompany the field.
+The field adds no manual watched controls.
+Playback reports write personal provider state; pending or ambiguous effects keep cached watched status unknown.
+
+### Playback methods
+
+The ordinary `Client` exposes these methods on Rust, native UniFFI, and WASM:
+
+| Method | Request / result |
+| --- | --- |
+| `create_playback_session` | `CreatePlaybackSessionRequest` / `CreatePlaybackSessionResponse`. |
+| `get_playback_session` | `GetPlaybackSessionRequest` / `GetPlaybackSessionResponse`. |
+| `update_playback_session` | `UpdatePlaybackSessionRequest` / `UpdatePlaybackSessionResponse`. |
+| `report_playback_event` | `ReportPlaybackEventRequest` / `ReportPlaybackEventResponse`. |
+| `stop_playback_session` | `StopPlaybackSessionRequest` / `StopPlaybackSessionResponse`. |
+
+The [playback contract](playback.md) owns states, sequences, revisions, receipts, personal identity, and HTTP media rules.
+These methods require an enabled local-user selector; session operations also require an in-memory control capability.
+They do not use `OperatorClient`, the Maintenance proxy, or direct provider HTTP.
+Preparation uses 30 seconds; other playback calls use 10 seconds, independent of the Web metadata default of three seconds.
+Playback calls serialize through the mutation gate and retain no completed-read cache.
+The core never retries mutations automatically.
+Explicit same-session retries retain the exact mutation UUID and body in memory; reload supplies no journal recovery.
+Ambiguous reports require a session-state check, not automatic replay.
+Cancellation ends local waits; it does not prove that a provider mutation stopped.
+Profile mutation cancels stale playback requests; player lifecycle hooks also stop local media.
+Web routes preserve explicit source/library read scope. Player navigation uses a one-use in-memory launch intent; deep entry, reload, and Forward require explicit Play.
+Catalog/search history snapshots are bounded, memory-only, and cleared on profile changes; they contain no playback authority.
+
+Public positions, durations, and offsets use decimal millisecond strings in Rust, UniFFI, WASM, and TypeScript.
+Nullable fields retain `Option<T>` / `T | null`; sequences and revisions use bounded `uint32` values.
+The core validates media URLs against the configured API origin, session, revision, resource UUID, and separate media capability.
+Media bytes never enter the core, its artwork cache, or a WASM response buffer.
+Web converts timeline strings to video seconds only after checked range and round-trip validation.
+Native source integrates AVPlayer/AVKit on Apple, Media3 on Android mobile/TV, and embedded GStreamer on Linux.
+The [native player contract](playback.md#native-players) owns controls, restoration, stop differences, plugin dependencies, and seek limits.
+Shared bindings alone do not establish player integration or native application acceptance.
 
 ### Metadata and artwork
 
@@ -356,7 +393,8 @@ Web controls initially select Movies and Shows. Title-only defaults to false and
 The shared load normalizer maps an old saved `tmdb` provider preference to `all` and preserves unrelated valid preferences.
 All four clients use `normalize_saved_settings` on load; saves use strict validation and reject `tmdb`.
 Ordinary settings files ignore the obsolete subtitle field. The active `ClientSettings` model and client controls contain no subtitle preference.
-These settings provide no subtitle retrieval, transcription, or playback service.
+These settings supply no global subtitle preference or transcription service.
+Per-session subtitle choices belong to the [players](playback.md), not saved catalog settings.
 
 ## Errors, cancellation, and caches
 
@@ -373,8 +411,11 @@ WASM rejects promises with an `Error` that carries the corresponding snake_case 
 | `ResourceExhausted` | Core concurrency/artwork limits or bounded server capacity. |
 | `Rpc` | Other gRPC statuses; preserves the numeric status code and reason. |
 | `InvalidResponse` | Invalid model data, absent required response data, or unsupported artwork MIME type. |
+| `Playback` | Typed safe `PlaybackErrorCode` from the gateway; no upstream body. |
+| `PlaybackUncertain` | A dispatched mutation loses a definitive transport, deadline, or cancellation outcome. |
 
 WASM `Rpc` failures also expose `grpc_code`. The core performs no automatic retries.
+WASM playback failures use `code=playback` with `playback_code`, or `code=playback_uncertain` for ambiguity.
 Uncached reads fail when the server is unreachable; the core does not substitute bundled fixture data.
 Shells own error presentation, empty states, and explicit retry actions.
 
@@ -444,6 +485,7 @@ Platform integration tests and resource audits remain necessary.
 The default public endpoint uses loopback and cleartext HTTP. The local stack provides no authentication or per-user catalog ACL.
 Do not expose this stack to an untrusted network.
 Use platform-specific development exceptions only for local backend access; these exceptions do not define a production transport policy.
-Browser CORS permits only the configured origins, GET/POST/OPTIONS, and explicit gRPC-Web headers.
+Browser CORS permits only configured origins and explicit route-specific methods/headers.
+Playback media additionally permits HEAD and Range/If-Range; its anonymous requests carry no ordinary user-selector header.
 CORS does not protect native clients or make local UUID selectors private.
 Private RPC network separation is not authentication. The local stack has no production-exposure approval or account-isolation guarantee.

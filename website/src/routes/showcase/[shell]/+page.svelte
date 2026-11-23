@@ -1,13 +1,27 @@
 <script lang="ts">
-  import { shells } from '../../../lib/showcase';
+  import { shells, type PlaybackState } from '../../../lib/showcase';
   import type { PageData } from './$types';
 
   let { data }: { data: PageData } = $props();
+  const highlightLabels = new Map([
+    ['desktop-playing', 'Desktop playback'],
+    ['mobile-playing', 'Mobile playback'],
+    ['playing', 'Playing'],
+    ['desktop-audio-tracks', 'Audio track menu'],
+    ['tracks', 'Track menu'],
+    ['paused', 'Paused']
+  ]);
+
+  function playbackHighlights(states: PlaybackState[]): PlaybackState[] {
+    const captures = states.filter((state) => state.status === 'captured');
+    const featured = [...highlightLabels.keys()].flatMap((id) => captures.filter((state) => state.id === id));
+    return [...new Set([...featured, ...captures])].slice(0, 3);
+  }
 </script>
 
 <svelte:head>
   <title>{data.shell.name} showcase · Screenroom</title>
-  <meta name="description" content={`Screenroom ${data.shell.name} E2E screenshots: Home, expanded sidebar, Movies library, Search, and title details with a local mock-server catalog.`} />
+  <meta name="description" content={`Screenroom ${data.shell.name} screenshots: browsing and Jellyfin playback.`} />
 </svelte:head>
 
 <header>
@@ -15,7 +29,7 @@
   <p class="eyebrow">Client preview</p>
   <h1>{data.shell.name}</h1>
   <p>{data.shell.description}</p>
-  <p class="preview-note">These historical captures retain their original fixture-backed mock-server provenance. The current client uses a persistent local backend with offline adapters; these images do not establish that cutover. Production providers, authentication, and playback are not available. This page serves static screenshots only.</p>
+  <p>Browse screenshots use an example catalog. Playback screenshots use Jellyfin.</p>
 </header>
 
 <nav class="flow-nav" aria-label="Screenshot flows">
@@ -30,8 +44,43 @@
   {#each data.shell.flows as flow, flowIndex}
     <section id={flow.slug} aria-labelledby={`${flow.slug}-heading`}>
       <h2 id={`${flow.slug}-heading`}>{flow.name}</h2>
-      <p>{flow.caption}</p>
-      {#if data.shell.slug === 'web'}
+      {#if flow.playback}
+        {@const highlights = playbackHighlights(flow.playback.states)}
+        <p>{flow.playback.item.title} ({flow.playback.item.year}) · Jellyfin</p>
+        {#if flow.playback.outcome === 'blocked'}<p>This run did not demonstrate successful playback.</p>{/if}
+        {#if highlights.length}
+          <div class="playback-highlights">
+            {#each highlights as state (state.id)}
+              {@const label = highlightLabels.get(state.id) ?? state.label}
+              <figure id={`playback-${state.id}`}>
+                <a class="playback-frame" href={state.image} aria-label={`Open original: ${label}`}>
+                  <img src={state.image} alt={`${data.shell.name}: ${label}`} loading="lazy" />
+                </a>
+                <figcaption>{label}</figcaption>
+              </figure>
+            {/each}
+          </div>
+        {:else}
+          <p>No playback screenshots from this run.</p>
+        {/if}
+        <details class="capture-details">
+          <summary>All playback captures and test notes</summary>
+          <p>{flow.playback.provenance}. Runtime: {flow.playback.runtime}. Platform outcome: {flow.playback.outcome}.</p>
+          <p>Screenshots document individual states, not full playback acceptance.</p>
+          <ul>
+            {#each flow.playback.states as state}
+              <li id={highlights.includes(state) ? undefined : `playback-${state.id}`}>
+                {#if state.image}<a href={state.image}>{state.label}</a>{:else}<strong>{state.label}</strong>{/if}
+                <span> · {state.status.replaceAll('-', ' ')} · {state.viewport}</span>
+                <p>{state.observation ?? state.reason}</p>
+              </li>
+            {/each}
+          </ul>
+        </details>
+      {:else}
+        <p>{flow.caption}</p>
+      {/if}
+      {#if data.shell.slug === 'web' && flow.screenshots.length}
         <nav class="viewport-nav" aria-label={`${flow.name} viewports`}>
           <ul>
             {#each flow.screenshots as screenshot}
@@ -52,7 +101,7 @@
               />
             </div>
             <figcaption>
-              E2E screenshot · <a href={screenshot.src}>Open {screenshot.label} {flow.name.toLowerCase()} original PNG</a>
+              Historical fixture E2E screenshot · <a href={screenshot.src}>Open {screenshot.label} {flow.name.toLowerCase()} original PNG</a>
             </figcaption>
           </figure>
         {/each}
@@ -72,3 +121,23 @@
     {/each}
   </ul>
 </nav>
+
+<style>
+  .playback-highlights {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: var(--space-3);
+  }
+  .playback-frame {
+    display: block;
+    position: relative;
+    aspect-ratio: 4 / 3;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface-inset);
+  }
+  .playback-frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .capture-details { margin-top: var(--space-4); }
+  .capture-details summary { cursor: pointer; }
+  .capture-details li p { color: var(--text-secondary); }
+</style>

@@ -8,6 +8,7 @@
 | [indexing.md](indexing.md) | Canonical indexing architecture and policy contracts. |
 | [index-maintenance.md](index-maintenance.md) | Artwork repair, publication, operator security, and recovery context. |
 | [client-api.md](client-api.md) | Public client, separate operator capability, and bindings. |
+| [playback.md](playback.md) | Jellyfin Web/native playback, control/media authority, personal state, lifecycle differences, and acceptance limits. |
 | [jellyfin.md](jellyfin.md) | Managed setup, private credentials, destination security, and first-add limits. |
 | [testing.md](testing.md) | Isolated tests, distinct attached acceptance modes, and platform limits. |
 

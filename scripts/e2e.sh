@@ -14,17 +14,22 @@ flows=(home sidebar library search detail)
 if [ "${E2E_MACOS-0}" = 1 ]; then apple_profiles+=(macos); fi
 
 usage() {
-  echo 'Usage: bash scripts/e2e.sh [--update-showcase] [--category happy-path|retry|regression|all] [apple|android|linux|web ...]'
+  echo 'Usage: bash scripts/e2e.sh [--update-showcase] [--journey browse|playback] [--category happy-path|retry|regression|all] [apple|android|linux|web ...]'
 }
 update_showcase=false
 families=
 category=${E2E_CATEGORY-}
 category_set=${E2E_CATEGORY+x}
+journey=${SCREENROOM_E2E_JOURNEY-browse}
 while [ "$#" -gt 0 ]; do
   arg=$1
   shift
   case "$arg" in
     --update-showcase) update_showcase=true ;;
+    --journey)
+      [ "$#" -gt 0 ] || { echo '--journey requires a value.' >&2; exit 2; }
+      journey=$1
+      shift ;;
     --category)
       [ "$#" -gt 0 ] || { echo '--category requires a value.' >&2; exit 2; }
       category=$1
@@ -50,6 +55,20 @@ case "$category" in
   happy-path|retry|regression|all) ;;
   *) printf 'Invalid E2E category: "%s". Expected happy-path, retry, regression, or all.\n' "$category" >&2; exit 2 ;;
 esac
+case "$journey" in
+  browse|playback) ;;
+  *) echo 'Invalid E2E journey. Expected browse or playback.' >&2; exit 2 ;;
+esac
+if [ "$journey" = playback ]; then
+  [ "$category" = happy-path ] || { echo 'Playback journey requires category happy-path.' >&2; exit 2; }
+  [ "${SCREENROOM_BACKEND_ATTACH:-}" = 1 ] && [ "${SCREENROOM_BACKEND_PROJECT:-}" = screenroom-jellyfin-local ] && [ "${SCREENROOM_API_ENDPOINT:-}" = http://127.0.0.1:50052 ] || {
+    echo 'Playback requires explicit SCREENROOM_BACKEND_ATTACH=1, SCREENROOM_BACKEND_PROJECT=screenroom-jellyfin-local and SCREENROOM_API_ENDPOINT=http://127.0.0.1:50052.' >&2; exit 2;
+  }
+  [ -n "${SCREENROOM_SHOWCASE_ITEM_ID:-}" ] && [ -n "${SCREENROOM_SHOWCASE_TITLE:-}" ] && [[ "${SCREENROOM_SHOWCASE_YEAR:-}" =~ ^[0-9]{4}$ ]] || {
+    echo 'Playback requires explicit SCREENROOM_SHOWCASE_ITEM_ID, SCREENROOM_SHOWCASE_TITLE and four-digit SCREENROOM_SHOWCASE_YEAR.' >&2; exit 2;
+  }
+fi
+export SCREENROOM_E2E_JOURNEY=$journey
 if "$update_showcase"; then
   case "$category" in
     happy-path|all) ;;
@@ -98,8 +117,10 @@ cleanup() {
       [ "$status" -ne 0 ] || status=1
     fi
   fi
-  if [ -n "$root_lock" ]; then rm -f "$root_lock/pid"; rmdir "$root_lock"; fi
   if [ "$status" -ne 0 ]; then
+    if [ "$journey" = playback ] && [ -n "$stage" ]; then
+      node scripts/showcase-playback.mjs rollback "$stage" || rollback_failed=1
+    fi
     for target in "${export_targets[@]}"; do
       if [ -f "$stage/original/$target" ]; then
         cp "$stage/original/$target" "website/static/showcase/$target" || rollback_failed=1
@@ -113,6 +134,7 @@ cleanup() {
   else
     [ -z "$stage" ] || rm -rf "$stage"
   fi
+  if [ -n "$root_lock" ]; then rm -f "$root_lock/pid"; rmdir "$root_lock"; fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -151,10 +173,12 @@ prepare() {
   finish "$((${#pids[@]} - 1))"
 }
 if "$update_showcase"; then
-  command -v file >/dev/null || { echo 'Showcase export requires file.' >&2; exit 1; }
-  case " $families " in
-    *' apple '*) command -v jq >/dev/null || { echo 'Showcase export requires jq.' >&2; exit 1; } ;;
-  esac
+  if [ "$journey" = browse ]; then
+    command -v file >/dev/null || { echo 'Showcase export requires file.' >&2; exit 1; }
+    case " $families " in
+      *' apple '*) command -v jq >/dev/null || { echo 'Showcase export requires jq.' >&2; exit 1; } ;;
+    esac
+  fi
   stage=$(mktemp -d "${TMPDIR:-/tmp}/screenroom-showcase.XXXXXX")
 fi
 
@@ -185,6 +209,24 @@ case " $families " in
 esac
 export SCREENROOM_CORE_PREPARED=1
 export SCREENROOM_E2E_PROFILE_PREFIX="run-$(basename "$run")"
+playback_inputs=()
+if [ "$journey" = playback ]; then
+  for family in $families; do
+    case "$family" in
+      apple)
+        for profile in ios ipad tvos; do
+          slug=$profile; [ "$profile" != ipad ] || slug=ipados
+          playback_inputs+=("$apple_run/$profile/playback/manifest.json=$slug")
+        done
+        if [ "${E2E_MACOS-0}" = 1 ]; then playback_inputs+=("$run/apple-macos/macos/playback/manifest.json=macos"); fi ;;
+      android) playback_inputs+=("$PWD/apps/android/build/e2e/playback/manifest.json=android,android-tv") ;;
+      linux) playback_inputs+=("$PWD/apps/linux/build/e2e/playback/manifest.json=linux") ;;
+      web) playback_inputs+=("$PWD/apps/web/e2e/build/screenshots/playback/manifest.json=web") ;;
+    esac
+  done
+  node scripts/showcase-playback.mjs baseline "$run/playback-inputs.json" "${playback_inputs[@]}"
+  export SCREENROOM_NATIVE_PLAYBACK_RELEASED=1
+fi
 
 export SCREENROOM_API_ENDPOINT=${SCREENROOM_API_ENDPOINT:-${SCREENROOM_E2E_API_ENDPOINT:-http://127.0.0.1:${SCREENROOM_BACKEND_PORT:-50051}}}
 [ -z "${SCREENROOM_E2E_API_ENDPOINT:-}" ] || [ "$SCREENROOM_API_ENDPOINT" = "$SCREENROOM_E2E_API_ENDPOINT" ] || { echo 'Backend endpoint aliases must match.' >&2; exit 2; }
@@ -219,12 +261,19 @@ esac
 first_group=${#pids[@]}
 for family in $families; do
   case "$family" in
-    apple) launch apple env E2E_MACOS=0 E2E_APPLE_RUN_DIR="$apple_run" bash apps/apple/scripts/e2e.sh ;;
+    apple)
+      if [ "$journey" = playback ]; then
+        prepare apple env E2E_MACOS=0 E2E_APPLE_RUN_DIR="$apple_run" bash apps/apple/scripts/e2e.sh
+        continue
+      fi
+      launch apple env E2E_MACOS=0 E2E_APPLE_RUN_DIR="$apple_run" bash apps/apple/scripts/e2e.sh ;;
     android) launch android bash apps/android/scripts/e2e.sh ;;
     linux) launch linux bash apps/linux/tests/e2e/run.sh ;;
     web) launch web pnpm --filter @screenroom/web test:e2e ;;
   esac
+  if [ "$journey" = playback ]; then finish "$((${#pids[@]} - 1))"; fi
 done
+if [ "$journey" = playback ]; then first_group=${#pids[@]}; fi
 failed=0
 remaining=$((${#pids[@]} - first_group))
 completed=()
@@ -242,6 +291,12 @@ done
 [ "$failed" = 0 ] || exit 1
 
 "$update_showcase" || exit 0
+if [ "$journey" = playback ]; then
+  node scripts/showcase-playback.mjs stage "$stage" "$run/playback-inputs.json"
+  node scripts/showcase-playback.mjs apply "$stage"
+  echo 'Showcase playback evidence updated.'
+  exit 0
+fi
 
 capture() {
   local source=$1 target=$2 signature

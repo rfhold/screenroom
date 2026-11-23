@@ -35,6 +35,7 @@ pnpm test:client-boundary
 ```
 
 Rust tests create build outputs and can use isolated local HTTP/filesystem state.
+The lifecycle tests require Python 3 and PyYAML `6.0.3` for local Compose-source parsing.
 The lifecycle and orchestration tests check construction and isolation; they do not establish a live Compose deployment.
 The [client-boundary guard](../scripts/check-client-boundary.mjs) checks production source/resources across all four client families.
 Its [tests](../scripts/test-client-boundary.mjs) verify detection rules; test support and the separate website remain outside the production scan.
@@ -45,6 +46,144 @@ Database integration tests require explicit disposable PostgreSQL configuration 
 Some database setup resets schemas. Never substitute the persistent development database.
 Live embedding tests require separate approval for the exact endpoint, model, and credential boundary.
 Ordinary test success does not establish live provider or exporter-to-collector behavior.
+
+## Playback checks
+
+The [playback contract](playback.md) owns product behavior; these checks use isolated support rather than a product provider or catalog.
+From the repository root:
+
+```sh
+cargo test --locked -p screenroom-catalog-adapter --lib
+cargo test --locked -p screenroom-catalog-adapter --test playback_protocol
+cargo test --locked -p screenroom-backend --lib
+cargo test --locked -p screenroom-user --lib
+cargo test --locked -p screenroom-playback-gateway
+cargo test --locked -p screenroom-client-core
+buf lint
+python3 scripts/generate-client-models.py --check
+python3 scripts/test-generate-client-models.py
+python3 scripts/backend-lifecycle-tests.py
+pnpm --filter @screenroom/web test:playback
+node --test apps/web/tests/watched.test.mjs
+```
+
+The [adapter suite](../crates/screenroom-catalog-adapter/src/jellyfin/playback/tests.rs) covers device authorization, protocol faults, resource guards, and cleanup.
+The [gateway suite](../crates/screenroom-playback-gateway/src/tests.rs) covers isolated control/media boundaries and shutdown task ownership.
+The [core suite](../crates/screenroom-client-core/tests/playback.rs) covers public transport, deadlines, cancellation, validation, and profile-generation fences.
+Default Rust commands leave ignored database and attached/live cases unrun.
+Do not add an unfiltered `--ignored` selector.
+
+`test:playback` runs [controller regressions](../apps/web/tests/playback.test.mjs) and [mounted browser cases](../apps/web/tests/playback-browser.test.mjs).
+Its pretest hook invokes [`prepare-core.mjs`](../apps/web/scripts/prepare-core.mjs), which checks or rebuilds the owned WASM artifact.
+Prerequisites include workspace dependencies, the repository-pinned pnpm, the WASM toolchain, Playwright Chromium, and `ffmpeg` with `libx264` and AAC.
+The browser suite generates small owned MP4/HLS clips and serves isolated HTTP/gRPC-Web responses on distinct loopback SPA/API origins.
+It exercises actual media decode and anonymous WebVTT through real WASM exports.
+Its HTTP double does not establish positive gateway-plus-Jellyfin acceptance.
+The watched suite runs separately; `test:playback` does not select it.
+
+`node --test apps/web/tests/native-navigation.test.mjs` starts an owned isolated Vite server and exercises the actual SvelteKit router with a client fixture.
+It covers native deep routes, legacy canonicalization, invalid scope, search-page restoration, player Back/Forward/reload without automatic Create, and disabled Maintenance.
+The fixture does not prove media decode; the separate mounted playback suite owns that check.
+
+Wire/model changes also require Buf generation, model drift checks, WASM preparation, and native binding checks.
+Use the [core build modes](client-api.md#build-the-core) for `bindings` and `wasm`.
+Generated Swift/Kotlin output alone does not prove native SDK builds or application behavior.
+Web type/build checks can regenerate WASM; keep generation ownership explicit.
+Safari native HLS requires separate browser acceptance; Chromium MSE success does not establish Safari support.
+
+### Player presentation checks
+
+The [shared presentation contract](playback.md#shared-player-presentation) defines expected behavior, not a cross-platform acceptance result.
+Source review and isolated presentation tests cover layout structure, visibility state, menu dismissal, and timer teardown.
+They do not prove actual pointer, touch, keyboard, remote, subtitle, or native-window behavior.
+Use the [Web playback checks](#playback-checks) and [native platform procedures](#native-playback-checks) for reproducible entry points.
+
+With separate platform/runtime approval, check:
+
+- Stable video bounds through preparation, errors, menus, controls, and fullscreen transitions.
+- Contain sizing and usable controls across narrow, desktop, and TV viewports.
+- Accessible icon labels, target sizes, selected states, and visible keyboard/remote focus.
+- Three-second idle fade only during active playback; pause, errors, menus, scrubbing, and control focus retain overlays.
+- Reveal gestures without accidental playback actions, invisible focus targets, or hidden overlays that intercept clicks.
+- Click/touch/focus menu access, bounded track lists, subtitles Off, and menu dismissal before exit.
+- Readable subtitles with visible overlays.
+- Stable media surface and session/report sequence through presentation-only transitions.
+
+Native GUI/device, decoder, scene, fullscreen, and real-provider acceptance remain separate evidence boundaries.
+Presentation checks grant no backend lifecycle, provider-write, or GUI automation authority.
+
+### Native playback checks
+
+Platform guides own the commands and prerequisites:
+
+- [Apple native playback](../apps/apple/README.md#native-playback) documents isolated lifecycle tests without a backend or GUI.
+- [Android build](../apps/android/README.md#build) documents unit tests, mobile/TV APK builds, lint, and instrumentation compilation.
+- [Linux native run](../apps/linux/README.md#native-run) documents native checks and the separate headless library target.
+
+The [Apple tests](../apps/apple/Tests/NativePlaybackTests.swift) exercise controller lifecycle and exact mutation retries.
+Apple source routes tvOS Play/Pause through report-aware controls and stops on both inactive and background scenes.
+Physical remote input, actual scene transitions, and fullscreen continuity require separate platform acceptance.
+Apple catalog-state checks exercise bounded snapshots and stale-read fences; isolated success does not prove runtime scroll or focus restoration.
+The [Android tests](../apps/android/ui/src/test/kotlin/org/screenroom/ui/NativePlaybackTest.kt) exercise player ownership, reports, retries, and cleanup.
+Android Stop checks distinguish local termination from provider confirmation, exact-request recovery, and recovery expiry.
+Fullscreen and Back require separate device checks for presentation continuity without new sessions or altered event sequences.
+The [Linux headless tests](../apps/linux/src/playback_state.rs) exercise offsets, pre-origin gateway seeks, exact logical targets, final-position freeze, and report order.
+These isolated checks do not establish real-provider media decode or platform GUI behavior.
+APK/instrumentation compilation does not execute device tests.
+Apple SDK builds do not execute simulator or device playback.
+
+Linux native checks require GTK4, libadwaita, Pango, GdkPixbuf, GStreamer development libraries, and runtime plugins.
+Required media components include `playbin`, `gtk4paintablesink`, HTTP, MP4 demux, H.264/AAC decoders, and applicable HLS/subtitle plugins.
+The [Linux playback guide](../apps/linux/README.md#native-playback) defines capability detection and runtime error behavior.
+The [Linux prerequisite guide](../apps/linux/README.md#native-run) names the Debian packages for these factories.
+The [compositor Dockerfile](../apps/linux/tests/e2e/Dockerfile) installs GTK4 sink, libav, bad, X/text-overlay, and inspection-tool packages.
+It also copies the [plugin check](../apps/linux/scripts/check-playback-plugins.sh) into the image as `screenroom-check-playback-plugins`.
+The script checks factory availability without a playback pipeline or registry-cache updates.
+Factory discovery does not prove decode, subtitle synchronization, or audio/video output.
+Dockerfile source alone does not establish a container build, installed factory availability, native linkage, or runtime acceptance.
+`DOCS_RS=1` bypasses native dependency probes; it provides no genuine native build, linkage, plugin, or runtime acceptance.
+After a bypass check, use a fresh Cargo target directory for native checks with `DOCS_RS` unset.
+Headless `--no-default-features --lib` checks exclude the GTK/GStreamer application.
+Root workspace checks also exclude the independent Linux workspace.
+
+Native acceptance requires separate approval for actual devices or GUI sessions and provider-write effects.
+Exercise platform exit/background hooks, focus, fullscreen transitions, subtitle synchronization, audio choices, and actual decoder failures separately.
+Also verify explicit Play after restoration, fixed final positions, capability privacy, and uncertainty without duplicate personal reports.
+The [native lifecycle contract](playback.md#native-stop-and-restoration) records source differences, not cross-platform runtime signoff.
+
+### Playback database boundary
+
+The [repository regressions](../crates/screenroom-backend/tests/playback.rs) and [gateway database cases](../crates/screenroom-playback-gateway/src/tests/database.rs) require `SCREENROOM_PLAYBACK_TEST_DATABASE_URL`.
+These ignored cases require a separately authorized, disposable PostgreSQL target and can reset database schemas.
+Never guess a URL or substitute the persistent installation.
+Compile-only checks require no database connection:
+
+```sh
+cargo test --locked -p screenroom-backend --test playback --no-run
+cargo test --locked -p screenroom-playback-gateway --no-run
+```
+
+Database test execution remains separate from compilation and source review.
+Only executed disposable-target checks establish migration, grant, transaction, and race behavior.
+
+### Real playback acceptance
+
+Obtain separate approval for the exact installation, Jellyfin server, personal profile, actual titles, lifecycle changes, and provider-write effects.
+Confirm the [runtime prerequisites](backend.md#playback-gateway-runtime) without a private-volume reset or implicit Quick Connect enablement.
+Discover approved real Movie/Episode IDs and source/library scope; do not substitute generated clips or fixture catalog entries.
+The acceptance cases include:
+
+- Actual direct MP4 and HLS decode through the public gateway.
+- Pause, seek, live personal resume, audio selection, WebVTT, and supported burn-in.
+- Correct personal-user attribution for start, progress, and stop; no indexing-profile fallback.
+- Exact encoding/device cleanup after stop, replacement, expiry, and restart.
+- Profile/source revocation, media ranges, anonymous cross-origin requests, and capability privacy.
+- Safe ambiguous outcomes with no duplicate start report or stale watched publication.
+- Actual image/configuration load, private mount ownership, restricted grants, and startup readiness.
+
+Keep native engine acceptance separate from shared-binding support and isolated controller tests.
+Keep Safari, provider codecs/subtitles, TLS, actual runtime configuration, and database acceptance as distinct evidence boundaries.
+No scripted procedure here enables provider features or resets private state.
 
 ## Real-source acceptance
 
@@ -194,14 +333,14 @@ Preserve useful failure logs and captures; avoid credentials, private URLs, key 
 The [backend contract helper](../scripts/backend-contract.py) compares native/gRPC-Web reads and public/private route separation on an approved live instance.
 It accepts an empty catalog and does not establish populated provider acceptance or semantic/artwork completeness.
 
-With separate authority for website file changes, showcase export uses:
+With separate authority for website file changes, the default browse showcase export uses:
 
 ```sh
 bash scripts/e2e.sh --update-showcase
 bash scripts/e2e.sh --update-showcase apple web
 ```
 
-Exports require `happy-path` or `all`; `retry` and `regression` fail before tests.
+Browse exports require `happy-path` or `all`; `retry` and `regression` fail before tests.
 Every selected suite and PNG validation must succeed before website files change; unselected families retain their images.
 Exports require `file`; Apple attachment selection also requires `jq`.
 Cancellation or export failure restores selected prior images. A failed restoration preserves backups and reports their path.
@@ -213,3 +352,6 @@ Apple export requires exactly one current-run named `{flow}-success` attachment 
 Default Apple exports preserve macOS images; explicit approved `E2E_MACOS=1` includes that profile's captures.
 The other suites clear prior success captures before execution.
 Showcase export remains a separate local file mutation, not external publication authority.
+
+For real Jellyfin playback evidence, use the [playback showcase procedure](../website/README.md#playback-journey).
+That journey requires explicit backend attachment and title selectors, accepts only `happy-path`, and preserves historical browse images.

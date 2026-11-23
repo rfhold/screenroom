@@ -6,7 +6,8 @@ Screenroom pairs native clients and a Web SPA with a shared Rust client core and
 PostgreSQL stores the shared catalog, local users, provider connections, queue progress, search documents, and embeddings.
 Garage stores private artwork bytes. Jellyfin supplies real provider data through backend adapters.
 Runtime product mocks, TMDB fixture feeds, and demo-user bootstrap are not supported.
-Authentication and playback remain outside the implementation.
+Web-first Jellyfin playback uses backend-owned sessions and gateway media routes; authentication remains outside the implementation.
+Source support does not establish live provider compatibility or deployment readiness.
 
 Clients receive catalog content, artwork, provider branding, and notices through the backend and shared core.
 They own presentation and local preferences, not provider credentials or direct Jellyfin HTTP.
@@ -19,6 +20,7 @@ The website remains separate from the Web SPA; historical showcase images are st
 | [Documentation index](docs/README.md) | Product, architecture, operations, and platform guides. |
 | [Backend development](docs/backend.md) | Persistent local lifecycle, migrations, identity, search, artwork, and telemetry. |
 | [Jellyfin connections](docs/jellyfin.md) | Implemented managed backend setup, private API-key ownership, and limits. |
+| [Playback](docs/playback.md) | Web player, public control API, gateway media, personal identity, and security limits. |
 | [Client API and core](docs/client-api.md) | Public reads, separate operator capability, bindings, and toolchains. |
 | [Indexing architecture](docs/indexing.md) | Shared queue, policies, retry/redrive, durable progress, and incremental acquisition. |
 | [Index maintenance](docs/index-maintenance.md) | Canonical repair, publication, and trusted-local operator security. |

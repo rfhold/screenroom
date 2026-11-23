@@ -1,6 +1,6 @@
 # Backend development
 
-The catalog, user, and index worker use shared PostgreSQL repositories.
+The catalog, user, playback gateway, and index worker use shared PostgreSQL repositories.
 Managed Jellyfin connections supply real provider data; runtime fixture adapters and backend profiles are not supported.
 The [component outline](components.md) owns intended product scope and the public deployment contract.
 The [client API guide](client-api.md) owns the public client contract, separate operator capability, and local settings boundary.
@@ -13,12 +13,13 @@ Implemented source does not establish active runtime capabilities or authorize l
 | --- | --- | --- |
 | `screenroom-catalog` | `screenroom.catalog.v1.BrowseService`, `screenroom.catalog.v1.CatalogService`, and `screenroom.catalog.v1.SearchService` | Persistent scoped catalog, search, artwork credits, and artwork HTTP transport. |
 | `screenroom-user` | `screenroom.user.v1.UserService` | Local user reads and validated Jellyfin profile links through UUID metadata. |
-| `screenroom-playback-gateway` | None | Empty Tonic routes; the `screenroom.playback_gateway.v1` protobuf package defines no messages or RPCs. |
+| `screenroom-playback-gateway` | `screenroom.playback_gateway.v1.PlaybackService` and `/playback/v1/media/` | Durable Jellyfin sessions, private device authorization, media transport, personal reports, and cleanup. |
 | `screenroom-index-operator` | Separate local HTTP/JSON API | Managed Jellyfin discovery/save and canonical policies, diagnostics, history, redrive, and run controls; no frontend hosting. |
 
 The catalog, user, and playback gateway accept HTTP/2 gRPC and HTTP/1 gRPC-Web through `tonic-web` on one listener.
-Envoy routes public catalog and user paths through one loopback edge. It does not expose operator or internal playback-state RPCs.
-The playback gateway retains empty routes. No service implements authentication, JWT verification, or playback.
+Envoy routes public catalog, user, and playback paths through one loopback edge.
+It does not expose operator or internal playback-state RPCs.
+No service implements authentication or JWT verification.
 
 Local user UUIDs select state; they are not credentials. Private listeners provide network separation, not authentication or administrator validation.
 Do not expose the local stack to an untrusted network.
@@ -38,10 +39,11 @@ bash scripts/backend.sh down
 ```
 
 These commands mutate local runtime state; they are not prose-validation commands.
-`up` initializes missing installation files, private Garage keys, a credential volume, and a local user before service startup.
+`up` initializes missing installation files, private Garage keys, private credential volumes, and a local user before service startup.
 Its create-only user initialization preserves operator names, disabled users, cleared links, and remapped links.
 The explicit user initializer supports ordinary local user updates, not provider-link imports; service startup itself does not create users.
 `wait` compares native/browser catalog information and user RPCs with persisted installation identity.
+It also checks the private playback `/ready` endpoint before it writes `checks.playback=true` in the descriptor.
 Readiness does not require provider content, artwork, complete semantic coverage, or an embedding endpoint.
 HTTP 200 alone does not establish readiness. `status` checks the live instance identity against its descriptor.
 `down` preserves named volumes, Garage keys, and the instance UUID; it removes the readiness descriptor.
@@ -50,7 +52,7 @@ Never delete volumes or regenerate missing keys as a routine restart procedure.
 The default project is `screenroom-local`; `SCREENROOM_BACKEND_PROJECT` accepts an explicit `screenroom-<name>` project.
 `SCREENROOM_BACKEND_PROFILE` is retired and fails validation.
 `SCREENROOM_BACKEND_PORT` defaults to `50051`. The public edge binds `127.0.0.1` on that port.
-PostgreSQL 18 with pgvector, Garage, catalog, user, worker, and Envoy share this named instance.
+PostgreSQL 18 with pgvector, Garage, catalog, user, worker, playback gateway, and Envoy share this named instance.
 Private database, object-store, and internal RPC ports have no host publication.
 The optional index operator has a separate loopback HTTP port.
 
@@ -123,7 +125,7 @@ A short-lived DDL pool closes before the restricted runtime pool opens. Migratio
 `DATABASE_URL` selects runtime credentials. `SCREENROOM_MIGRATION_DATABASE_URL` optionally selects separate credentials for the same database target.
 Without that variable, startup uses `DATABASE_URL` for migrations too.
 Separate credentials restrict runtime queries, not process privileges: the process still holds the migration credential and DDL capability.
-The runtime NOLOGIN roles define restricted user, catalog, worker, and operator grants.
+The runtime NOLOGIN roles define restricted user, catalog, worker, operator, and playback grants.
 Compose uses the separate `operator_runtime` login through `screenroom_operator`.
 The `screenroom-migrate` executable supports optional manual migration; no mandatory one-shot migration service precedes normal startup.
 Add forward-only migrations. Never edit applied migration files or add down/reset procedures.
@@ -132,6 +134,7 @@ Forward-only migrations `010` through `019` implement the shared queue, canonica
 Migration `010` moves jobs into `queue.jobs` and preserves job identities; it supplies no legacy `ingest.jobs` view.
 Migration `020` drops only the exclusive obsolete `ingest.maintenance_starts` table, without `CASCADE`.
 Migrations `021` and `022` add managed connections and restricted private read grants.
+Migration [`202611140023_playback.sql`](../migrations/202611140023_playback.sql) adds playback sessions, receipts, cleanup, private resource metadata, freshness fences, and restricted grants.
 The cutover preserves catalog, artwork, embeddings, users, links, installation identity, and canonical receipt provenance.
 Migration source does not establish the applied schema of any persistent instance.
 It supplies no legacy queue compatibility view or permission to reset persistent state.
@@ -181,9 +184,84 @@ Provider acquisition and worker activation require explicit approval for the exa
 
 `SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY` selects `/run/screenroom/credentials` in Compose.
 The persistent credential volume requires directory mode `0700`, generated UUID files mode `0600`, and effective UID `10001`.
-Operator mounts it read/write; user and worker mount it read-only; catalog has no mount.
+Operator mounts it read/write; user, worker, and playback gateway mount it read-only; catalog has no mount.
 Private database references never expose keys or locators to ordinary clients. This is not encryption at rest.
 The [credential contract](jellyfin.md#credential-ownership) defines no-follow file checks, ownership, synchronization, and recovery limits.
+
+### Playback gateway runtime
+
+The [playback guide](playback.md) owns public behavior, capabilities, personal identity, and media limits.
+The gateway owns cleanup supervision; playback never enters the indexing queue.
+The [runtime](../crates/screenroom-playback-gateway/src/runtime.rs) validates private directories and applies migrations before listener startup.
+It requires a restricted playback role and an exclusive PostgreSQL advisory lock.
+It revokes abandoned transports before readiness; restart resumes cleanup, not playback or personal-report replay.
+Loss of database ownership closes active dispatch.
+
+| Configuration | Contract |
+| --- | --- |
+| `SCREENROOM_PLAYBACK_GATEWAY_LISTEN` | Socket address; standalone default `127.0.0.1:50054`, Compose private listener `0.0.0.0:50054`. |
+| `SCREENROOM_PLAYBACK_API_ORIGIN` | Required client-visible HTTP(S) API origin for media URLs; Compose uses the shared loopback edge. |
+| `SCREENROOM_PLAYBACK_GATEWAY_CORS_ORIGINS` | Exact comma-separated SPA origins; empty permits no cross-origin browser access. |
+| `SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY` | Required managed administrator-key directory; read-only gateway mount. |
+| `SCREENROOM_PLAYBACK_SECRET_DIRECTORY` | Required separate private playback store; gateway-only read/write mount. |
+| `DATABASE_URL` | Restricted runtime login; Compose uses `playback_runtime` with `screenroom_playback` grants. |
+| `SCREENROOM_MIGRATION_DATABASE_URL` | Separate startup DDL credential for the same database instance. |
+
+The executable rejects database owners, superusers, schema-create privileges, and writes to tables outside the playback schema.
+The process still holds migration credentials; runtime query restrictions do not establish process-level DDL isolation.
+The private `/ready` endpoint has no public Envoy route.
+Readiness establishes startup prerequisites, not provider availability, media decode, or successful remote cleanup.
+
+Compose mounts `backend-playback-secrets` at `/run/screenroom/playback`.
+The directory requires UID/GID `10001:10001` and mode `0700`; private UUID files require mode `0600`.
+Managed keys and playback secrets require separate, non-nested directories.
+Only the gateway receives the playback volume; PostgreSQL stores private references rather than tokens or replay capability material.
+The [private store](../crates/screenroom-backend/src/playback/secrets.rs) checks ownership, modes, links, file type, and size.
+It uses no-follow access, no-overwrite publication, and filesystem synchronization.
+These files provide no encryption at rest.
+
+The supported lifecycle `up` reapplies the additive [role bootstrap](../docker/backend/postgres.sql) before service startup.
+Bootstrap creates only absent roles/logins; it never rotates current passwords or repairs arbitrary role drift.
+PostgreSQL does not replay initdb scripts on a current data volume.
+Direct Compose startup alone therefore cannot ensure roles on an older volume.
+The lifecycle helper also initializes a new empty playback volume from root-owned `0755` to `10001:10001:0700`.
+It refuses arbitrary ownership repair for populated or mismatched private stores.
+Direct Compose startup does not perform that volume initialization.
+Preserve both private volumes with their database and installation identity.
+Do not delete volumes, reset passwords, or replace private files as a restart workaround.
+
+Activation requires separate approval for the exact installation, migrations, role bootstrap, private-volume initialization, and service lifecycle.
+Provider acceptance additionally requires the exact server, personal profile, titles, and provider-write effects.
+Source configuration does not establish actual grants, mount permissions, container behavior, or live provider compatibility.
+
+#### Cleanup and shutdown
+
+Stop revokes local media before remote cleanup and reports the final known position under the ordered event contract.
+Transport replacement queues old-encoding cleanup without a false item stop or another item start.
+Durable intent records exact gateway-owned device and play-session identities before remote effects.
+Lost authorization or token responses use exact-device recovery with the managed administrator key.
+Cleanup verifies server identity; it never uses profile-wide device filters or another session's token.
+The gateway cleans old encodings before final device revocation.
+An uncertain personal effect keeps watched freshness unknown even after credential revocation or successful cleanup.
+
+Cleanup uses durable bounded claims and at most five attempts; exhausted or identity-change failures remain visible through safe diagnostics.
+Retention preserves incomplete cleanup evidence and deletes private files only after durable retirement proof.
+Shutdown closes control admission, drains owned tasks, and classifies durable dispatch outcomes before cleanup.
+If classification fails, shutdown defers cleanup rather than assume that cancelled provider work stopped.
+The shutdown budget is 61 seconds; Compose and lifecycle teardown allow 75 seconds.
+The lifecycle helper uses `down --timeout 75` and preserves named volumes.
+
+#### Edge media policy
+
+The [Envoy configuration](../docker/backend/envoy.yaml) gives playback RPC routes a 35-second timeout.
+Media GET/HEAD/OPTIONS routes use no whole-request timeout and a 60-second idle timeout.
+The HTTP connection manager bounds request headers to 10 seconds and 32 KiB.
+The adapter separately bounds provider headers and idle waits to 10 seconds.
+Access logs use query-free `%PATH(NQ:PATH)%`, not capability-bearing request URLs.
+Media routes disable all trace sampling and remove client trace-forcing/context headers.
+The gateway adds `no-store`, `no-referrer`, and `nosniff` response headers.
+The Web document also declares no-referrer; anonymous cross-origin video/HLS/subtitle requests omit cookies.
+These controls do not make bearer URLs safe to export or log elsewhere.
 
 ### Watched snapshots
 
@@ -229,7 +307,9 @@ Migrations `202611100001` through `202611100008` remain immutable.
 Service startup applies migrations through the shared startup path described above.
 Code and documentation changes do not authorize migration application, service restart, provider acquisition, or live activation.
 Those operations require separate explicit approval for the target instance and provider.
-There are no watched controls or provider writes.
+The watched overlay adds no manual watched controls.
+Playback reports do write personal provider state under the [playback freshness contract](playback.md#jellyfin-identity-and-personal-state).
+Acquisition and publication share a separate playback epoch; pending or unknown effects suppress stale watched observations.
 The [client watched contract](client-api.md#watched-state) owns public values, web presentation, and read freshness.
 
 ### Search
@@ -274,7 +354,7 @@ Artwork visibility follows the shared installation, not a per-user ACL.
 ### Direct listeners
 
 The service `src/main.rs` files own environment defaults; Compose supplies private container addresses.
-Standalone defaults are catalog `127.0.0.1:50052`, user `127.0.0.1:50053`, and empty playback gateway `127.0.0.1:50054`.
+Standalone defaults are catalog `127.0.0.1:50052`, user `127.0.0.1:50053`, and playback gateway `127.0.0.1:50054`.
 User's internal default is `127.0.0.1:50063`. Catalog exposes no private ingestion RPC listener.
 
 Each listen variable accepts a socket address, not an HTTP URL.
@@ -307,14 +387,15 @@ SCREENROOM_CATALOG_PUBLIC_ORIGIN=http://127.0.0.1:50052 \
   SCREENROOM_CATALOG_CORS_ORIGINS=http://127.0.0.1:4173 \
   cargo run --locked -p screenroom-catalog --bin screenroom-catalog
 SCREENROOM_USER_CORS_ORIGINS=http://127.0.0.1:4173 cargo run --locked -p screenroom-user
-SCREENROOM_PLAYBACK_GATEWAY_CORS_ORIGINS=http://127.0.0.1:4173 cargo run --locked -p screenroom-playback-gateway
 ```
 
+Direct gateway startup also requires every [playback runtime prerequisite](#playback-gateway-runtime), not CORS alone.
 Catalog permits POST, GET, and HEAD with browser preflight; its allowlist includes user-selector and conditional-artwork headers.
 Catalog exposes `grpc-status`, `grpc-message`, `etag`, and `content-length`.
 Consult each transport module for its exact header allowlist.
 CORS is not authentication and does not restrict native clients. This configuration grants no permission for production exposure.
-Playback gateway routes remain empty.
+Playback control and media use distinct header/method allowlists from the [playback contract](playback.md#media-and-lifetime-rules).
+Compose permits localhost and `127.0.0.1` SPA origins on ports `4173`, `4176`, and `5173`.
 
 ## Shared telemetry
 
@@ -392,6 +473,6 @@ buf generate
 
 Catalog owns BrowseService, CatalogService, SearchService, and catalog messages; user owns UserService and local user messages.
 Common owns the shared SearchTypes and SearchMethods records.
-The ordinary client exposes only catalog/common/user RPC contracts, not private operator/internal RPC bindings or backend database dependencies.
+The ordinary client exposes public catalog/common/user/playback RPC contracts, not private operator/internal RPC bindings or backend database dependencies.
 The separate [operator capability](client-api.md#operator-capability) uses typed HTTP/JSON through explicit `OperatorClient` construction.
 The contract supplies no old PreferencesService or mock-profile aliases.

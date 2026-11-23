@@ -87,17 +87,41 @@ This design does not provide encryption at rest.
 `SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY` selects the private backend directory.
 Compose mounts `/run/screenroom/credentials` from the persistent `backend-jellyfin-credentials` volume.
 The directory requires mode `0700`; generated UUID-named files require `0600` and the service's effective UID.
-Compose services use UID `10001`: operator mounts the volume read/write, user and worker mount it read-only, and catalog receives no mount.
+Compose services use UID `10001`; operator mounts the volume read/write.
+User, worker, and playback gateway mount it read-only; catalog receives no mount.
 Descriptor-relative no-follow access rejects symlinks, hard-linked files, wrong owners/modes, special files, and oversized keys.
 Files publish with no overwrite and filesystem synchronization.
 An uncertain database commit never deletes a file that committed state could reference.
 
 The operator uses the separate `operator_runtime` login with `screenroom_operator` grants.
-User and worker receive restricted private connection reads; catalog receives no connection or credential access.
+User, worker, and playback gateway receive restricted private connection reads; catalog receives no connection or credential access.
 Migration credentials remain a separate process capability, not a claim of process-level privilege isolation.
 The lifecycle helper initializes a new empty credential volume's ownership; it refuses arbitrary repair of populated or mismatched stores.
 Source configuration and guards do not prove actual ownership or mount permissions in a particular live installation.
 Preserve credential volumes with their database and runtime identity. This guide authorizes no credential deletion, rotation, or volume reset.
+
+## Personal playback authorization
+
+The [playback contract](playback.md#jellyfin-identity-and-personal-state) uses a backend-owned Jellyfin device session for each logical playback.
+Playback requires the current validated personal profile link for the selected local user and source.
+That link can name the installation's indexing profile, but an absent link never falls back to the indexing identity.
+The trusted-local UUID selects the caller's state; it does not authenticate that caller.
+
+Playback authorization requires an enabled Jellyfin Quick Connect feature.
+The gateway initiates its own code and authorizes only that code for the current personal profile.
+It verifies the returned user and server identities before media access.
+Negotiation, media, and personal playback reports use the private device token, not the managed administrator key.
+The administrator key serves connection/profile checks, exact code authorization, and exact-device cleanup or lost-token recovery.
+Web receives neither the device token nor the temporary Quick Connect secret.
+This flow adds no password form or external Jellyfin login step.
+Disabled Quick Connect returns `playback_authorization_unavailable`; the gateway never enables the feature automatically.
+No administrator-only personal-report fallback exists.
+
+The [backend runtime guide](backend.md#playback-gateway-runtime) owns the separate private playback store, restricted role, readiness, and cleanup.
+Stop, expiry, replacement, and restart retain exact cleanup intent; cleanup never deletes devices through profile-wide filters.
+Private files provide access controls, not encryption at rest.
+Source implementation does not establish live profile attribution, burn-in, audio selection, TLS, or Safari compatibility.
+Real-provider acceptance requires separate approval for the exact installation, server, profile, titles, lifecycle, and provider writes.
 
 ## Destination and transport limits
 

@@ -1,0 +1,909 @@
+{
+  "schema_version": 1,
+  "platforms": [
+    {
+      "slug": "web",
+      "runtime": "Playwright Chromium · desktop 1440×900 and mobile 390×844",
+      "outcome": "observed",
+      "states": [
+        {
+          "id": "desktop-preparing",
+          "label": "desktop: Natural preparing state",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":0,\"readyState\":0,\"seeking\":false,\"width\":0,\"height\":0},\"logicalTime\":0,\"minimum\":0,\"maximum\":1,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":true},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":0,\"readyState\":0,\"seeking\":false,\"width\":0,\"height\":0},\"logicalTime\":0,\"minimum\":0,\"maximum\":1,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":true}}",
+          "image": "/showcase/web/playback/desktop-preparing.png"
+        },
+        {
+          "id": "desktop-playing",
+          "label": "desktop: Playing with settled Pause control",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1065.831734,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1065.7,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1066.011964,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1066,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-playing.png"
+        },
+        {
+          "id": "desktop-idle",
+          "label": "desktop: Playing with fully hidden idle chrome",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1069.904458,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1069.7,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1070.077438,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-idle.png"
+        },
+        {
+          "id": "desktop-paused",
+          "label": "desktop: Paused with Play control",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-paused.png"
+        },
+        {
+          "id": "desktop-seek-forward",
+          "label": "desktop: Forward 30 seconds",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Logical timeline before=1070.1; expected after=1100.1. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1100.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1100.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1100.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1100.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-seek-forward.png"
+        },
+        {
+          "id": "desktop-seek-back",
+          "label": "desktop: Back 30 seconds",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Logical timeline before=1100.1; expected after=1070.1. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-seek-back.png"
+        },
+        {
+          "id": "desktop-seek-active",
+          "label": "desktop: Seek in progress",
+          "status": "not-observed",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "Seek completion was verified; transient seeking was not captured.",
+          "observation": "Seek completion was verified; transient seeking was not captured."
+        },
+        {
+          "id": "desktop-muted",
+          "label": "desktop: Mute",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":true,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":true,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-muted.png"
+        },
+        {
+          "id": "desktop-unmuted",
+          "label": "desktop: Unmute",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-unmuted.png"
+        },
+        {
+          "id": "desktop-volume-min",
+          "label": "desktop: Volume 0",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-volume-min.png"
+        },
+        {
+          "id": "desktop-volume-mid",
+          "label": "desktop: Volume 0.5",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0.5,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0.5],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0.5,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0.5],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-volume-mid.png"
+        },
+        {
+          "id": "desktop-volume-max",
+          "label": "desktop: Volume 1",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-volume-max.png"
+        },
+        {
+          "id": "desktop-settings",
+          "label": "desktop: Playback settings",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-settings.png"
+        },
+        {
+          "id": "desktop-session-information",
+          "label": "desktop: Expanded session information",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Normal Session information disclosure is expanded. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-session-information.png"
+        },
+        {
+          "id": "desktop-audio-tracks",
+          "label": "desktop: Audio track choices",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Actual public UI options: [{\"index\":0,\"label\":\"English · DTS · 6 channels\",\"selected\":true,\"available\":true,\"off\":false}]. Native select popup pixels are not asserted. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-audio-tracks.png"
+        },
+        {
+          "id": "desktop-audio-popup",
+          "label": "desktop: Audio native popup",
+          "status": "unavailable",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "Browser page screenshots do not reliably capture OS-native select popups; actual DOM choices are recorded with settings evidence.",
+          "observation": "Browser page screenshots do not reliably capture OS-native select popups; actual DOM choices are recorded with settings evidence."
+        },
+        {
+          "id": "desktop-audio-option-1",
+          "label": "desktop: Audio: English · DTS · 6 channels",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Track configuration evidence: {\"kind\":\"audio\",\"optionIndex\":0,\"operation\":\"capture-current-selection\",\"requestedSelectionMatched\":true,\"updateResponded\":false,\"sameVideo\":true,\"sourceAttached\":true,\"transportChanged\":false}. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-audio-option-1.png"
+        },
+        {
+          "id": "desktop-subtitle-tracks",
+          "label": "desktop: Subtitles tracks",
+          "status": "unavailable",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "No Subtitles selector is exposed for this session.",
+          "observation": "No Subtitles selector is exposed for this session."
+        },
+        {
+          "id": "desktop-subtitle-popup",
+          "label": "desktop: Subtitles native popup",
+          "status": "unavailable",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "No Subtitles selector is exposed.",
+          "observation": "No Subtitles selector is exposed."
+        },
+        {
+          "id": "desktop-subtitles-off",
+          "label": "desktop: Subtitles Off",
+          "status": "unavailable",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "No subtitle selector or Off choice is exposed for this session.",
+          "observation": "No subtitle selector or Off choice is exposed for this session."
+        },
+        {
+          "id": "desktop-fullscreen",
+          "label": "desktop: Fullscreen player",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":true,\"fullscreenPlayer\":true,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":true,\"fullscreenPlayer\":true,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-fullscreen.png"
+        },
+        {
+          "id": "desktop-fullscreen-exit",
+          "label": "desktop: Exited fullscreen",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1070.14975,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.1,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-fullscreen-exit.png"
+        },
+        {
+          "id": "desktop-error",
+          "label": "desktop: Natural playback error",
+          "status": "not-observed",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "No natural playback error was observed; no faults injected.",
+          "observation": "No natural playback error was observed; no faults injected."
+        },
+        {
+          "id": "desktop-closed",
+          "label": "desktop: Closed player; completed title details",
+          "status": "captured",
+          "viewport": "1440x900 CSS pixels",
+          "observation": "Normal Close; visible selected title and Play, completed details route, zero DOM videos. Provider stop confirmation is not inferred from DOM teardown. {\"before\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":0,\"media\":null,\"logicalTime\":null,\"minimum\":null,\"maximum\":null,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":null,\"header\":null,\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":null,\"volumeValues\":[],\"pauseIcon\":null,\"playIcon\":null,\"detailTitle\":\"Nosferatu\",\"detailPlayVisible\":true,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":1440,\"height\":900,\"devicePixelRatio\":1},\"videoCount\":0,\"media\":null,\"logicalTime\":null,\"minimum\":null,\"maximum\":null,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":null,\"header\":null,\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":null,\"volumeValues\":[],\"pauseIcon\":null,\"playIcon\":null,\"detailTitle\":\"Nosferatu\",\"detailPlayVisible\":true,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/desktop-closed.png"
+        },
+        {
+          "id": "desktop-stop",
+          "label": "desktop: Provider stop confirmation",
+          "status": "not-observed",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "Normal UI Close and local media teardown observed; provider-side stop confirmation is not exposed in completed title UI.",
+          "observation": "Normal UI Close and local media teardown observed; provider-side stop confirmation is not exposed in completed title UI."
+        },
+        {
+          "id": "desktop-stop-control",
+          "label": "desktop: Dedicated Stop control",
+          "status": "unavailable",
+          "viewport": "1440x900 CSS pixels",
+          "reason": "This player exposes Close player and Back to details to end playback, not a dedicated Stop button.",
+          "observation": "This player exposes Close player and Back to details to end playback, not a dedicated Stop button."
+        },
+        {
+          "id": "mobile-preparing",
+          "label": "mobile: Natural preparing state",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":0,\"readyState\":0,\"seeking\":false,\"width\":0,\"height\":0},\"logicalTime\":0,\"minimum\":0,\"maximum\":1,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":true},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":0,\"readyState\":0,\"seeking\":false,\"width\":0,\"height\":0},\"logicalTime\":0,\"minimum\":0,\"maximum\":1,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":true}}",
+          "image": "/showcase/web/playback/mobile-preparing.png"
+        },
+        {
+          "id": "mobile-playing",
+          "label": "mobile: Playing with settled Pause control",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1070.769251,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.6,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1070.798285,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1070.6,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-playing.png"
+        },
+        {
+          "id": "mobile-idle",
+          "label": "mobile: Playing with fully hidden idle chrome",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1074.693616,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.6,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":false,\"muted\":false,\"volume\":1,\"currentTime\":1074.732395,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.6,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":0,\"visibility\":\"hidden\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":\"M8 5v14M16 5v14\",\"playIcon\":null,\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-idle.png"
+        },
+        {
+          "id": "mobile-paused",
+          "label": "mobile: Paused with Play control",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-paused.png"
+        },
+        {
+          "id": "mobile-seek-forward",
+          "label": "mobile: Forward 30 seconds",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Logical timeline before=1074.8; expected after=1104.8. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1104.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1104.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1104.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1104.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-seek-forward.png"
+        },
+        {
+          "id": "mobile-seek-back",
+          "label": "mobile: Back 30 seconds",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Logical timeline before=1104.8; expected after=1074.8. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-seek-back.png"
+        },
+        {
+          "id": "mobile-seek-active",
+          "label": "mobile: Seek in progress",
+          "status": "not-observed",
+          "viewport": "390x844 CSS pixels",
+          "reason": "Seek completion was verified; transient seeking was not captured.",
+          "observation": "Seek completion was verified; transient seeking was not captured."
+        },
+        {
+          "id": "mobile-muted",
+          "label": "mobile: Mute",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":true,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":true,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-muted.png"
+        },
+        {
+          "id": "mobile-unmuted",
+          "label": "mobile: Unmute",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-unmuted.png"
+        },
+        {
+          "id": "mobile-volume-min",
+          "label": "mobile: Volume 0",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Unmute\",\"volumeValues\":[0],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-volume-min.png"
+        },
+        {
+          "id": "mobile-volume-mid",
+          "label": "mobile: Volume 0.5",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0.5,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0.5],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":0.5,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[0.5],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-volume-mid.png"
+        },
+        {
+          "id": "mobile-volume-max",
+          "label": "mobile: Volume 1",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-volume-max.png"
+        },
+        {
+          "id": "mobile-settings",
+          "label": "mobile: Playback settings",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-settings.png"
+        },
+        {
+          "id": "mobile-session-information",
+          "label": "mobile: Expanded session information",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Normal Session information disclosure is expanded. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-session-information.png"
+        },
+        {
+          "id": "mobile-audio-tracks",
+          "label": "mobile: Audio track choices",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Actual public UI options: [{\"index\":0,\"label\":\"English · DTS · 6 channels\",\"selected\":true,\"available\":true,\"off\":false}]. Native select popup pixels are not asserted. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-audio-tracks.png"
+        },
+        {
+          "id": "mobile-audio-popup",
+          "label": "mobile: Audio native popup",
+          "status": "unavailable",
+          "viewport": "390x844 CSS pixels",
+          "reason": "Browser page screenshots do not reliably capture OS-native select popups; actual DOM choices are recorded with settings evidence.",
+          "observation": "Browser page screenshots do not reliably capture OS-native select popups; actual DOM choices are recorded with settings evidence."
+        },
+        {
+          "id": "mobile-audio-option-1",
+          "label": "mobile: Audio: English · DTS · 6 channels",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Track configuration evidence: {\"kind\":\"audio\",\"optionIndex\":0,\"operation\":\"capture-current-selection\",\"requestedSelectionMatched\":true,\"updateResponded\":false,\"sameVideo\":true,\"sourceAttached\":true,\"transportChanged\":false}. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":true,\"sessionInformationExpanded\":true,\"controlsEnabled\":true,\"audioSelectedIndex\":0,\"subtitleSelectedIndex\":null,\"audioEnabled\":true,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-audio-option-1.png"
+        },
+        {
+          "id": "mobile-subtitle-tracks",
+          "label": "mobile: Subtitles tracks",
+          "status": "unavailable",
+          "viewport": "390x844 CSS pixels",
+          "reason": "No Subtitles selector is exposed for this session.",
+          "observation": "No Subtitles selector is exposed for this session."
+        },
+        {
+          "id": "mobile-subtitle-popup",
+          "label": "mobile: Subtitles native popup",
+          "status": "unavailable",
+          "viewport": "390x844 CSS pixels",
+          "reason": "No Subtitles selector is exposed.",
+          "observation": "No Subtitles selector is exposed."
+        },
+        {
+          "id": "mobile-subtitles-off",
+          "label": "mobile: Subtitles Off",
+          "status": "unavailable",
+          "viewport": "390x844 CSS pixels",
+          "reason": "No subtitle selector or Off choice is exposed for this session.",
+          "observation": "No subtitle selector or Off choice is exposed for this session."
+        },
+        {
+          "id": "mobile-fullscreen",
+          "label": "mobile: Fullscreen player",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":true,\"fullscreenPlayer\":true,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":true,\"fullscreenPlayer\":true,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-fullscreen.png"
+        },
+        {
+          "id": "mobile-fullscreen-exit",
+          "label": "mobile: Exited fullscreen",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "{\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":1,\"media\":{\"paused\":true,\"muted\":false,\"volume\":1,\"currentTime\":1074.800426,\"readyState\":4,\"seeking\":false,\"width\":1440,\"height\":1080},\"logicalTime\":1074.8,\"minimum\":0,\"maximum\":5320.111,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"block\",\"animations\":0},\"header\":{\"opacity\":1,\"visibility\":\"visible\",\"display\":\"flex\",\"animations\":0},\"focusedChrome\":true,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":true,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":\"Mute\",\"volumeValues\":[1],\"pauseIcon\":null,\"playIcon\":\"m8 5 11 7-11 7Z\",\"detailTitle\":null,\"detailPlayVisible\":false,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-fullscreen-exit.png"
+        },
+        {
+          "id": "mobile-error",
+          "label": "mobile: Natural playback error",
+          "status": "not-observed",
+          "viewport": "390x844 CSS pixels",
+          "reason": "No natural playback error was observed; no faults injected.",
+          "observation": "No natural playback error was observed; no faults injected."
+        },
+        {
+          "id": "mobile-closed",
+          "label": "mobile: Closed player; completed title details",
+          "status": "captured",
+          "viewport": "390x844 CSS pixels",
+          "observation": "Normal Close; visible selected title and Play, completed details route, zero DOM videos. Provider stop confirmation is not inferred from DOM teardown. {\"before\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":0,\"media\":null,\"logicalTime\":null,\"minimum\":null,\"maximum\":null,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":null,\"header\":null,\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":null,\"volumeValues\":[],\"pauseIcon\":null,\"playIcon\":null,\"detailTitle\":\"Nosferatu\",\"detailPlayVisible\":true,\"loadingVisible\":false,\"error\":false,\"preparing\":false},\"after\":{\"viewport\":{\"width\":390,\"height\":844,\"devicePixelRatio\":1},\"videoCount\":0,\"media\":null,\"logicalTime\":null,\"minimum\":null,\"maximum\":null,\"fullscreen\":false,\"fullscreenPlayer\":false,\"controls\":null,\"header\":null,\"focusedChrome\":false,\"settings\":false,\"sessionInformationExpanded\":false,\"controlsEnabled\":false,\"audioSelectedIndex\":null,\"subtitleSelectedIndex\":null,\"audioEnabled\":false,\"subtitleEnabled\":false,\"uncertain\":false,\"muteControl\":null,\"volumeValues\":[],\"pauseIcon\":null,\"playIcon\":null,\"detailTitle\":\"Nosferatu\",\"detailPlayVisible\":true,\"loadingVisible\":false,\"error\":false,\"preparing\":false}}",
+          "image": "/showcase/web/playback/mobile-closed.png"
+        },
+        {
+          "id": "mobile-stop",
+          "label": "mobile: Provider stop confirmation",
+          "status": "not-observed",
+          "viewport": "390x844 CSS pixels",
+          "reason": "Normal UI Close and local media teardown observed; provider-side stop confirmation is not exposed in completed title UI.",
+          "observation": "Normal UI Close and local media teardown observed; provider-side stop confirmation is not exposed in completed title UI."
+        },
+        {
+          "id": "mobile-stop-control",
+          "label": "mobile: Dedicated Stop control",
+          "status": "unavailable",
+          "viewport": "390x844 CSS pixels",
+          "reason": "This player exposes Close player and Back to details to end playback, not a dedicated Stop button.",
+          "observation": "This player exposes Close player and Back to details to end playback, not a dedicated Stop button."
+        }
+      ],
+      "item": {
+        "title": "Nosferatu",
+        "year": 1922
+      },
+      "provenance": "Current-run E2E capture · Real Jellyfin-backed application"
+    },
+    {
+      "slug": "android",
+      "runtime": "Android 16; sdk_gphone64_arm64",
+      "outcome": "observed",
+      "states": [
+        {
+          "id": "loading",
+          "label": "loading",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Visible playback loading indicator",
+          "image": "/showcase/android/playback/android/loading.png"
+        },
+        {
+          "id": "playing",
+          "label": "playing",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Pause control enabled and displayed playback position advanced",
+          "image": "/showcase/android/playback/android/playing.png"
+        },
+        {
+          "id": "paused",
+          "label": "paused",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Play control visible after normal Pause action",
+          "image": "/showcase/android/playback/android/paused.png"
+        },
+        {
+          "id": "seek-before",
+          "label": "seek before",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Paused position before Forward 30 seconds",
+          "image": "/showcase/android/playback/android/seek-before.png"
+        },
+        {
+          "id": "seek-after",
+          "label": "seek after",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Displayed playback position advanced after Forward 30 seconds",
+          "image": "/showcase/android/playback/android/seek-after.png"
+        },
+        {
+          "id": "volume-0",
+          "label": "volume 0",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Volume UI reports 0 percent",
+          "image": "/showcase/android/playback/android/volume-0.png"
+        },
+        {
+          "id": "volume-50",
+          "label": "volume 50",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Volume UI reports 50 percent",
+          "image": "/showcase/android/playback/android/volume-50.png"
+        },
+        {
+          "id": "volume-100",
+          "label": "volume 100",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Volume UI reports 100 percent",
+          "image": "/showcase/android/playback/android/volume-100.png"
+        },
+        {
+          "id": "mute",
+          "label": "mute",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Mute action produced Volume 0% and Unmute control",
+          "image": "/showcase/android/playback/android/mute.png"
+        },
+        {
+          "id": "tracks",
+          "label": "tracks",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Actual audio/subtitle menu; only displayed choices are evidenced",
+          "image": "/showcase/android/playback/android/tracks.png"
+        },
+        {
+          "id": "track-choice-1",
+          "label": "English · DTS · 6 channels · eng",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Current selected configuration; controls enabled and media loading settled; no update issued",
+          "image": "/showcase/android/playback/android/track-choice-1.png"
+        },
+        {
+          "id": "subtitles-off",
+          "label": "Off",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Current selected configuration; controls enabled and media loading settled; no update issued",
+          "image": "/showcase/android/playback/android/subtitles-off.png"
+        },
+        {
+          "id": "fullscreen",
+          "label": "fullscreen",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Fullscreen control selected and system bars hidden",
+          "image": "/showcase/android/playback/android/fullscreen.png"
+        },
+        {
+          "id": "settings",
+          "label": "settings",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Actual recovery/settings menu; no recovery action invoked",
+          "image": "/showcase/android/playback/android/settings.png"
+        },
+        {
+          "id": "stop",
+          "label": "stop",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Normal Stop playback invoked; provider confirmation not inferred",
+          "image": "/showcase/android/playback/android/stop.png"
+        },
+        {
+          "id": "cleanup",
+          "label": "cleanup",
+          "status": "captured",
+          "viewport": "1080x2400",
+          "observation": "Returned to details via owned Back; provider cleanup remains unconfirmed unless UI explicitly reports it",
+          "image": "/showcase/android/playback/android/cleanup.png"
+        },
+        {
+          "id": "idle",
+          "label": "idle",
+          "status": "not-observed",
+          "viewport": "1080x2400",
+          "reason": "State was not observed through available normal UI",
+          "observation": "No capture claimed"
+        },
+        {
+          "id": "error",
+          "label": "error",
+          "status": "not-observed",
+          "viewport": "1080x2400",
+          "reason": "State was not observed through available normal UI",
+          "observation": "No capture claimed"
+        }
+      ],
+      "item": {
+        "title": "Nosferatu",
+        "year": 1922
+      },
+      "provenance": "Current-run E2E capture · Real Jellyfin-backed application"
+    },
+    {
+      "slug": "android-tv",
+      "runtime": "Android 16; sdk_google_atv64_arm64",
+      "outcome": "observed",
+      "states": [
+        {
+          "id": "loading",
+          "label": "loading",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Visible playback loading indicator",
+          "image": "/showcase/android-tv/playback/android-tv/loading.png"
+        },
+        {
+          "id": "playing",
+          "label": "playing",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Pause control enabled and displayed playback position advanced",
+          "image": "/showcase/android-tv/playback/android-tv/playing.png"
+        },
+        {
+          "id": "paused",
+          "label": "paused",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Play control visible after normal Pause action",
+          "image": "/showcase/android-tv/playback/android-tv/paused.png"
+        },
+        {
+          "id": "seek-before",
+          "label": "seek before",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Paused position before Forward 30 seconds",
+          "image": "/showcase/android-tv/playback/android-tv/seek-before.png"
+        },
+        {
+          "id": "seek-after",
+          "label": "seek after",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Displayed playback position advanced after Forward 30 seconds",
+          "image": "/showcase/android-tv/playback/android-tv/seek-after.png"
+        },
+        {
+          "id": "volume-0",
+          "label": "volume 0",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Volume UI reports 0 percent",
+          "image": "/showcase/android-tv/playback/android-tv/volume-0.png"
+        },
+        {
+          "id": "volume-50",
+          "label": "volume 50",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Volume UI reports 50 percent",
+          "image": "/showcase/android-tv/playback/android-tv/volume-50.png"
+        },
+        {
+          "id": "volume-100",
+          "label": "volume 100",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Volume UI reports 100 percent",
+          "image": "/showcase/android-tv/playback/android-tv/volume-100.png"
+        },
+        {
+          "id": "mute",
+          "label": "mute",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Mute action produced Volume 0% and Unmute control",
+          "image": "/showcase/android-tv/playback/android-tv/mute.png"
+        },
+        {
+          "id": "tracks",
+          "label": "tracks",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Actual audio/subtitle menu; only displayed choices are evidenced",
+          "image": "/showcase/android-tv/playback/android-tv/tracks.png"
+        },
+        {
+          "id": "track-choice-1",
+          "label": "English · DTS · 6 channels · eng",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Current selected configuration; controls enabled and media loading settled; no update issued",
+          "image": "/showcase/android-tv/playback/android-tv/track-choice-1.png"
+        },
+        {
+          "id": "subtitles-off",
+          "label": "Off",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Current selected configuration; controls enabled and media loading settled; no update issued",
+          "image": "/showcase/android-tv/playback/android-tv/subtitles-off.png"
+        },
+        {
+          "id": "fullscreen",
+          "label": "fullscreen",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Fullscreen control selected and system bars hidden",
+          "image": "/showcase/android-tv/playback/android-tv/fullscreen.png"
+        },
+        {
+          "id": "settings",
+          "label": "settings",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Actual recovery/settings menu; no recovery action invoked",
+          "image": "/showcase/android-tv/playback/android-tv/settings.png"
+        },
+        {
+          "id": "stop",
+          "label": "stop",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Normal Stop playback invoked; provider confirmation not inferred",
+          "image": "/showcase/android-tv/playback/android-tv/stop.png"
+        },
+        {
+          "id": "cleanup",
+          "label": "cleanup",
+          "status": "captured",
+          "viewport": "1920x1080",
+          "observation": "Returned to details via owned Back; provider cleanup remains unconfirmed unless UI explicitly reports it",
+          "image": "/showcase/android-tv/playback/android-tv/cleanup.png"
+        },
+        {
+          "id": "idle",
+          "label": "idle",
+          "status": "not-observed",
+          "viewport": "1920x1080",
+          "reason": "State was not observed through available normal UI",
+          "observation": "No capture claimed"
+        },
+        {
+          "id": "error",
+          "label": "error",
+          "status": "not-observed",
+          "viewport": "1920x1080",
+          "reason": "State was not observed through available normal UI",
+          "observation": "No capture claimed"
+        }
+      ],
+      "item": {
+        "title": "Nosferatu",
+        "year": 1922
+      },
+      "provenance": "Current-run E2E capture · Real Jellyfin-backed application"
+    },
+    {
+      "slug": "linux",
+      "runtime": "Linux container; headless Mutter / PipeWire; GTK4 / GStreamer",
+      "outcome": "observed",
+      "states": [
+        {
+          "id": "detail",
+          "label": "Movie details",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Exact backend item/title/year/kind resolved by scoped search; exactly one matching item-ID accessibility description activated; matching title/year displayed in details.",
+          "image": "/showcase/linux/playback/detail.png"
+        },
+        {
+          "id": "loading",
+          "label": "Preparing playback",
+          "status": "not-observed",
+          "viewport": "unknown",
+          "reason": "State was not observed during this bounded journey.",
+          "observation": "No synthetic state or injected media failure."
+        },
+        {
+          "id": "playing",
+          "label": "Playing",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Pause enabled; timeline advanced; two central video crops differed by over 1000 pixels.",
+          "image": "/showcase/linux/playback/playing.png"
+        },
+        {
+          "id": "paused",
+          "label": "Paused",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Player Play label visible; timeline stable across two seconds.",
+          "image": "/showcase/linux/playback/paused.png"
+        },
+        {
+          "id": "idle",
+          "label": "Playing with controls hidden",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "The same active playback Window described its controls as hidden before and after the image; fresh snapshots contained no visible chrome.",
+          "image": "/showcase/linux/playback/idle.png"
+        },
+        {
+          "id": "settings",
+          "label": "Playback settings",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Normal playback settings popover is visible.",
+          "image": "/showcase/linux/playback/settings.png"
+        },
+        {
+          "id": "volume-min",
+          "label": "Minimum volume",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual Volume slider value asserted at its representative bound.",
+          "image": "/showcase/linux/playback/volume-min.png"
+        },
+        {
+          "id": "volume-max",
+          "label": "Maximum volume",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual Volume slider value asserted at its representative bound.",
+          "image": "/showcase/linux/playback/volume-max.png"
+        },
+        {
+          "id": "muted",
+          "label": "Muted",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Unmute label confirms the actual mute toggle is active.",
+          "image": "/showcase/linux/playback/muted.png"
+        },
+        {
+          "id": "seek-forward",
+          "label": "Seek forward",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual timeline moved more than 20 seconds in the requested 30-second direction.",
+          "image": "/showcase/linux/playback/seek-forward.png"
+        },
+        {
+          "id": "seek-back",
+          "label": "Seek backward",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual timeline moved more than 20 seconds in the requested 30-second direction.",
+          "image": "/showcase/linux/playback/seek-back.png"
+        },
+        {
+          "id": "tracks",
+          "label": "Audio and subtitle choices",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual audio/subtitle menu; selected and disabled choices are shown as supplied by the real session.",
+          "image": "/showcase/linux/playback/tracks.png"
+        },
+        {
+          "id": "subtitles-off",
+          "label": "Subtitles Off",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Actual Off selected label, enabled controls and stable paused media asserted; no redundant request if already selected.",
+          "image": "/showcase/linux/playback/subtitles-off.png"
+        },
+        {
+          "id": "fullscreen",
+          "label": "Fullscreen",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Exit fullscreen label confirms fullscreen; compositor screenshot measured 1280x800.",
+          "image": "/showcase/linux/playback/fullscreen.png"
+        },
+        {
+          "id": "media-error",
+          "label": "Playback unavailable",
+          "status": "not-observed",
+          "viewport": "unknown",
+          "reason": "State was not observed during this bounded journey.",
+          "observation": "No synthetic state or injected media failure."
+        },
+        {
+          "id": "stopped",
+          "label": "Player stopped",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Normal Stop playback closed the owned player.",
+          "image": "/showcase/linux/playback/stopped.png"
+        },
+        {
+          "id": "cleanup",
+          "label": "Cleanup outcome",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Playback stopped locally. Remote cleanup remains pending. Provider cleanup remains unknown; personal progress confirmation is not provider cleanup proof.",
+          "image": "/showcase/linux/playback/cleanup.png"
+        },
+        {
+          "id": "audio-track-01",
+          "label": "Audio choice 1",
+          "status": "captured",
+          "viewport": "1280x800",
+          "observation": "Already-selected real UI choice captured without a redundant request; selected label, enabled controls and stable paused media asserted.",
+          "image": "/showcase/linux/playback/audio-track-01.png"
+        },
+        {
+          "id": "subtitle-tracks",
+          "label": "Subtitles choices",
+          "status": "unavailable",
+          "viewport": "unknown",
+          "reason": "The real session exposes no discrete choices in this section.",
+          "observation": "Actual GTK menu inventory; no unavailable choice was selected."
+        }
+      ],
+      "item": {
+        "title": "Nosferatu",
+        "year": 1922
+      },
+      "provenance": "Current-run E2E capture · Real Jellyfin-backed application"
+    }
+  ]
+}

@@ -10,7 +10,6 @@
   .showcase :global(header p:not(.eyebrow)) { color: var(--text-secondary); }
   .showcase :global(h1) { font-size: clamp(2.75rem, 6vw, 4.75rem); }
   .showcase :global(h2) { font-size: 1.65rem; }
-  .showcase :global(.preview-note) { border-left: 2px solid var(--accent); padding-left: var(--space-3); }
   .showcase :global(.shell-grid) { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr)); gap: var(--space-3); padding: 0; list-style: none; }
   .showcase :global(.shell-card) { min-width: 0; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-raised); }
   .showcase :global(.shell-card h2) { font-size: 1.25rem; margin-bottom: var(--space-1); }

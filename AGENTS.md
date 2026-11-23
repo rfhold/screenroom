@@ -7,6 +7,7 @@
 | [docs/AGENTS.md](docs/AGENTS.md) | Documentation ownership and target-versus-current claims. |
 | [docs/components.md](docs/components.md) | Stated product scope and component boundaries. |
 | [docs/client-api.md](docs/client-api.md) | Public client core, local settings, scoped reads, artwork, and build contract. |
+| [docs/playback.md](docs/playback.md) | Jellyfin Web/native playback, control/media contracts, personal identity, lifecycle differences, and session security. |
 | [docs/backend.md](docs/backend.md) | Persistent backend, startup migrations, local lifecycle, search, artwork, and telemetry. |
 | [docs/jellyfin.md](docs/jellyfin.md) | Managed connections, private API-key files, destination security, and setup limits. |
 | [docs/testing.md](docs/testing.md) | Isolated checks, attached acceptance modes, E2E commands, and platform limits. |

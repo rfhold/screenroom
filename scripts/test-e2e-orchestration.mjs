@@ -10,7 +10,7 @@ await mkdir('build/backend-validation', { recursive: true });
 const base = await mkdtemp(path.join(root, 'build/backend-validation/orchestration-'));
 const userID = randomUUID();
 const flows = ['home', 'sidebar', 'library', 'search', 'detail'];
-const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=', 'base64');
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=', 'base64');
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 async function put(file, contents) {
   await mkdir(path.dirname(file), { recursive: true });
@@ -55,6 +55,12 @@ const cases = [
   { name: 'category-empty-env', args: [], categoryEnv: '', reject: /Invalid E2E category/ },
   { name: 'category-retry-export', categoryEnv: 'retry', reject: /Showcase export requires category happy-path or all/ },
   { name: 'category-regression-export', args: ['--update-showcase', '--category', 'regression'], mac: '1', reject: /Showcase export requires category happy-path or all/ },
+  { name: 'journey-unknown-cli', args: ['--journey', 'unknown'], reject: /Invalid E2E journey/ },
+  { name: 'journey-empty-env', args: [], journeyEnv: '', reject: /Invalid E2E journey/ },
+  { name: 'journey-missing-cli', args: ['--journey'], reject: /--journey requires a value/ },
+  { name: 'journey-cli-over-env', args: ['--journey', 'browse', 'linux'], families: ['linux'], journeyEnv: 'invalid', category: 'all', count: 0 },
+  { name: 'playback-category-reject', args: ['--update-showcase', '--journey', 'playback', '--category', 'all'], reject: /Playback journey requires category happy-path/ },
+  { name: 'playback-attach-required', args: ['--update-showcase', '--journey', 'playback'], reject: /Playback requires explicit SCREENROOM_BACKEND_ATTACH/ },
   { name: 'unknown-family', args: ['unknown'], reject: /Unknown E2E family or option/ }
 ];
 const evidence = [];
@@ -99,6 +105,7 @@ esac
     }
     const helper = `import fs from 'node:fs';
 const [kind, ...profiles] = process.argv.slice(2);
+if (kind === 'apple' && process.env.SCREENROOM_NATIVE_PLAYBACK_RELEASED !== undefined) throw new Error('Browse root forced native playback release');
 const event = (state, profile = kind) => fs.appendFileSync('events.jsonl', JSON.stringify({kind, profile, state, time:Date.now(), pid:process.pid, endpoint:process.env.SCREENROOM_API_ENDPOINT, webEndpoint:process.env.SCREENROOM_E2E_API_ENDPOINT, userID:process.env.SCREENROOM_USER_ID, prepared:process.env.SCREENROOM_CORE_PREPARED, prefix:process.env.SCREENROOM_E2E_PROFILE_PREFIX})+'\\n');
 event('start');
 fs.appendFileSync('categories.jsonl', JSON.stringify({kind, category:process.env.E2E_CATEGORY})+'\\n');
@@ -153,7 +160,8 @@ exec /bin/cp "$@"
     if (test.failure === 'png') await put(path.join(cwd, 'apps/web/e2e/build/screenshots/detail-mobile.png'), 'not PNG');
     const before = await tree(website);
     const env = { ...process.env, PATH: `${cwd}/bin:${process.env.PATH}`, E2E_MACOS: test.mac ?? '0' };
-    for (const key of ['E2E_APPLE_RUN_DIR', 'E2E_CATEGORY', 'SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT', 'SCREENROOM_CORE_PREPARED', 'SCREENROOM_BACKEND_ATTACH', 'SCREENROOM_USER_ID', 'SCREENROOM_BACKEND_PROJECT', 'SCREENROOM_BACKEND_DESCRIPTOR']) delete env[key];
+    for (const key of ['E2E_APPLE_RUN_DIR', 'E2E_CATEGORY', 'SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT', 'SCREENROOM_CORE_PREPARED', 'SCREENROOM_BACKEND_ATTACH', 'SCREENROOM_USER_ID', 'SCREENROOM_BACKEND_PROJECT', 'SCREENROOM_BACKEND_DESCRIPTOR', 'SCREENROOM_E2E_JOURNEY', 'SCREENROOM_NATIVE_PLAYBACK_RELEASED']) delete env[key];
+    if ('journeyEnv' in test) env.SCREENROOM_E2E_JOURNEY = test.journeyEnv;
     if (test.backendFailure) env.FAIL_BACKEND = '1';
     if ('categoryEnv' in test) env.E2E_CATEGORY = test.categoryEnv;
     if (test.external) { env.SCREENROOM_API_ENDPOINT = endpoint; env.SCREENROOM_BACKEND_ATTACH = '1'; }

@@ -4,15 +4,13 @@
 
 <svelte:head>
   <title>Showcase · Screenroom</title>
-  <meta name="description" content="Five E2E flows across eight Screenroom client shells and nine viewport profiles, with a shared Rust core and local mock-server catalog." />
+  <meta name="description" content="Screenshots of the eight Screenroom apps for Web, mobile, desktop, and TV." />
 </svelte:head>
 
 <header>
   <p class="eyebrow">Client previews</p>
   <h1>Showcase</h1>
-  <p>Eight client shells, nine viewport profiles, and five E2E flows: Home, expanded sidebar, Movies library, Search, and title details.</p>
-  <p>The Web showcase includes desktop and mobile browser views. Each card starts with Home.</p>
-  <p class="preview-note">These historical captures retain their original fixture-backed mock-server provenance. Current clients use a persistent local backend with offline adapters; these images do not establish that cutover. Production providers, authentication, and playback are not available. This page serves static screenshots only.</p>
+  <p>Explore eight Screenroom apps. Browse screenshots use an example catalog, and playback screenshots use Jellyfin.</p>
 </header>
 
 <ul class="shell-grid" aria-label="Client shells">
