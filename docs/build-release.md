@@ -27,7 +27,7 @@ The build number sets the Linux package revision and the Apple and Android build
 | `linux-deb-amd64` | Native Debian 13 `amd64`, `dpkg-deb`, `dpkg-shlibdeps` | `.deb` |
 | `linux-deb-arm64` | Native Debian 13 `arm64`, `dpkg-deb`, `dpkg-shlibdeps` | `.deb` |
 | `linux-arch-amd64` | Native Arch Linux `x86_64`, unprivileged `makepkg`, `bsdtar` | `.pkg.tar.zst` |
-| `macos` | macOS, Xcode, XcodeGen, Rust Apple targets | Universal ad hoc-signed `.app` ZIP |
+| `macos` | macOS, Xcode, XcodeGen, Rust Apple targets, Developer ID Application identity, notarytool profile | Universal Developer ID-signed and notarized `.app` ZIP |
 | `ios` | Same Apple host with the iOS device SDK | Unsigned arm64 `.xcarchive` ZIP for iPhone and iPad |
 | `tvos` | Same Apple host with the tvOS device SDK | Unsigned arm64 `.xcarchive` ZIP |
 | `android-tv` | Android SDK and NDK on macOS or x86_64 Linux | Unsigned TV APK |
@@ -42,10 +42,17 @@ Each target writes one package and `manifest.json` to `target/packages/v<version
 The manifest records the source commit, version, target, architecture, signature status, size, and SHA-256.
 For a local check from a dirty tree, set `SCREENROOM_PACKAGE_LOCAL=1`.
 That mode writes under `target/packages/local/`, and the publisher rejects its manifest.
+For macOS, local mode uses an ad hoc signature and skips notarization.
 
 Unsigned Apple device archives and Android APKs do not install as delivered.
-The macOS ZIP does not include Developer ID signing or notarization.
+For a publishable macOS ZIP, set `SCREENROOM_MACOS_SIGN_IDENTITY` to a Developer ID Application certificate name or SHA-1 fingerprint.
+Set `SCREENROOM_MACOS_NOTARY_PROFILE` to a stored `notarytool` Keychain profile.
+The package script signs the app with hardened runtime, submits it to Apple, staples the ticket, and checks Gatekeeper.
 These packages do not grant access to a private Screenroom instance.
+
+Apple and Linux use `tv.screenroom`. Android mobile uses `tv.screenroom`, and Android TV uses `tv.screenroom.tv`.
+Apple and Android builds that replace the old `org.screenroom` IDs start with fresh local settings.
+The old builds retain their settings. Linux keeps its settings path.
 
 ## Publish to private storage
 
@@ -72,3 +79,4 @@ The target command validates the local manifest and uploads only the artifact. I
 For a complete release, `just publish` checks all eight manifests and package hashes. It reads each uploaded file back and publishes `release.json` last.
 If an upload fails, check the reported file before a retry. A retry skips files that match and stops on conflicts.
 The publisher never rebuilds packages. It does not update apt or pacman feeds, submit to app stores, or trigger [Pantheon deployment](deployment.md).
+Use a `native-v<version>-<build>` tag for the native release. Stable `v<version>` tags belong to the server promotion workflow.

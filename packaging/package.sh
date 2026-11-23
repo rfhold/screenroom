@@ -11,6 +11,7 @@ need git jq shasum
 if [[ ${SCREENROOM_PACKAGE_LOCAL:-0} == 1 ]]; then
     commit=local
     release_dir="$root/target/packages/local/v$version-$build"
+    if [[ $target == macos ]]; then signature=ad-hoc; fi
 else
     [[ -z $(git status --porcelain --untracked-files=normal) ]] ||
         die 'a publishable package needs a clean tree (SCREENROOM_PACKAGE_LOCAL=1 for a local check)'

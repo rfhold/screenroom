@@ -31,7 +31,27 @@ esac
 version=$3 build=$4 work=$5 output="$5/$6"
 archive="$work/Screenroom.xcarchive"
 archs=arm64
-if [[ $target == macos ]]; then archs='arm64 x86_64'; fi
+signer=-
+if [[ $target == macos ]]; then
+    archs='arm64 x86_64'
+    if [[ ${SCREENROOM_PACKAGE_LOCAL:-0} != 1 ]]; then
+        identity=${SCREENROOM_MACOS_SIGN_IDENTITY:-}
+        profile=${SCREENROOM_MACOS_NOTARY_PROFILE:-}
+        [[ -n $identity && -n $profile ]] ||
+            die 'set SCREENROOM_MACOS_SIGN_IDENTITY and SCREENROOM_MACOS_NOTARY_PROFILE'
+        signer=$(/usr/bin/security find-identity -v -p codesigning | awk -F '"' -v identity="$identity" '
+            $2 ~ /^Developer ID Application: / {
+                split($1, fields, " ")
+                hash = fields[2]
+                if ($2 == identity || tolower(hash) == tolower(identity)) selected[hash] = 1
+            }
+            END {
+                for (hash in selected) { result = hash; count++ }
+                if (count == 1) print result; else exit 1
+            }
+        ') || die 'select exactly one valid Developer ID Application identity'
+    fi
+fi
 xcodebuild "${args[@]}" -configuration Release -destination "generic/platform=$platform" \
     -derivedDataPath "build/release-$target" -archivePath "$archive" \
     "ARCHS=$archs" ONLY_ACTIVE_ARCH=NO "MARKETING_VERSION=$version" "CURRENT_PROJECT_VERSION=$build" archive
@@ -43,7 +63,7 @@ else
     plist="$app/Info.plist"
     bin="$app/Screenroom"
 fi
-for field in "CFBundleIdentifier:org.screenroom.$target" "CFBundleShortVersionString:$version" \
+for field in "CFBundleIdentifier:tv.screenroom" "CFBundleShortVersionString:$version" \
     "CFBundleVersion:$build" "DTPlatformName:$sdk"; do
     [[ $(/usr/libexec/PlistBuddy -c "Print :${field%%:*}" "$plist") == "${field#*:}" ]] ||
         die "unexpected Apple metadata: ${field%%:*}"
@@ -53,8 +73,21 @@ expected=$(printf '%s\n' $archs | LC_ALL=C sort)
 [[ $actual == "$expected" ]] || die "unexpected Apple architectures: $actual"
 
 if [[ $target == macos ]]; then
-    codesign --force --sign - --entitlements Resources/macOS/Screenroom.entitlements "$app"
-    codesign --verify --deep --strict "$app"
+    sign=(/usr/bin/codesign --force --sign "$signer" --entitlements Resources/macOS/Screenroom.entitlements)
+    if [[ $signer != - ]]; then sign+=(--options runtime --timestamp); fi
+    "${sign[@]}" "$app"
+    /usr/bin/codesign --verify --deep --strict "$app"
+    if [[ $signer != - ]]; then
+        ditto -c -k --keepParent "$app" "$work/submission.zip"
+        reply=$(xcrun notarytool submit "$work/submission.zip" --keychain-profile "$profile" \
+            --wait --timeout 12m --output-format json) ||
+            die 'Apple notarization did not complete'
+        jq -e '.status == "Accepted"' <<<"$reply" >/dev/null ||
+            die 'Apple did not accept the notarization submission'
+        xcrun stapler staple "$app"
+        xcrun stapler validate "$app"
+        /usr/sbin/spctl --assess --type execute -v "$app"
+    fi
     ditto -c -k --sequesterRsrc --keepParent "$app" "$output"
 else
     [[ $(codesign -dv "$app" 2>&1 || true) == *'code object is not signed at all'* ]] ||

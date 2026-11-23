@@ -23,7 +23,7 @@ artifact_metadata() {
         linux-deb-amd64) architecture=amd64; artifact="screenroom_${version}-${build}_amd64.deb" ;;
         linux-deb-arm64) architecture=arm64; artifact="screenroom_${version}-${build}_arm64.deb" ;;
         linux-arch-amd64) architecture=x86_64; artifact="screenroom-${version}-${build}-x86_64.pkg.tar.zst" ;;
-        macos) architecture=arm64,x86_64; artifact="screenroom-macos-${version}-${build}.zip"; signature=ad-hoc ;;
+        macos) architecture=arm64,x86_64; artifact="screenroom-macos-${version}-${build}.zip"; signature=developer-id-notarized ;;
         ios|tvos) architecture=arm64; artifact="screenroom-$1-${version}-${build}.xcarchive.zip" ;;
         android|android-tv) architecture=arm64-v8a,x86_64; artifact="screenroom-$1-${version}-${build}.apk" ;;
         *) die "unknown package target: $1 (choose ${targets[*]})" ;;

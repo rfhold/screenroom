@@ -27,7 +27,7 @@ cargo build --manifest-path "$root/apps/linux/Cargo.toml" --locked --release \
 stage="$work/stage"
 install -Dm755 "$root/target/native-linux/$triple/release/screenroom-linux" "$stage/usr/bin/screenroom-linux"
 make -C "$root/apps/linux/data" install "DESTDIR=$stage" PREFIX=/usr
-desktop-file-validate "$stage/usr/share/applications/org.screenroom.linux.desktop"
+desktop-file-validate "$stage/usr/share/applications/tv.screenroom.desktop"
 elf=$(LC_ALL=C readelf -h "$stage/usr/bin/screenroom-linux")
 case "$machine:$elf" in
     x86_64:*'Advanced Micro Devices X86-64'*|aarch64:*AArch64*) ;;

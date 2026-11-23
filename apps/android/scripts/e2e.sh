@@ -192,7 +192,8 @@ for profile in "${profiles[@]}"; do
   # A ready, verified emulator stays available for the next run.
   owned_pid=
 
-  package="org.screenroom.$profile"
+  package=tv.screenroom
+  if [[ $profile == tv ]]; then package=tv.screenroom.tv; fi
   verified_serials+=("$serial")
   verified_packages+=("$package")
   reverse=$(adb reverse --list)

@@ -8,7 +8,7 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "org.screenroom.tv"
+        applicationId = "tv.screenroom.tv"
         minSdk = 26
         targetSdk = 37
         versionCode = providers.gradleProperty("screenroomBuild").orElse("1").get().toInt()

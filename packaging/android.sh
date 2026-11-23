@@ -3,6 +3,8 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 target=$1 version=$2 build=$3 output=$4
 module=$(android_module "$target")
+app_id=tv.screenroom
+if [[ $module == tv ]]; then app_id=tv.screenroom.tv; fi
 case "$(uname -s)" in
     Darwin) default_sdk="$HOME/Library/Android/sdk" ;;
     Linux) default_sdk="$HOME/Android/Sdk" ;;
@@ -17,7 +19,7 @@ SCREENROOM_CORE_PROFILE=release ./gradlew --no-daemon ":$module:assembleRelease"
 apk="$module/build/outputs/apk/release/$module-release-unsigned.apk"
 unzip -tq "$apk"
 info=$("$tools/aapt" dump badging "$apk")
-grep -Fq "package: name='org.screenroom.$module' versionCode='$build' versionName='$version'" <<<"$info" ||
+grep -Fq "package: name='$app_id' versionCode='$build' versionName='$version'" <<<"$info" ||
     die 'unexpected Android application ID or release version'
 grep -Fxq "native-code: 'arm64-v8a' 'x86_64'" <<<"$info" || die 'unexpected Android ABIs'
 for abi in arm64-v8a x86_64; do

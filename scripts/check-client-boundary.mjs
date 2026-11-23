@@ -20,7 +20,7 @@ function allowedMedia(file) {
   if (/^apps\/apple\/Resources\/(?:iOS|macOS)\/Assets\.xcassets\/AppIcon\.appiconset\//.test(file)) return true;
   if (file.startsWith('apps/apple/Resources/tvOS/Assets.xcassets/App Icon & Top Shelf Image.brandassets/')) return true;
   if (/^apps\/android\/[^/]+\/src\/[^/]+\/res\/(?:drawable|mipmap)(?:-[^/]+)?\/(?:ic_launcher(?:_round|_foreground|_monochrome)?|tv_banner)\.(?:png|xml)$/.test(file)) return true;
-  if (/^apps\/linux\/data\/icons\/hicolor\/[^/]+\/apps\/org\.screenroom\.linux\.(?:png|svg)$/.test(file)) return true;
+  if (/^apps\/linux\/data\/icons\/hicolor\/[^/]+\/apps\/tv\.screenroom\.(?:png|svg)$/.test(file)) return true;
   if (/^apps\/web\/static\/(?:favicon(?:-32)?\.(?:svg|png|ico)|icon-(?:192|512)\.png|apple-touch-icon\.png)$/.test(file)) return true;
   if (/^apps\/android\/[^/]+\/src\/[^/]+\/res\/drawable(?:-[^/]+)?\//.test(file)) {
     return systemIcon.test(path.posix.basename(file).replace(/\.xml$/, '.svg'));

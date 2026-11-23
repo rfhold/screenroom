@@ -14,7 +14,7 @@ use screenroom_linux::{catalog, paging, playback_state, presentation, state};
 
 fn main() -> gtk::glib::ExitCode {
     let app = adw::Application::builder()
-        .application_id("org.screenroom.linux")
+        .application_id("tv.screenroom")
         .build();
 
     app.connect_activate(|app| {

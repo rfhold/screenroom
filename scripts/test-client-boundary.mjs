@@ -33,7 +33,7 @@ test('server models/mappers, protocol labels, navigation, placeholders and app i
     'apps/android/tv/src/main/res/drawable-hdpi/tv_banner.png': 'icon',
     'apps/android/mobile/src/main/res/mipmap-mdpi/ic_launcher.png': 'icon',
     'apps/android/ui/src/main/res/drawable/search.xml': '<vector/>',
-    'apps/linux/data/icons/hicolor/scalable/apps/org.screenroom.linux.svg': '<svg/>',
+    'apps/linux/data/icons/hicolor/scalable/apps/tv.screenroom.svg': '<svg/>',
   });
   assert.deepEqual(result.violations, []);
 });
@@ -221,13 +221,13 @@ test('a symlink supplied as the audit root is rejected without following it', as
 
 test('literal embedded navigation glyphs and app icons share the narrow resource allowlist', async t => {
   const code = 'apps/linux/src/main.rs';
-  const text = 'include_bytes!("../data/icons/search.svg"); include_str!("../data/icons/home-symbolic.svg"); include_bytes!("../data/icons/hicolor/32x32/apps/org.screenroom.linux.png");';
+  const text = 'include_bytes!("../data/icons/search.svg"); include_str!("../data/icons/home-symbolic.svg"); include_bytes!("../data/icons/hicolor/32x32/apps/tv.screenroom.png");';
   assert.deepEqual(inspectSource(code, text), []);
   const result = await fixture(t, {
     [code]: text,
     'apps/linux/data/icons/search.svg': '<svg/>',
     'apps/linux/data/icons/home-symbolic.svg': '<svg/>',
-    'apps/linux/data/icons/hicolor/32x32/apps/org.screenroom.linux.png': 'icon',
+    'apps/linux/data/icons/hicolor/32x32/apps/tv.screenroom.png': 'icon',
   });
   assert.deepEqual(result.violations, []);
   assert.deepEqual(inspectSource(code, 'from_file("../data/icons/search.svg")'), []);

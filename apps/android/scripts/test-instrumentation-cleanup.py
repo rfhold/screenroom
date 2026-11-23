@@ -18,7 +18,7 @@ class InstrumentationOwnershipTest(unittest.TestCase):
             adb.write_text("""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> "$CALLS"
 case "$*" in
-  *dumpsys*) [ "$MODE" != existing ] || echo 'org.screenroom.mobile.test/runner'; exit 0 ;;
+  *dumpsys*) [ "$MODE" != existing ] || echo 'tv.screenroom.test/runner'; exit 0 ;;
   *force-stop*) exit 0 ;;
   *instrument*)
     [ "$MODE" != unstarted ] || exit 1
@@ -37,7 +37,7 @@ source '{HELPER}'
 trap stop_owned_instrumentation EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-run_owned_instrumentation {'20' if interrupt else '.2'} emulator-5554 org.screenroom.mobile '{root / "log"}' -e class OwnTest
+run_owned_instrumentation {'20' if interrupt else '.2'} emulator-5554 tv.screenroom '{root / "log"}' -e class OwnTest
 '''
             process = subprocess.Popen(["bash", "-c", script], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if interrupt:
@@ -53,8 +53,8 @@ run_owned_instrumentation {'20' if interrupt else '.2'} emulator-5554 org.screen
                 self.assertEqual([], stops, output)
             else:
                 self.assertEqual([
-                    "-s emulator-5554 shell am force-stop org.screenroom.mobile",
-                    "-s emulator-5554 shell am force-stop org.screenroom.mobile.test",
+                    "-s emulator-5554 shell am force-stop tv.screenroom",
+                    "-s emulator-5554 shell am force-stop tv.screenroom.test",
                 ], stops, output)
             self.assertFalse(any("reverse" in call or "emu " in call or "backend" in call or "5556" in call for call in calls))
             self.assertEqual(mode == "success", process.returncode == 0, output)

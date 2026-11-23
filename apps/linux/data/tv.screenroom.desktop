@@ -2,6 +2,6 @@
 Type=Application
 Name=Screenroom
 Exec=screenroom-linux
-Icon=org.screenroom.linux
+Icon=tv.screenroom
 Terminal=false
 Categories=AudioVideo;Video;
