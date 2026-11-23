@@ -19,3 +19,6 @@ package target version build:
 
 publish release_dir mode="":
     bash packaging/publish.sh {{ quote(release_dir) }} {{ quote(mode) }}
+
+publish-target release_dir target mode="":
+    bash packaging/publish.sh {{ quote(release_dir) }} {{ quote(mode) }} {{ quote(target) }}

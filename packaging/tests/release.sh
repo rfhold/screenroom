@@ -77,6 +77,12 @@ grep -q 'checksum mismatch for android' "$work/error"
 printf 'fixture for android\n' >"$work/release/android/$artifact"
 mv "$work/release/tvos" "$work/tvos"
 expect_failure publish --dry-run
+plan=$(unset SCREENROOM_PACKAGE_URL; publish --dry-run macos)
+[[ $plan == *'https://git.holdenitdown.net/api/packages/rfhold/generic/screenroom/v1.2.3-4/screenroom-macos-1.2.3-4.zip' ]]
+[[ $plan != *release.json* && ! -e $RECORD ]]
+expect_failure publish --dry-run tvos
+expect_failure publish --dry-run ''
+expect_failure publish --dry-run ../release
 mv "$work/tvos" "$work/release/tvos"
 
 export FORGEJO_ACCESS_TOKEN=fixture-token
@@ -88,6 +94,8 @@ unset CHANGE_BEFORE CHANGE_FILE
 printf 'fixture for android\n' >"$work/release/android/$artifact"
 rm "$RECORD"
 rm -f "$REMOTE"/*
+publish '' macos >"$work/one"
+[[ $(cat "$RECORD") == 'PUT screenroom-macos-1.2.3-4.zip' && ! -e $REMOTE/release.json ]]
 export FAIL_BEFORE=$artifact
 expect_failure publish
 [[ ! -e $REMOTE/release.json ]]

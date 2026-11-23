@@ -50,16 +50,25 @@ These packages do not grant access to a private Screenroom instance.
 ## Publish to private storage
 
 Copy all eight target directories into one release directory. Keep each package with its manifest.
-Set `SCREENROOM_PACKAGE_URL` to the approved Forgejo generic package URL, without a version suffix.
-Confirm that the destination is private and that Forgejo rejects writes to a file that already exists.
+The publisher defaults to the `rfhold/screenroom` generic package on `git.holdenitdown.net`.
+The default uses Forgejo's current access settings on the private network.
+For a different approved destination, set `SCREENROOM_PACKAGE_URL` to its generic package URL without a version suffix.
+Use a destination that rejects writes to files that already exist.
 Use the shared `FORGEJO_ACCESS_TOKEN` convention for upload access. The dry run uses no token or network.
 
 ```sh
-export SCREENROOM_PACKAGE_URL=https://forgejo.example/api/packages/owner/generic/screenroom
 just publish target/packages/v0.1.0-2 --dry-run
 just publish target/packages/v0.1.0-2
 ```
 
-The publisher checks the eight manifests and package hashes. It reads each uploaded file back and publishes `release.json` last.
+To upload one package before the full set exists, use `just publish-target`:
+
+```sh
+just publish-target target/packages/v0.1.0-2 macos --dry-run
+just publish-target target/packages/v0.1.0-2 macos
+```
+
+The target command validates the local manifest and uploads only the artifact. It does not publish `release.json`.
+For a complete release, `just publish` checks all eight manifests and package hashes. It reads each uploaded file back and publishes `release.json` last.
 If an upload fails, check the reported file before a retry. A retry skips files that match and stops on conflicts.
 The publisher never rebuilds packages. It does not update apt or pacman feeds, submit to app stores, or trigger [Pantheon deployment](deployment.md).

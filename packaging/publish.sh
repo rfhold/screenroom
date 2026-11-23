@@ -2,22 +2,27 @@
 set +x
 set -euo pipefail
 source "$(dirname "$0")/common.sh"
-[[ $# -ge 1 && $# -le 2 ]] || die 'usage: just publish RELEASE_DIR [--dry-run]'
-release_dir=$1 mode=${2:-}
+[[ $# -ge 1 && $# -le 3 ]] || die 'usage: just publish RELEASE_DIR [--dry-run] or just publish-target RELEASE_DIR TARGET [--dry-run]'
+release_dir=$1 mode=${2:-} selected=${3:-}
 [[ -z $mode || $mode == --dry-run ]] || die 'only --dry-run is supported'
 if [[ -z $mode ]]; then
     unset token
     token=${FORGEJO_ACCESS_TOKEN:-}
 fi
 unset FORGEJO_ACCESS_TOKEN
-base=${SCREENROOM_PACKAGE_URL:-}
+base=${SCREENROOM_PACKAGE_URL:-https://git.holdenitdown.net/api/packages/rfhold/generic/screenroom}
 [[ $base =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?/api/packages/[a-zA-Z0-9_-]+/generic/[a-zA-Z0-9_-]+$ ]] ||
     die 'set SCREENROOM_PACKAGE_URL to https://HOST/api/packages/OWNER/generic/PACKAGE'
 need jq shasum
 
 while [[ $release_dir == */ && $release_dir != / ]]; do release_dir=${release_dir%/}; done
 [[ -d $release_dir && ! -L $release_dir ]] || die 'use a release directory, not a symlink'
-first_dir="$release_dir/${targets[0]}"
+publish_targets=("${targets[@]}")
+if [[ $# == 3 ]]; then
+    artifact_metadata "$selected" 0.0.0 1
+    publish_targets=("$selected")
+fi
+first_dir="$release_dir/${publish_targets[0]}"
 first="$first_dir/manifest.json"
 [[ -d $first_dir && ! -L $first_dir && -f $first && ! -L $first ]] || die "missing manifest: $first"
 identity=$(jq -ec '{version,build,commit}' "$first")
@@ -29,9 +34,11 @@ release_inputs "$version" "$build"
 destination="$base/v$version-$build"
 files=() manifests=() digests=()
 shopt -s nullglob dotglob
-entries=("$release_dir"/*)
-[[ ${#entries[@]} == "${#targets[@]}" ]] || die 'release directory must contain exactly the eight target directories'
-for target in "${targets[@]}"; do
+if [[ -z $selected ]]; then
+    entries=("$release_dir"/*)
+    [[ ${#entries[@]} == "${#targets[@]}" ]] || die 'release directory must contain exactly the eight target directories'
+fi
+for target in "${publish_targets[@]}"; do
     artifact_metadata "$target" "$version" "$build"
     dir="$release_dir/$target"
     file="$dir/$artifact" manifest="$dir/manifest.json"
@@ -53,16 +60,13 @@ done
 
 if [[ $mode == --dry-run ]]; then
     for file in "${files[@]}"; do printf '%s -> %s/%s\n' "$file" "$destination" "${file##*/}"; done
-    printf 'release.json -> %s/release.json (last)\n' "$destination"
+    if [[ -z $selected ]]; then printf 'release.json -> %s/release.json (last)\n' "$destination"; fi
     exit 0
 fi
 [[ $token =~ ^[A-Za-z0-9_-]+$ ]] || die 'set FORGEJO_ACCESS_TOKEN to a Forgejo package token'
 need curl
 work=$(mktemp -d)
 trap 'rm -rf -- "$work"' EXIT
-printf '%s\n' "${manifests[@]}" | jq -s --arg version "$version" --argjson build "$build" --arg commit "$commit" \
-    '{app:"screenroom",$version,$build,$commit,artifacts:.}' >"$work/release.json"
-
 request() {
     printf 'Authorization: token %s\n' "$token" |
         curl --disable --silent --proto '=https' --connect-timeout 15 --max-time 300 \
@@ -89,4 +93,8 @@ publish_file() {
 }
 
 for i in "${!files[@]}"; do publish_file "${files[i]}" "${digests[i]}"; done
-publish_file "$work/release.json" "$(sha256 "$work/release.json")"
+if [[ -z $selected ]]; then
+    printf '%s\n' "${manifests[@]}" | jq -s --arg version "$version" --argjson build "$build" --arg commit "$commit" \
+        '{app:"screenroom",$version,$build,$commit,artifacts:.}' >"$work/release.json"
+    publish_file "$work/release.json" "$(sha256 "$work/release.json")"
+fi
