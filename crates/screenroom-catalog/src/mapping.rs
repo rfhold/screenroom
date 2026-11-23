@@ -133,6 +133,28 @@ fn rights(v: &Value) -> Option<Rights> {
 }
 pub(crate) fn item(row: CatalogItem) -> Item {
     let m = &row.metadata;
+    let provider_references = m["provider_references"]
+        .as_array()
+        .map(|references| {
+            references
+                .iter()
+                .map(|reference| {
+                    let provider = string(reference, "provider");
+                    let mut url = string(reference, "url");
+                    if url.is_empty()
+                        && let Some(id) = m["provider_ids"].get(&provider).and_then(Value::as_str)
+                    {
+                        url = reference_url(&provider, id, &row.kind).unwrap_or_default();
+                    }
+                    ProviderReference {
+                        provider,
+                        status: string(reference, "status"),
+                        url,
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Item {
         id: row.public_id,
         title: string(m, "title"),
@@ -168,24 +190,35 @@ pub(crate) fn item(row: CatalogItem) -> Item {
             note: string(&m["runtime"], "note"),
             display: string(&m["runtime"], "display"),
         }),
-        provider_references: m["provider_references"]
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .map(|v| ProviderReference {
-                        provider: string(v, "provider"),
-                        status: string(v, "status"),
-                        url: string(v, "url"),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        provider_references,
         progress_percent: None,
         watched: None,
         provenance_notes: strings(m, "provenance_notes"),
         metadata_retrieved_at: string(m, "metadata_retrieved_at"),
     }
 }
+// Keep validation equivalent to the worker's source-mapping reference_url.
+fn reference_url(provider: &str, id: &str, kind: &str) -> Option<String> {
+    let digits = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 20
+            && value.bytes().all(|b| b.is_ascii_digit())
+            && value.bytes().any(|b| b != b'0')
+    };
+    if provider.eq_ignore_ascii_case("imdb") && id.strip_prefix("tt").is_some_and(digits) {
+        return Some(format!("https://www.imdb.com/title/{id}/"));
+    }
+    if provider.eq_ignore_ascii_case("tmdb") && digits(id) {
+        let entity = match kind {
+            "movie" => "movie",
+            "series" => "tv",
+            _ => return None,
+        };
+        return Some(format!("https://www.themoviedb.org/{entity}/{id}"));
+    }
+    None
+}
+
 pub(crate) fn artwork(row: ArtworkRecord, origin: &str) -> Artwork {
     let r = &row.rights;
     Artwork {
@@ -212,6 +245,112 @@ mod tests {
     use super::*;
     use screenroom_backend::Uuid;
     use serde_json::json;
+
+    #[test]
+    fn persisted_reference_projection_preserves_existing_urls_and_provenance() {
+        let row = CatalogItem {
+            source_item_id: Uuid::nil(),
+            item_id: Uuid::nil(),
+            source_id: Uuid::nil(),
+            public_id: "tt9999999".into(),
+            parent_public_id: None,
+            kind: "movie".into(),
+            source_key: "source".into(),
+            provider: "jellyfin".into(),
+            external_id: "private".into(),
+            provenance: json!({"provider":"jellyfin"}),
+            metadata: json!({
+                "title":"tt8888888",
+                "provider_ids":{"Imdb":"tt0123456","Tmdb":"123","Unknown":"456","imdb":"tt7654321"},
+                "provider_references":[
+                    {"provider":"Imdb","status":"source_supplied","url":""},
+                    {"provider":"Tmdb","status":"source_supplied","url":""},
+                    {"provider":"Unknown","status":"unverified","url":""},
+                    {"provider":"imdb","status":"original","url":"https://example.com/original"},
+                    {"provider":"IMDB","status":"case-mismatch","url":""}
+                ]
+            }),
+        };
+        let projected = item(row.clone());
+        let refs = projected.provider_references;
+        assert_eq!(refs[0].url, "https://www.imdb.com/title/tt0123456/");
+        assert_eq!(refs[1].url, "https://www.themoviedb.org/movie/123");
+        assert_eq!(refs[2].url, "");
+        assert_eq!(refs[3].url, "https://example.com/original");
+        assert_eq!(refs[4].url, "");
+        for (reference, original) in refs
+            .iter()
+            .zip(row.metadata["provider_references"].as_array().unwrap())
+        {
+            assert_eq!(reference.provider, original["provider"]);
+            assert_eq!(reference.status, original["status"]);
+        }
+        assert_eq!(row.metadata["provider_references"][0]["url"], "");
+        for (kind, expected) in [
+            ("series", "https://www.themoviedb.org/tv/123"),
+            ("episode", ""),
+            ("season", ""),
+            ("other", ""),
+        ] {
+            let mut changed = row.clone();
+            changed.kind = kind.into();
+            assert_eq!(item(changed).provider_references[1].url, expected);
+        }
+        for ids in [
+            json!(null),
+            json!([]),
+            json!({"Imdb":123}),
+            json!({"Imdb":"tt/secret"}),
+        ] {
+            let mut changed = row.clone();
+            changed.metadata["provider_ids"] = ids;
+            let refs = item(changed).provider_references;
+            assert_eq!(refs[0].url, "");
+            assert_eq!(refs[3].url, "https://example.com/original");
+        }
+    }
+
+    #[test]
+    fn reference_validation_matches_worker_vectors() {
+        for kind in ["movie", "series", "episode"] {
+            assert_eq!(
+                reference_url("IMDb", "tt0123456", kind).as_deref(),
+                Some("https://www.imdb.com/title/tt0123456/")
+            );
+        }
+        assert_eq!(
+            reference_url("Tmdb", "123", "movie").as_deref(),
+            Some("https://www.themoviedb.org/movie/123")
+        );
+        assert_eq!(
+            reference_url("tmdb", "123", "series").as_deref(),
+            Some("https://www.themoviedb.org/tv/123")
+        );
+        for kind in ["episode", "season"] {
+            assert!(reference_url("Tmdb", "123", kind).is_none());
+        }
+        for id in [
+            "",
+            "0",
+            "-1",
+            "123/456",
+            "123?token=secret",
+            "１２３",
+            " 123",
+            "123 ",
+            "123456789012345678901",
+        ] {
+            assert!(reference_url("Tmdb", id, "movie").is_none(), "{id}");
+            assert!(
+                reference_url("Imdb", &format!("tt{id}"), "movie").is_none(),
+                "{id}"
+            );
+        }
+        for id in ["123", "nm123", "TT123", "https://imdb.com/title/tt123"] {
+            assert!(reference_url("Imdb", id, "movie").is_none());
+        }
+        assert!(reference_url("unknown", "123", "movie").is_none());
+    }
 
     #[test]
     fn episode_identity_subtitles_require_complete_context() {

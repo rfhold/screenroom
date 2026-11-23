@@ -28,6 +28,10 @@ use std::{
 
 const SCOPE: &str = "full-index-v1";
 
+#[cfg(test)]
+#[path = "full_artwork_tests.rs"]
+mod artwork_tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FullSelection {
@@ -107,6 +111,33 @@ struct Cursor {
     refresh: Vec<String>,
     refresh_offset: u32,
     delta_next: Option<u32>,
+}
+
+struct ArtworkStep {
+    external_id: String,
+    input_count: usize,
+}
+
+impl ArtworkStep {
+    fn next(external_id: String, inputs: &[Value], c: &mut Cursor) -> Option<(Self, Value)> {
+        let input = inputs.get(c.art_index)?.clone();
+        c.operation = format!("artwork:{}:{}", hex(&input_hash(&external_id)), c.art_index);
+        Some((
+            Self {
+                external_id,
+                input_count: inputs.len(),
+            },
+            input,
+        ))
+    }
+
+    fn complete(self, c: &mut Cursor) {
+        c.art_index += 1;
+        if c.art_index >= self.input_count {
+            c.after = Some(self.external_id);
+            c.art_index = 0;
+        }
+    }
 }
 
 pub async fn coverage(pool: sqlx::PgPool, run_id: Uuid) -> Result<Value> {
@@ -981,7 +1012,7 @@ impl Worker {
         adapter: &jellyfin::LiveJellyfin,
         c: &mut Cursor,
     ) -> Result<()> {
-        let (external_id, inputs, input) = loop {
+        let (step, input) = loop {
             let next:Option<(String,Value)>=sqlx::query_as("SELECT si.external_id,si.metadata FROM catalog.source_items si WHERE si.source_id=$1 AND si.state='enabled' AND ($3::text IS NULL OR si.external_id>$3) AND jsonb_typeof(si.metadata->'provider_artwork_inputs')='array' AND jsonb_array_length(si.metadata->'provider_artwork_inputs')>0 AND EXISTS(SELECT FROM ingest.item_observations o WHERE o.run_id=$2 AND o.source_id=si.source_id AND o.external_id=si.external_id) ORDER BY si.external_id LIMIT 1")
             .bind(run.source_id).bind(run.id).bind(&c.after).fetch_optional(self.catalog.pool()).await?;
             let Some((external_id, metadata)) = next else {
@@ -992,26 +1023,21 @@ impl Worker {
                 .as_array()
                 .cloned()
                 .unwrap_or_default();
-            let Some(input) = inputs.get(c.art_index).cloned() else {
-                c.after = Some(external_id.clone());
+            let Some(next) = ArtworkStep::next(external_id.clone(), &inputs, c) else {
+                c.after = Some(external_id);
                 c.art_index = 0;
                 continue;
             };
-            break (external_id, inputs, input);
+            break next;
         };
         let input = &input;
         let art = live::parse_artwork(&json!({"provider_input":input}))?;
         let key = live::artwork_key(&art);
-        c.operation = format!("artwork:{}:{}", hex(&input_hash(&external_id)), c.art_index);
-        c.art_index += 1;
         let (ready, mut outcomes) = self
             .full_art_ready(claim, run.source_id, &key, input)
             .await?;
         if ready {
-            if c.art_index >= inputs.len() {
-                c.after = Some(external_id.clone());
-                c.art_index = 0;
-            }
+            step.complete(c);
             return self
                 .full_commit(
                     claim,
@@ -1036,7 +1062,7 @@ impl Worker {
         let fetched = tokio::time::timeout(Duration::from_secs(10), adapter.artwork_bytes(&art))
             .await
             .unwrap_or(Err(jellyfin::Error::Deadline));
-        let (inputs, omissions, outcome) = match fetched {
+        let (artwork_inputs, omissions, outcome) = match fetched {
             Ok(bytes) => match ValidatedImage::raster(bytes) {
                 Ok(image) => {
                     if !outcomes.is_empty() {
@@ -1069,7 +1095,6 @@ impl Worker {
             Err(jellyfin::Error::RateLimited {
                 retry_after_seconds,
             }) => {
-                c.art_index -= 1;
                 let outcome = RequestOutcomeWrite {
                     receipt_id: receipt.id,
                     outcome: RequestOutcome::Retryable,
@@ -1083,7 +1108,6 @@ impl Worker {
                 | jellyfin::Error::Deadline
                 | jellyfin::Error::Http(500..=599)),
             ) => {
-                c.art_index -= 1;
                 self.ingest
                     .record_work_outcome(
                         claim,
@@ -1135,16 +1159,13 @@ impl Worker {
             ),
         };
         outcomes.push(outcome);
-        if c.art_index >= inputs.len() {
-            c.after = Some(external_id);
-            c.art_index = 0;
-        }
+        step.complete(c);
         self.full_commit(
             claim,
             c,
             vec![],
             vec![],
-            inputs,
+            artwork_inputs,
             omissions,
             vec![],
             TraversalWrites {
