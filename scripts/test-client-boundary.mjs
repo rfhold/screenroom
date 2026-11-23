@@ -150,6 +150,21 @@ test('separate operator capability has typed native/WASM parity without private 
   }
 });
 
+test('ordinary playback has native/WASM parity and no operator/provider bypass', async () => {
+  const root = path.resolve(import.meta.dirname, '..');
+  const [native, wasm, player] = await Promise.all([
+    'crates/screenroom-client-core/src/playback.rs',
+    'crates/screenroom-client-core/src/wasm.rs',
+    'apps/web/src/lib/core/playback.ts',
+  ].map(name => readFile(path.join(root, name), 'utf8')));
+  for (const method of ['create_playback_session', 'get_playback_session', 'update_playback_session', 'report_playback_event', 'stop_playback_session']) {
+    for (const source of [native, wasm]) assert.match(source, new RegExp(`pub async fn ${method}\\b`));
+    assert.match(player, new RegExp(`client\\.${method}\\(`));
+  }
+  assert.doesNotMatch(player, /OperatorClient|fetch\(|XMLHttpRequest|localStorage|sessionStorage/);
+  assert.match(native, /PlaybackServiceClient::new/);
+});
+
 test('canonical generated DTOs and native/WASM RPC surfaces stay public-only and in parity', async () => {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const [native, wasm, rustModels, tsModels] = await Promise.all(['lib.rs', 'wasm.rs', 'models.rs', 'wasm-models.ts'].map(name => readFile(path.join(root, 'crates/screenroom-client-core/src', name), 'utf8')));

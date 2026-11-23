@@ -1,6 +1,9 @@
 <script lang="ts">
   import { page } from '$app/state';
-  import { onDestroy } from 'svelte';
+  import { beforeNavigate, goto } from '$app/navigation';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { rememberView, restoreView, viewReady, clearViews, savePages, savedPages } from '../core/view-history';
+  import { registerPlayback } from '../core/playback-lifecycle';
   import Maintenance from './Maintenance.svelte';
   import { operatorConfig } from '../core/operator-config';
   import type { Item, Library } from '../core/models';
@@ -9,7 +12,8 @@
   import LoadMore from './LoadMore.svelte';
   import { OwnedReads } from '../core/owned-reads';
   import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
-  import { itemHref, readLocation, resolveLocation, type Location } from '../core/navigation';
+  import { href, itemHref, libraryHref, readLocation, resolveLocation, grantPlayback, consumePlayback, retainPlaybackIntent, clearPlaybackIntent, safeReturn, type Location } from '../core/navigation';
+  import PlaybackScreen from './PlaybackScreen.svelte';
   import type { SearchCapabilities } from '../../../../../target/client-core/wasm/screenroom_client_core';
   import PosterCard from './PosterCard.svelte';
   import Menu from './Menu.svelte';
@@ -35,18 +39,69 @@
   let pageError = $state('');
   let loadMore = $state<() => void>(() => {});
   let cancelPages = () => {};
+  let playing = $state(false);
+  let activeURL = '';
+  let loadedVersion = -1;
+  let returningTo = '';
+  const routeURL = $derived(page.url.href);
+  beforeNavigate(navigation => {
+    if (navigation.to?.url.href !== navigation.from?.url.href) {
+      retainPlaybackIntent(navigation.to ? navigation.to.url.pathname + navigation.to.url.search : '');
+      if (navigation.from) rememberView(navigation.from.url.pathname + navigation.from.url.search);
+      if (navigation.to) {
+        const destination = navigation.to.url.pathname + navigation.to.url.search;
+        restoreView(destination, navigation.type === 'popstate' || destination === returningTo);
+      }
+      returningTo = '';
+      playing = false;
+      if (navigation.to && navigation.to.url.pathname !== navigation.from?.url.pathname) {
+        ready = false; location = readLocation(navigation.to.url);
+      }
+    }
+  });
+  onMount(() => registerPlayback(() => { clearViews(); clearPlaybackIntent(); }));
+  function play() {
+    if (!location.title) return;
+    const query = new URLSearchParams();
+    if (location.sourceId) query.set('source_id', location.sourceId);
+    if (location.library.id !== 'all') query.set('library', location.library.id);
+    query.set('return', page.url.pathname + page.url.search);
+    const destination = `/play/${encodeURIComponent(location.title.id)}?${query}`;
+    grantPlayback(destination);
+    void goto(destination);
+  }
+  function closePlayer() {
+    playing = false;
+    const fallback = href(location, { screen: 'browse' });
+    returningTo = safeReturn(page.url.searchParams.get('return'), fallback);
+    void goto(returningTo, { replace: true });
+  }
   $effect(() => {
-    const url = new URL(page.url.href);
-    if (url.searchParams.get('screen') === 'maintenance') { generation++; cancelPages(); location = readLocation(url); return; }
-    version;
+    const url = new URL(routeURL);
+    const revision = version;
+    const arriving = activeURL !== url.href;
+    if (!arriving && loadedVersion === revision) return;
+    loadedVersion = revision;
+    if (arriving) { playing = false; activeURL = url.href; }
+    if (url.pathname === '/' && ['screen', 'title', 'series', 'season', 'library'].some(key => url.searchParams.has(key))) {
+      const p = url.searchParams;
+      const id = p.get('title') || p.get('season') || p.get('series');
+      const path = id ? `/titles/${encodeURIComponent(id)}` : p.get('screen') === 'maintenance' ? '/maintenance' : p.get('screen') === 'search' ? '/search' : p.get('screen') === 'browse' ? `/libraries${p.get('library') && p.get('library') !== 'all' ? `/${encodeURIComponent(p.get('library')!)}` : ''}` : '/';
+      for (const key of ['screen', 'title']) p.delete(key);
+      for (const key of ['series', 'season']) if (p.get(key) === id) p.delete(key);
+      if (path === '/' || path.startsWith('/libraries')) p.delete('library');
+      void goto(path + (p.size ? `?${p}` : ''), { replace: true });
+      return;
+    }
+    if (url.pathname === '/maintenance') { generation++; cancelPages(); location = readLocation(url); ready = true; return; }
     const current = ++generation;
     cancelPages();
     more = false; loadingMore = false; pageError = '';
     const operation = new MetadataOperation(() => current === generation);
-    void load(url, current, operation);
+    void load(url, current, operation, arriving);
     return () => { operation.cancel(); cancelPages(); };
   });
-  async function load(url: URL, current: number, operation: MetadataOperation) {
+  async function load(url: URL, current: number, operation: MetadataOperation, arriving: boolean) {
     try {
       error = '';
       const c = await operation.read(client);
@@ -68,7 +123,9 @@
       const context = scope(next.library.id, next.sourceId);
       let rows: typeof homeRows = [];
       let list: Item[] = [];
-      if (next.title) {
+      if (next.notFound) {
+        location = next; ready = true; return;
+      } else if (next.title) {
         const credits = await allCredits(next.title.id, context, operation);
         operation.check();
         const cast = credits.filter(person => person.department.toLowerCase() === 'cast').map(credit);
@@ -79,7 +136,7 @@
         const response = await operation.read(() => c.get_home(context));
         operation.check();
         rows = response.map(row => ({ title: row.title, readError: row.read_error ? progressError(row.read_error) : '', items: row.items.map(record => { operation.check(); return item(record); }) }));
-      } else if (next.screen === 'browse') {
+      } else if (next.screen === 'browse' && (next.library.id !== 'all' || next.path.length)) {
         const owned = await operation.read(newClient);
         if (current !== generation) { owned.free(); return; }
         const reads = new OwnedReads(owned);
@@ -88,17 +145,21 @@
           const response = await reads.read(() => next.path.length ? owned.list_children(next.path.at(-1)!.id, page, context) : owned.list_library_items(context, page));
           return { entries: response.items, next_page_token: response.next_page_token };
         }, isCurrent);
+        const viewKey = url.pathname + url.search;
+        const snapshot = refreshing ? undefined : savedPages<Parameters<typeof item>[0]>(viewKey);
+        if (snapshot) pages.restore(snapshot);
         let disposed = false;
         cancelPages = () => { if (disposed) return; disposed = true; pages.cancel(); reads.dispose(); };
         const display = () => pages.entries.map(item).filter(record => next.path.length || !record.parent);
         loadMore = async () => {
           if (!isCurrent() || pages.loading || !pages.more) return;
           loadingMore = true; pageError = '';
-          try { await pages.load(); if (isCurrent()) items = display(); }
+          try { await pages.load(); if (isCurrent()) { items = display(); savePages(viewKey, pages.snapshot()); } }
           catch (cause) { if (isCurrent() && !(cause instanceof MetadataCancelled)) pageError = failure(cause); }
           finally { if (isCurrent()) { loadingMore = false; more = pages.more; } }
         };
-        await pages.load(operation);
+        if (!snapshot) await pages.load(operation);
+        savePages(viewKey, pages.snapshot());
         operation.check();
         list = display(); more = pages.more;
       }
@@ -109,45 +170,50 @@
       searchCapabilities = capabilities;
       metadataOperation = operation;
       homeRows = rows; items = list; location = next; ready = true;
+      if (next.screen === 'play' && arriving) playing = consumePlayback(url.pathname + url.search);
+      await tick();
+      if (current === generation && next.screen !== 'search') viewReady(url.pathname + url.search);
       if (refreshing && (next.title || next.screen !== 'search' || !next.query.trim())) completeRefresh();
     } catch (cause) { if (current === generation && !(cause instanceof MetadataCancelled)) { operation.stop(cause instanceof Error ? cause : new Error(String(cause))); error = failure(cause); ready = true; refreshing = false; status = ''; } }
   }
-  function refresh() { refreshing = true; status = 'Refreshing…'; version++; }
+  function refresh() { clearViews(); playing = false; ready = false; refreshing = true; status = 'Refreshing…'; version++; }
   function completeRefresh(cause?: string) { if (!refreshing) return; status = cause ? '' : 'Refreshed from server.'; refreshing = false; }
   onDestroy(() => { generation++; metadataOperation?.cancel(); cancelPages(); });
 </script>
 
 <svelte:head><title>{location.screen === 'maintenance' ? 'Maintenance' : location.title?.title ?? (location.screen === 'search' ? 'Search' : location.screen === 'home' ? 'Home' : location.path.at(-1)?.title ?? location.library.title)} · Screenroom</title></svelte:head>
-{#if page.url.searchParams.get('screen') === 'maintenance'}
-  <Maintenance />
-{:else}
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="shell">
    <Menu {location} {libraries} bind:expanded {refresh} />
   <main id="main" tabindex="-1" class:detail-page={!!location.title}>
-    <Breadcrumbs {location} />
+    {#if location.screen !== 'maintenance'}<Breadcrumbs {location} />{/if}
      {#if status}<p role="status" class="status">{status}</p>{/if}
      {#if $settingsWarning}<p role="status" class="settings-warning">{$settingsWarning}</p>{/if}
-    {#if error}<section role="alert"><h1>Unable to load Screenroom</h1><p>{error}</p><button onclick={() => version++}>Retry</button></section>
-    {:else if !ready}<p role="status">Loading Screenroom…</p>
+     {#if location.screen === 'maintenance'}<Maintenance />
+     {:else if error}<section role="alert"><h1>Unable to load Screenroom</h1><p>{error}</p><button onclick={() => version++}>Retry</button></section>
+     {:else if !ready}<p role="status">Loading Screenroom…</p>
+     {:else if location.notFound}<section><h1>Not found</h1><p>This title or library is unavailable in the selected scope.</p><a href="/libraries">Browse libraries</a></section>
+     {:else if location.screen === 'play' && location.title}
+       <h1>{location.title.title}</h1><button onclick={() => playing = true}>Play</button><button onclick={closePlayer}>Back to details</button>
+       {#if playing}<PlaybackScreen itemId={location.title.id} title={location.title.title} context={scope(location.library.id, location.sourceId)} onClose={closePlayer} />{/if}
     {:else if location.title}
-      <Detail item={location.title} />
+      {#key `${location.title.id}:${location.sourceId}:${location.library.id}`}<Detail item={location.title} context={scope(location.library.id, location.sourceId)} onPlay={play} />{/key}
     {:else if location.screen === 'search'}
       {#if searchCapabilities && metadataOperation}<Search {location} capabilities={searchCapabilities} operation={metadataOperation} refreshVersion={version} onReadComplete={completeRefresh} onRetry={() => version++} />{/if}
     {:else}
       <div class="page-header"><h1>{location.screen === 'home' ? 'Home' : location.path.at(-1)?.title ?? location.library.title}</h1>
-        {#if location.screen === 'home'}<a class="button browse" href="/?screen=browse&library=all">Browse libraries</a>{/if}
+        {#if location.screen === 'home'}<a class="button browse" href="/libraries">Browse libraries</a>{/if}
       </div>
       {#if location.screen === 'home'}
-        {#if libraries.length <= 1 && !homeRows.some(row => row.items.length)}<section class="empty-library"><h2>Your library starts here</h2><p>{operatorConfig.enabled ? 'Add your Jellyfin server to bring your library into Screenroom.' : 'No libraries are available. Server setup is unavailable on this web attachment.'}</p>{#if operatorConfig.enabled}<a class="button" href="/?screen=maintenance">Add server</a>{/if}</section>{/if}
+        {#if libraries.length <= 1 && !homeRows.some(row => row.items.length)}<section class="empty-library"><h2>Your library starts here</h2><p>{operatorConfig.enabled ? 'Add your Jellyfin server to bring your library into Screenroom.' : 'No libraries are available. Server setup is unavailable on this web attachment.'}</p>{#if operatorConfig.enabled}<a class="button" href="/maintenance">Add server</a>{/if}</section>{/if}
         <div class="rows">{#each homeRows as row, index (row.title)}
           <section aria-labelledby={`row-${index}`}><h2 id={`row-${index}`}>{row.title}</h2>{#if row.readError}<p role="alert">{row.readError}</p><button onclick={refresh}>Retry row</button>{/if}<div class="poster-row">{#each row.items as item (item.id)}<PosterCard {item} href={itemHref(location, item)} />{/each}</div></section>
         {/each}</div>
+      {:else if location.library.id === 'all' && !location.path.length}<ul>{#each libraries.filter(library => library.id !== 'all') as library}<li><a href={libraryHref(library, location.sourceId)}>{library.title}</a></li>{/each}</ul>
       {:else}<div class="grid catalog" aria-label="Catalog">{#each items as item (item.id)}<PosterCard {item} href={itemHref(location, item)} seasonContext={location.path.at(-1)?.kind === 'Season' && item.parent === location.path.at(-1)?.id} />{/each}</div><p>{items.length} loaded</p><LoadMore {more} loading={loadingMore} error={pageError} load={loadMore} />{/if}
     {/if}
    </main>
 </div>
-{/if}
 
 <style>
   .shell { display: flex; min-height: 100svh; }

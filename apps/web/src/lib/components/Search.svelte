@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
+  import { page } from '$app/state';
+  import { savedPages, savePages, viewReady } from '../core/view-history';
   import { beforeNavigate, goto } from '$app/navigation';
   import { href, itemHref, type Location } from '../core/navigation';
   import { defaultTypes, loadTypes, saveTypes, search, type Types, type Methods, type Source } from '../core/search';
@@ -18,6 +20,7 @@
   let generation = 0;
   let active = true;
   let queue = Promise.resolve();
+  let issuedHref: string | undefined;
   const location = $derived(pending ?? route);
   let savedTypes = $state(defaultTypes());
   const types = $derived.by(() => {
@@ -62,11 +65,12 @@
   });
   onDestroy(() => { active = false; searchGeneration++; searchClient?.cancel_all(); });
   beforeNavigate(navigation => {
-    if (navigation.type !== 'goto') { generation++; revision++; pending = null; }
+    if (navigation.type !== 'goto' || navigation.to?.url.href !== issuedHref) { generation++; revision++; pending = null; }
   });
   $effect(() => { if (pending && href(route) === href(pending)) pending = null; });
   $effect(() => {
     const query = location.query;
+    const viewKey = page.url.pathname + page.url.search;
     const library = location.library; const selectedTypes = types; const selectedMethods = methods; const source = location.source; const sourceId = location.sourceId;
     if (lastRefresh !== refreshVersion) { searchClient?.invalidate_reads(); lastRefresh = refreshVersion; }
     const current = ++searchGeneration;
@@ -93,18 +97,21 @@
             return response;
           }, isCurrent);
           const pager = pages;
+          const snapshot = savedPages<Item>(viewKey);
+          if (snapshot) { pager.restore(snapshot); searchStatus = snapshot.status ?? ''; }
           loadMore = async () => {
             if (!isCurrent() || pager.loading || !pager.more) return;
             loadingMore = true; pageError = '';
-            try { await pager.load(); if (isCurrent()) results = pager.entries; }
+            try { await pager.load(); if (isCurrent()) { results = pager.entries; savePages(viewKey, { ...pager.snapshot(), status: searchStatus }); } }
             catch (cause) { if (isCurrent() && !(cause instanceof MetadataCancelled)) pageError = failure(cause); }
             finally { if (isCurrent()) { loadingMore = false; more = pager.more; } }
           };
-          await pager.load(budget);
+          if (!snapshot) await pager.load(budget);
+          savePages(viewKey, { ...pager.snapshot(), status: searchStatus });
           if (isCurrent()) { results = pager.entries; more = pager.more; }
         }
         budget.check();
-        if (active && current === searchGeneration) { settled = query; searching = false; onReadComplete(); }
+        if (active && current === searchGeneration) { settled = query; searching = false; onReadComplete(); await tick(); if (isCurrent()) viewReady(viewKey); }
       } catch (cause) { if (active && current === searchGeneration && budget.active() && !(cause instanceof MetadataCancelled)) { error = failure(cause); searching = false; onReadComplete(error); } }
     }, Math.max(0, Math.min(350, budget.deadline - budget.now())));
     return () => { clearTimeout(timer); searchGeneration++; pages?.cancel(); reads?.dispose(); if (searchClient === owned) searchClient = undefined; };
@@ -117,7 +124,10 @@
     const batch = generation;
     queue = queue.then(async () => {
       if (!active || batch !== generation || (replace && current !== revision)) return;
-      await goto(href(next), { replace, reset: false });
+      const destination = href(next);
+      issuedHref = new URL(destination, window.location.origin).href;
+      try { await goto(destination, { replace, reset: false }); }
+      finally { issuedHref = undefined; }
     });
   }
   function updateQuery(query: string) { navigate({ query: query.slice(0, maximumQueryLength) }, true); }

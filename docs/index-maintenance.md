@@ -89,8 +89,8 @@ Both server-only variables opt into the Web operator proxy:
 
 | Variable | Example |
 | --- | --- |
-| `SCREENROOM_WEB_OPERATOR_TARGET` | `http://127.0.0.1:50072` |
-| `SCREENROOM_WEB_OPERATOR_ORIGIN` | `http://127.0.0.1:4173` |
+| `SCREENROOM_WEB_OPERATOR_TARGET` | `http://127.0.0.1:50073` |
+| `SCREENROOM_WEB_OPERATOR_ORIGIN` | `http://127.0.0.1:5173` |
 
 Neither has a default. Partial or invalid configuration fails Vite configuration.
 Values require exact HTTP origins with numeric loopback hosts and no credentials, path, query, fragment, or trailing slash.
@@ -100,12 +100,17 @@ Do not put the target in `VITE_` variables, URL parameters, or browser settings.
 After separate approval for the Web restart, the development command is:
 
 ```sh
-SCREENROOM_WEB_OPERATOR_TARGET=http://127.0.0.1:50072 \
-  SCREENROOM_WEB_OPERATOR_ORIGIN=http://127.0.0.1:4173 \
-  pnpm --filter @screenroom/web dev --host 127.0.0.1 --port 4173 --strictPort
+SCREENROOM_WEB_OPERATOR_TARGET=http://127.0.0.1:50073 \
+  SCREENROOM_WEB_OPERATOR_ORIGIN=http://127.0.0.1:5173 \
+  VITE_SCREENROOM_API_ENDPOINT=http://127.0.0.1:50052 \
+  pnpm --filter @screenroom/web dev --host 127.0.0.1 --port 5173 --strictPort
 ```
 
 The same pair must configure the production build and Vite preview.
+These example ports attach the main development Web server to the local Jellyfin installation; confirm them against its descriptor.
+Catalog and `/maintenance` share this origin and navigation. A second Web server is unnecessary.
+Maintenance remains visible when the attachment is disabled and explains that it is unavailable.
+Leaving the route unmounts setup and index controls, clearing keys, retry bodies, and polling.
 Preview configuration cannot enable a build that lacks the capability; rebuild after attachment changes.
 Public endpoint and local-user settings must also match the intended installation at development startup or production build.
 Use `VITE_SCREENROOM_API_ENDPOINT` and the actual enabled user's `VITE_SCREENROOM_USER_ID`; Vite also accepts their `SCREENROOM_` aliases.

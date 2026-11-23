@@ -1,17 +1,57 @@
 # Screenroom Web
 
-This Svelte SPA adapts the Moviee desktop layout: horizontal Home rows, an expandable in-flow sidebar, library catalogs, series/season browsing, title detail pages, and a separate search screen. The sidebar stays in the same shell on every screen. It pushes content sideways and stays visible during desktop scroll; on narrow screens it expands above the content without an overlay.
+This Svelte SPA adapts the Moviee desktop layout: horizontal Home rows, an expandable in-flow sidebar, library catalogs, series/season browsing, title detail pages, and a separate search screen. The sidebar stays in the catalog shell. It pushes content sideways and stays visible during desktop scroll; on narrow screens it expands above the content without an overlay.
 The Rust WASM client core reads metadata, artwork, credits, ratings, and search through the persistent backend's public gRPC-Web API.
 Managed Jellyfin connections supply real provider data through backend adapters; the app contains no catalog snapshots or image bundles.
 Abstract posters and initials identify absent images; failed artwork loads show an unavailable state.
-Cards open details or browse children; there are no accounts, client-owned provider connections, or playback actions.
-The separate opt-in Maintenance screen supports backend-managed Jellyfin setup and canonical index controls.
+Cards open details or browse children; Movie and Episode details expose gateway-backed **Play**.
+There are no accounts or client-owned provider connections.
+Maintenance in the shared sidebar supports backend-managed Jellyfin setup and canonical index controls through an opt-in attachment.
 Watched snapshots remain separate from Continue Watching progress, Up Next, and addition order; none implies watched completion.
 The static public website lives separately in [`../../website/`](../../website/).
 The [wire contract](../../docs/client-api.md) places catalog RPCs in `screenroom.catalog.v1` and UserService in `screenroom.user.v1`.
 Immutable ClientConfig contains endpoint, local user UUID selector, and timeout; scoped reads preserve source/library context.
 
+## Playback
+
+The [playback guide](../../docs/playback.md) owns session, identity, media, uncertainty, and security rules.
+The player uses ordinary shared WASM `Client` methods, not the operator capability or Maintenance proxy.
+Video, HLS, and subtitles use validated gateway media URLs outside gRPC/WASM; the browser never contacts Jellyfin.
+Playback requires an enabled local user, a current personal Jellyfin link, and backend-owned Quick Connect authorization.
+The gateway never substitutes the indexing profile for an absent personal link or enables Quick Connect automatically.
+The [Jellyfin guide](../../docs/jellyfin.md#personal-playback-authorization) owns that prerequisite.
+
+**Play** requests the live personal resume position, not the catalog percentage.
+It grants a one-use in-memory launch intent and opens `/play/[itemId]` with source/library scope and a validated internal return path.
+**Back to details**, **Close player**, and Escape return to that detail URL; browser Back restores the prior view.
+Direct entry, reload, and browser Forward show an explicit **Play** button without creating a session.
+The black stage preserves the video aspect ratio, with compact charcoal title and playback-control overlays.
+Loading and unavailable states show a concise central message and relevant actions.
+An optional **Fullscreen** action uses the browser API and reports unsupported or failed requests.
+Labelled custom controls provide play, pause, seek, mute, and volume without auto-hiding.
+**Playback settings** contains track choices and expandable session information with explicit check/retry actions.
+Audio and subtitle choices renegotiate transport; subtitles distinguish WebVTT, burn-in, unavailable tracks, and Off.
+The initial conservative profile targets H.264/AAC MP4 and HLS through native video or pinned `hls.js`.
+Preparation uses a 30-second deadline; control uses 10 seconds, separate from three-second metadata calls.
+Autoplay refusal exposes an explicit Play action.
+
+Ordinary rerenders, viewport changes, and fullscreen changes preserve the player and its session.
+Close, navigation away, profile mutation, and unmount stop media and submit the final known position.
+Read-only **Check session state** preserves position and pause state for an unchanged transport.
+Ambiguous outcomes trigger state checks, not automatic personal-report replay.
+Explicit create/transport retries retain the same UUID and exact body only in memory.
+Reload restores no playback authority or journal.
+Control capabilities and media URLs never enter localStorage or navigation state.
+The video sets anonymous cross-origin mode before URLs; the document and media paths use no-referrer.
+Native player UIs remain excluded; Safari and real-provider compatibility need separate acceptance evidence.
+
 ## Run
+
+Native SvelteKit routes are `/`, `/libraries`, `/libraries/[libraryId]`, `/titles/[itemId]`, `/search`, `/play/[itemId]`, and `/maintenance`.
+IDs are opaque and URL-encoded. Source/library queries preserve read scope; search queries preserve terms and filters.
+Old root-query links canonicalize without mutations. Missing titles, libraries, and invalid ancestry show Not found.
+Browser Back/Forward restore bounded in-memory catalog/search pages and view position after metadata is ready; profile changes clear those snapshots.
+The shared layout loads global styles on every route. Static hosts must serve the generated `index.html` fallback for deep routes.
 
 Use Node `^22.17.0 || >=24.0.0` and pnpm `12.18.0` from the root package manifest.
 Run these commands from the repository root:
@@ -40,10 +80,10 @@ Validated localStorage settings use an origin/endpoint/user/namespace key; faile
 
 The optional web Maintenance screen uses a separate typed Rust WASM `OperatorClient`, not the ordinary public RPC client.
 It provides Refresh, Pause, Resume and Retry, with policy settings, run history and queue details under Advanced settings.
-Direct `/?screen=maintenance` entry does not depend on public catalog initialization.
+Direct `/maintenance` entry does not depend on public catalog initialization.
 Native bindings expose the capability, but native apps supply no Maintenance UI.
 
-Maintenance defaults to hidden and unavailable; disabled servers expose no operator API.
+Maintenance is always discoverable; disabled attachments show an unavailable state and expose no operator API.
 Opt-in requires both server-only `SCREENROOM_WEB_OPERATOR_TARGET` and `SCREENROOM_WEB_OPERATOR_ORIGIN`, plus a separately approved web restart.
 The [maintenance guide](../../docs/index-maintenance.md#explicit-local-attachment) owns exact values, development/preview commands, and production build/preview configuration parity.
 Both Vite servers provide the guarded same-origin proxy; static deployment alone provides none.
@@ -83,7 +123,7 @@ Vite uses its normal dependency cache; the suite does not perform a production b
 Attached tests use actual source IDs and capability-driven reads, not fixed titles, rows, library IDs, or provider logos.
 The [suite source](e2e/home.spec.ts) defines current assertions; a browser build does not prove coverage of every public interaction.
 Network assertions restrict public reads to app assets and the configured backend's public RPC/artwork paths.
-Direct provider images, S3, and playback remain forbidden.
+Direct provider images and S3 remain forbidden; this attached browse suite does not establish playback acceptance.
 Chromium uses desktop `1440×900` and mobile `390×844` profiles, deterministic locale, dark color scheme, and reduced motion.
 Playwright uses one worker and serial tests across both profiles.
 These profiles establish neither native mobile browser support nor a complete accessibility audit.
@@ -132,6 +172,20 @@ These suites use real shared WASM exports but isolated HTTP/wire test support, n
 Their source defines coverage; passing isolated checks does not establish attached real-source acceptance.
 The [testing guide](../../docs/testing.md) separates these layers from live installation, provider, and platform acceptance.
 
+For isolated playback checks, use:
+
+```sh
+pnpm --filter @screenroom/web test:playback
+node --test apps/web/tests/watched.test.mjs
+```
+
+`test:playback` prepares fresh owned WASM and runs controller plus mounted browser tests.
+It requires Chromium and `ffmpeg` with `libx264`/AAC, alongside workspace dependencies and the WASM toolchain.
+The browser cases decode generated owned MP4/HLS and load anonymous WebVTT across distinct isolated SPA/API origins.
+They mount actual details and test desktop/narrow player geometry, modal isolation, exit focus/scroll, and session retention across viewport changes.
+Their HTTP double supplies no product catalog and proves no live gateway-plus-provider behavior.
+The [canonical checks](../../docs/testing.md#playback-checks) own the complete prerequisites, database boundary, and separately authorized real-provider cases.
+
 ### E2E categories
 
 Set `E2E_CATEGORY` to select a category. Standalone runs default to `all`.
@@ -170,6 +224,10 @@ Each test declares its category through a Playwright tag. To add a category, ext
 - No catalog snapshots or artwork are bundled in the Web app. All images use core-loaded bytes and reference-counted blob URLs.
 - [`src/lib/components/MaintenanceConnections.svelte`](src/lib/components/MaintenanceConnections.svelte) owns private-key entry and managed setup through the shared operator client.
 - [`src/lib/core/operator-state.ts`](src/lib/core/operator-state.ts) retains exact in-memory request bodies for explicit same-session Retry.
+- [`src/lib/components/Player.svelte`](src/lib/components/Player.svelte) owns video/HLS, track controls, and anonymous gateway media.
+- [`src/lib/components/PlaybackScreen.svelte`](src/lib/components/PlaybackScreen.svelte) owns the viewport modal, focus, scroll lock, and fullscreen action.
+- [`src/lib/core/playback.ts`](src/lib/core/playback.ts) owns in-memory playback requests, ordered reports, reconciliation, and final-position capture.
+- [`src/lib/core/playback-lifecycle.ts`](src/lib/core/playback-lifecycle.ts) revokes the active player before profile mutations.
 - [`e2e/home.spec.ts`](e2e/home.spec.ts) owns the attached public interaction assertions.
 - [`vite.config.ts`](vite.config.ts) preserves the `index.html` SPA fallback.
 - [`src/routes/+layout.ts`](src/routes/+layout.ts) disables server-side rendering.
@@ -179,7 +237,8 @@ Each test declares its category through a Playwright tag. To add a category, ext
 The shared poster shows a top-right checkmark only when the server's provider-neutral `Item.watched` value is `true`.
 Its accessible label is `Watched`; explicit `false` and unknown show no checkmark.
 Progress bars remain independent, even at 100 percent. Series and seasons gain no inferred completion.
-The app adds no watched controls, provider writes, or provider-specific display branches.
+The watched overlay adds no manual watched controls or provider-specific display branches.
+Playback reports write personal provider state through the gateway and invalidate local reads after confirmed effects.
 Watched state comes through the core from persisted backend snapshots, not browser provider requests.
 Rendered screens receive no push updates; refresh or another read obtains current state.
 See the [watched contract](../../docs/client-api.md#watched-state) for unknown values, source selection, and freshness.
@@ -195,7 +254,8 @@ Search types persist in validated version-1 localStorage settings, not a server 
 Search methods reset on each fresh search. Search waits 350ms after query edits, cancels prior requests, and rejects stale generations.
 Semantic uses exact backend vectors; explicit degradation records explain lexical fallback. Title only disables Semantic without automatic restoration.
 
-No subtitle preference or subtitle controls exist. Ordinary settings files ignore the obsolete field.
+No global subtitle preference exists. Ordinary settings files ignore the obsolete field.
+Subtitle controls belong to the active playback session.
 The shared core normalizes saved `tmdb` to `all` and preserves unrelated valid settings.
 Library IDs are opaque; literal `movies` and `tv` values imply no special behavior.
 Refresh invalidates core reads and rereads the current screen and search capabilities.
@@ -220,7 +280,8 @@ Links support normal browser navigation and modified-click/new-tab behavior. Rel
 
 ## Provider data
 
-The browser uses shared WASM clients only; page loads never call Jellyfin, S3, or external image services directly.
+Public and operator control use shared WASM clients; media uses the gateway HTTP routes.
+Page loads never call Jellyfin, S3, or external image services directly.
 Managed setup sends the key through the guarded operator proxy to the private backend, not to a browser provider adapter.
 External links require a user click. App startup and builds perform no provider import.
 Runtime product mocks, TMDB importers, fixture feeds, and demo-user bootstrap are not supported interfaces.

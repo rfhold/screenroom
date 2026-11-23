@@ -2,6 +2,7 @@ import {expect,test,type Page} from '@playwright/test';
 import {rpcRoute,rpcPath,isRpcPath,type RpcMethod} from './rpc-paths';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { routeId } from './route-id.mjs';
 const menu=(page:Page)=>page.getByRole('navigation',{name:'Main menu',exact:true});
 async function healthy(page:Page){await page.goto('/');await expect(page.getByRole('heading',{name:'Home',exact:true})).toBeVisible();await expect(page.getByText('Loading Screenroom…',{exact:true})).toHaveCount(0);}
 test.beforeEach(async({page})=>{await page.addInitScript(namespace=>localStorage.setItem('screenroom.settingsNamespace',namespace),`web-${crypto.randomUUID()}`);});
@@ -46,13 +47,13 @@ test('real catalog showcase: home, sidebar, scoped library, search and detail @h
   await refresh;
   await expect(page.getByRole('status').filter({ hasText: 'Refreshed from server.' })).toBeVisible();
   await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
-  const libraries = await menu(page).locator('a[href*="screen=browse"]').evaluateAll(links => links.map(link => ({ href: link.getAttribute('href')!, title: link.getAttribute('aria-label')! })).filter(link => new URL(link.href, location.origin).searchParams.get('library') !== 'all'));
+  const libraries = await menu(page).locator('a[href^="/libraries/"]').evaluateAll(links => links.map(link => ({ href: link.getAttribute('href')!, title: link.getAttribute('aria-label')! })));
   let selected: { href: string; title: string; libraryHref: string; libraryTitle: string } | undefined;
   for (const library of libraries.slice(0, 8)) {
     await page.goto(library.href);
     await expect(page.locator('[aria-label="Catalog"]')).toBeVisible();
     for (let index = 0; index < 3; index++) {
-      const movies = page.locator('[aria-label="Catalog"] a[href*="title="][aria-label*=" · Movie · "]');
+      const movies = page.locator('[aria-label="Catalog"] a[href^="/titles/"][aria-label*=" · Movie · "]');
       const candidate = movies.filter({ has: page.locator('.poster img') }).first();
       if (await movies.count()) await expect(candidate, 'Discovery requires a real movie with loaded artwork').toBeVisible({ timeout: 15_000 });
       if (await candidate.count()) {
@@ -74,8 +75,9 @@ test('real catalog showcase: home, sidebar, scoped library, search and detail @h
   expect(selected, 'No real movie for search/detail capture within 8 libraries × 3 bounded discovery steps').toBeDefined();
   const item = selected!;
   const scope = new URL(item.libraryHref, page.url()).searchParams;
+  const libraryId = routeId(item.libraryHref, 'libraries', page.url());
   await expect(page.getByRole('heading', { name: item.libraryTitle, exact: true })).toBeVisible();
-  expect(new URL(page.url()).searchParams.get('library')).toBe(scope.get('library'));
+  expect(routeId(page.url(), 'libraries', page.url())).toBe(libraryId);
   await capture('library');
   await menu(page).getByRole('link', { name: 'Search titles', exact: true }).click();
   await expect(page.getByRole('searchbox')).toHaveAttribute('aria-label', `Search ${item.libraryTitle}`);
@@ -85,12 +87,13 @@ test('real catalog showcase: home, sidebar, scoped library, search and detail @h
   searchURL.searchParams.set('types', 'Movie,Series,Episode');
   await page.goto(searchURL.href);
   await page.getByRole('searchbox').fill(item.title);
-  const id = new URL(item.href, page.url()).searchParams.get('title')!;
+  const id = routeId(item.href, 'titles', page.url());
   const selectedResult = page.locator('[aria-label="Search results"] a').filter({ hasText: item.title });
   await expect(selectedResult.first(), 'Selected real title must be present in scoped search results').toBeVisible();
-  const matching = page.locator(`[aria-label="Search results"] a[href*="title=${encodeURIComponent(id)}"]`);
+  const matching = page.locator(`[aria-label="Search results"] a[href^=${JSON.stringify(`/titles/${encodeURIComponent(id)}?`)}]`);
   await expect(matching).toBeVisible();
-  expect(new URL(page.url()).searchParams.get('library')).toBe(scope.get('library'));
+  expect(routeId((await matching.getAttribute('href'))!, 'titles', page.url())).toBe(id);
+  expect(new URL(page.url()).searchParams.get('library')).toBe(libraryId);
   if (scope.has('source_id')) expect(new URL(page.url()).searchParams.get('source_id')).toBe(scope.get('source_id'));
   await expect(page.locator('.search-toolbar')).toHaveAttribute('aria-busy', 'false');
   await expect(matching.locator('.poster img'), 'Selected real item must have artwork in search').toBeVisible();
@@ -98,7 +101,8 @@ test('real catalog showcase: home, sidebar, scoped library, search and detail @h
   function assertScope(detail: boolean) {
     const actual = new URL(page.url()).searchParams;
     for (const key of ['source_id', 'library', 'q', 'methods', 'types', 'source']) expect(actual.get(key), `Preserve ${key}`).toBe(searchState.get(key));
-    expect(actual.get('title')).toBe(detail ? id : null);
+    if (detail) expect(routeId(page.url(), 'titles', page.url())).toBe(id);
+    else expect(new URL(page.url()).pathname).toBe('/search');
   }
   await capture('search');
   await matching.click();
@@ -122,8 +126,8 @@ test('real catalog showcase: home, sidebar, scoped library, search and detail @h
 });
 test('healthy source-driven Home or honest first-run empty state @happy-path',async({page})=>{const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));await healthy(page);const empty=page.getByRole('heading',{name:'Your library starts here',exact:true});if(await empty.count()){await expect(empty).toBeVisible();await expect(page.getByText(/No libraries are available|Add your Jellyfin server/)).toBeVisible();}else await expect(page.locator('.rows')).toBeVisible();expect(errors).toEqual([]);});
 test('public reads stay on the configured backend and artwork stays core loaded @regression',async({page})=>{const urls:string[]=[];page.on('request',r=>urls.push(r.url()));await healthy(page);const endpoint=new URL(process.env.SCREENROOM_E2E_API_ENDPOINT||process.env.SCREENROOM_API_ENDPOINT||'http://127.0.0.1:50051');const web=new URL(page.url());expect(urls.filter(value=>{const url=new URL(value);return !['blob:','data:'].includes(url.protocol)&&url.origin!==web.origin&&!(url.origin===endpoint.origin&&(isRpcPath(url.pathname)||url.pathname.startsWith('/artwork/')));})).toEqual([]);expect(urls.some(value=>new URL(value).pathname===rpcPath('BrowseService/GetHome'))).toBe(true);});
-test('source-driven browse has one page, preserves scoped URLs, and can return Home @happy-path',async({page})=>{await healthy(page);await page.getByRole('link',{name:'Browse libraries',exact:true}).click();await expect(page.getByRole('region',{name:'Catalog',exact:true}).or(page.locator('[aria-label="Catalog"]'))).toBeVisible();const first=page.locator('[aria-label="Catalog"] a').first();if(await first.count()){const href=await first.getAttribute('href');expect(href).toContain('screen=');}await menu(page).getByRole('link',{name:'Home',exact:true}).click();await expect(page.getByRole('heading',{name:'Home',exact:true})).toBeVisible();});
+test('source-driven browse lists libraries and can return Home @happy-path',async({page})=>{await healthy(page);await page.getByRole('link',{name:'Browse libraries',exact:true}).click();await expect(page.getByRole('heading',{name:'All libraries',exact:true})).toBeVisible();await menu(page).getByRole('link',{name:'Home',exact:true}).click();await expect(page.getByRole('heading',{name:'Home',exact:true})).toBeVisible();});
 test('network failure renders a retryable error without catalog snapshots @retry',async({page})=>{await page.route(rpcRoute('BrowseService/ListLibraries'),route=>route.abort());await page.goto('/');await expect(page.getByRole('heading',{name:'Unable to load Screenroom',exact:true})).toBeVisible();await page.unroute(rpcRoute('BrowseService/ListLibraries'));await page.getByRole('button',{name:'Retry',exact:true}).click();await expect(page.getByRole('heading',{name:'Home',exact:true})).toBeVisible();});
 test('empty or populated search follows server capabilities rather than fixture titles @regression',async({page})=>{await healthy(page);await menu(page).getByRole('link',{name:'Search titles',exact:true}).click();await expect(page.getByRole('searchbox')).toBeVisible();await page.getByRole('searchbox').fill('screenroom-search-no-assumed-catalog');await expect(page).toHaveURL(/q=/);await expect(page.getByRole('searchbox')).toHaveValue('screenroom-search-no-assumed-catalog');});
 test('settings are isolated and survive navigation without fixed provider names @regression',async({page})=>{await healthy(page);await menu(page).getByRole('link',{name:'Search titles',exact:true}).click();await page.getByRole('button',{name:'Search settings',exact:true}).click();const fuzzy=page.getByRole('checkbox',{name:'Fuzzy titles',exact:true});if(await fuzzy.isEnabled()){await fuzzy.uncheck();await page.reload();await page.getByRole('button',{name:'Search settings',exact:true}).click();await expect(fuzzy).not.toBeChecked();}});
-test('all-library browse issues a public listing request @regression',async({page})=>{const requests=page.waitForRequest(r=>r.url().endsWith('/ListLibraryItems'));await page.goto('/?screen=browse&library=all');await requests;await expect(page.locator('[aria-label="Catalog"]')).toBeVisible();});
+test('libraries route lists available scoped libraries @regression',async({page})=>{await page.goto('/libraries');await expect(page.getByRole('heading',{name:'All libraries',exact:true})).toBeVisible();});

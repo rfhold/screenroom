@@ -45,7 +45,7 @@ try {
   page.on('console', message => { if (message.type() === 'error') errors.push('console error'); });
   page.on('request', request => {
     const url = new URL(request.url());
-    const app = url.origin === origin && (url.pathname === '/' || url.pathname.startsWith('/_app/'));
+    const app = url.origin === origin && (/^\/(?:libraries(?:\/[^/]+)?|titles\/[^/]+|search|play\/[^/]+|maintenance)?$/.test(url.pathname) || url.pathname.startsWith('/_app/'));
     const api = url.origin === endpoint && (isRpcPath(url.pathname) || /^\/artwork\/[0-9a-f-]{36}\/revisions\/[1-9][0-9]*\/(native|original)$/.test(url.pathname));
     if (url.origin === endpoint && isRpcPath(url.pathname)) rpcRequests.push(url.pathname);
     if (!app && !api && !(url.protocol === 'blob:' && url.origin === origin)) forbidden.push('unexpected request');
@@ -55,7 +55,7 @@ try {
     const path = url.origin === endpoint && isRpcPath(url.pathname) ? url.pathname
       : url.origin === endpoint && url.pathname.startsWith('/artwork/') ? '/artwork/'
       : url.origin === origin && url.pathname.startsWith('/_app/') ? '/_app/'
-      : url.origin === origin && url.pathname === '/' ? '/' : url.protocol === 'blob:' ? 'blob:' : 'unexpected';
+      : url.origin === origin && /^\/(?:libraries(?:\/[^/]+)?|titles\/[^/]+|search|play\/[^/]+|maintenance)?$/.test(url.pathname) ? '/route' : url.protocol === 'blob:' ? 'blob:' : 'unexpected';
     const rawType = (response.headers()['content-type'] ?? '').split(';')[0].trim();
     const contentType = /^(application\/(wasm|grpc-web(?:\+proto|-text(?:\+proto)?)?|javascript)|text\/(html|css|javascript)|image\/(png|jpeg|webp|avif|gif|svg\+xml))$/.test(rawType) ? rawType : 'other';
     requests.push({ path, contentType, status: response.status() });

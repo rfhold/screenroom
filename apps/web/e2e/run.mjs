@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { selectedCategory } from './categories.mjs';
+import { selectedCategory, selectedJourney } from './categories.mjs';
+import { playbackSelection } from './playback-contract.mjs';
 
 const category = selectedCategory();
 const cli = createRequire(import.meta.url).resolve('@playwright/test/cli');
@@ -35,10 +36,15 @@ if (!countTests(report.suites)) {
   console.error('No tests found. No artifacts or runtime preparation changed.');
   process.exit(1);
 }
+if (selectedJourney() === 'playback' && countTests(report.suites) !== 2) {
+  console.error('Playback showcase requires both desktop and mobile projects. No artifacts or runtime preparation changed.');
+  process.exit(1);
+}
 if (args.includes('--list')) {
   process.stdout.write(discovery.stdout);
   process.exit(0);
 }
+if (selectedJourney() === 'playback') playbackSelection();
 await import('./backend-server.mjs');
 await import('./clean-screenshots.mjs');
 const result = spawnSync(process.execPath, [cli, 'test', ...args], { stdio: 'inherit' });

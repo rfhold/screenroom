@@ -13,6 +13,8 @@
     "prepare": "svelte-kit sync",
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "test:e2e": "node e2e/run.mjs",
+    "pretest:playback": "node scripts/prepare-core.mjs",
+    "test:playback": "node --test tests/playback.test.mjs tests/playback-browser.test.mjs tests/player-presentation.test.mjs",
     "test:e2e:install": "playwright install chromium"
   },
   "devDependencies": {
@@ -25,5 +27,8 @@
     "svelte-check": "4.7.8",
     "typescript": "6.0.3",
     "vite": "8.3.6"
+  },
+  "dependencies": {
+    "hls.js": "1.6.16"
   }
 }

@@ -1,5 +1,5 @@
 import { defineConfig } from '@playwright/test';
-import { selectedCategory } from './e2e/categories.mjs';
+import { selectedCategory, selectedJourney } from './e2e/categories.mjs';
 import { existsSync, readFileSync } from 'node:fs';
 const category = selectedCategory();
 const endpoint = process.env.SCREENROOM_E2E_API_ENDPOINT || process.env.SCREENROOM_API_ENDPOINT || 'http://127.0.0.1:50051';
@@ -18,12 +18,13 @@ if (existsSync(descriptorPath)) {
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'home.spec.ts',
+  testMatch: selectedJourney() === 'playback' ? 'playback.spec.ts' : 'home.spec.ts',
   outputDir: './e2e/build/results',
   reporter: [['list']],
   grep: category === 'all' ? undefined : new RegExp(`@${category}\\b`),
   fullyParallel: false,
   workers: 1,
+  retries: 0,
   forbidOnly: true,
   timeout: 30_000,
   use: {

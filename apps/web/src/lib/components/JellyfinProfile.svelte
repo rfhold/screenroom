@@ -4,6 +4,7 @@
   import { collectPages } from '../core/pagination';
   import { MetadataOperation, MetadataCancelled } from '../core/operation.mjs';
   import { changeJellyfinLink } from '../core/jellyfin.mjs';
+  import { revokePlayback } from '../core/playback-lifecycle';
   import type { Client, JellyfinSource, JellyfinProfile, JellyfinLink } from '../../../../../target/client-core/wasm/screenroom_client_core';
   let { onChanged }: { onChanged: () => void } = $props();
   let sources = $state<JellyfinSource[]>([]);
@@ -56,6 +57,7 @@
   }
   async function change(profile: string | null) {
     if (!connection || !known || busy) return;
+    revokePlayback();
     const op = begin();
     known = false;
     try {

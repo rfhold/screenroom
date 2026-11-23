@@ -49,7 +49,8 @@ test('item details omit rights and provenance panels while retaining item conten
     crew: [{ id: 'crew', name: 'Crew member', role: 'Director', artwork: art }],
   } });
   for (const text of ['Example title', 'Example overview', 'Cast member', 'Crew member']) assert.ok(html.includes(text), text);
-  for (const text of ['Imdb', 'Tmdb', 'source_supplied', 'https://www.imdb.com/title/tt123/', 'https://www.themoviedb.org/movie/123']) assert.ok(html.includes(text), text);
+  for (const text of ['Imdb', 'Tmdb', 'Identifier supplied by Jellyfin', 'https://www.imdb.com/title/tt123/', 'https://www.themoviedb.org/movie/123']) assert.ok(html.includes(text), text);
+  assert.doesNotMatch(html, /source_supplied/);
   assert.doesNotMatch(html, /<footer|provider-attribution|Data &amp; artwork credits/);
   for (const text of ['Title rights', 'Metadata rights', 'Artwork rights', 'Rights not supplied', 'Title terms', 'Metadata terms', 'Title author', 'Metadata author', 'Server correction', 'Metadata retrieved', '2030-01-01', 'Poster author', 'Portrait author', 'CC BY 3.0', 'https://example.org/license', 'https://example.org/source', 'Cropped for display', 'Source &amp; provenance']) assert.ok(!html.includes(text), text);
 });

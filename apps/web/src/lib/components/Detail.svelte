@@ -2,7 +2,9 @@
   import Poster from './Poster.svelte';
   import People from './People.svelte';
   import type { Item } from '../core/models';
-  let { item }: { item: Item } = $props();
+  import type { SourceLibraryScope } from '../../../../../target/client-core/wasm/screenroom_client_core';
+  let { item, onPlay }: { item: Item; context?: SourceLibraryScope; onPlay?: () => void } = $props();
+  const referenceStatus = (status: string) => status === 'source_supplied' ? 'Identifier supplied by Jellyfin' : status.replaceAll('_', ' ');
   const score = $derived(item.rating ? item.rating.count === 0 ? 'Unrated' : `${item.rating.value.toFixed(1)}/${item.rating.scale}` : '—');
 </script>
 
@@ -16,23 +18,24 @@
       <div class="badges">
       {#each item.providers as provider}
         {#if provider.url}
-          <a class="badge" href={provider.url} target="_blank" rel="noopener noreferrer" aria-label={`${provider.provider}: ${provider.status}${item.rating?.provider === provider.provider ? `; user rating ${score}` : ''}`} title={`${provider.provider}: ${provider.status}`}>
+          <a class="badge" href={provider.url} target="_blank" rel="noopener noreferrer" aria-label={`${provider.provider}: ${referenceStatus(provider.status)}${item.rating?.provider === provider.provider ? `; user rating ${score}` : ''}`} title={`${provider.provider}: ${referenceStatus(provider.status)}`}>
             <span>{provider.provider}</span>{#if item.rating?.provider === provider.provider}<svg class="rating-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z" /></svg><strong>{score}</strong>{/if}
           </a>
-        {:else}<span class="badge" role="status" aria-label={`${provider.provider}: ${provider.status}`} title={`${provider.provider}: ${provider.status}`}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 7v6m0 3v1" /></svg><span>{provider.provider} · {provider.status}</span></span>{/if}
+        {:else}<span class="badge" role="status" aria-label={`${provider.provider}: ${referenceStatus(provider.status)}`} title={`${provider.provider}: ${referenceStatus(provider.status)}`}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 7v6m0 3v1" /></svg><span>{provider.provider} · {referenceStatus(provider.status)}</span></span>{/if}
       {/each}
       {#if item.rating && !item.providers.some(provider => provider.provider === item.rating?.provider && provider.url)}<span class="badge" aria-label={`${item.rating.provider} user rating ${score}`}>{item.rating.provider} <strong>{score}</strong></span>{/if}
       {#key item.id}<details class="metadata-info">
         <summary aria-label="Rating and catalog details" title="Rating and catalog details"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10v1" /></svg></summary>
         <div class="info-content">
           {#if item.rating}<p>{item.rating.provider} user rating: {item.rating.count === 0 ? 'Unrated' : `${item.rating.value.toFixed(1)} / ${item.rating.scale}`} · {item.rating.count === null ? 'Vote count unavailable' : `${item.rating.count.toLocaleString('en-US')} votes`}.</p><p>Snapshot · {item.rating.retrievedAt.slice(0, 10)} · Not live.</p>{/if}
-          {#each item.providers as provider}<p>{provider.provider} · {provider.status}</p>{/each}
+          {#each item.providers as provider}<p>{provider.provider} · {referenceStatus(provider.status)}</p>{/each}
           <p>A catalog listing does not mean this title is available to play.</p>
         </div>
       </details>{/key}
       </div>
     </div>
     <p>{item.overview}</p>
+    {#if item.kind === 'Movie' || item.kind === 'Episode'}<button onclick={onPlay}>Play</button>{/if}
   </div>
   </div>
     <People title="Cast" people={item.cast} />

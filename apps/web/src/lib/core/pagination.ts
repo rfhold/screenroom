@@ -1,6 +1,7 @@
 import { MetadataOperation } from './operation.mjs';
 
 export type PageRequest = { size: number; token: string };
+export type PageSnapshot<T> = { entries: T[]; more: boolean; token: string; seen: string[]; count: number; status?: string };
 export class IncrementalPages<T extends { id: string }> {
   entries: T[] = [];
   more = true;
@@ -14,6 +15,8 @@ export class IncrementalPages<T extends { id: string }> {
   private read: (page: PageRequest) => Promise<{ entries: T[]; next_page_token: string }>;
   private active: () => boolean;
   constructor(read: (page: PageRequest) => Promise<{ entries: T[]; next_page_token: string }>, active = () => true) { this.read = read; this.active = active; }
+  snapshot(): PageSnapshot<T> { return { entries: this.entries, more: this.more, token: this.token, seen: [...this.seen], count: this.count }; }
+  restore(value: PageSnapshot<T>) { this.entries = value.entries; this.more = value.more; this.token = value.token; this.seen = new Set(value.seen); this.count = value.count; }
   cancel() { this.stopped = true; this.operation?.cancel(); }
   load(operation = new MetadataOperation(this.active)): Promise<void> {
     if (this.flight) return this.flight;

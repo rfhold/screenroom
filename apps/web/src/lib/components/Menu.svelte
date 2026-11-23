@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { Library } from '../core/models';
   import JellyfinProfile from './JellyfinProfile.svelte';
-  import { operatorConfig } from '../core/operator-config';
   import { href, libraryHref, type Location } from '../core/navigation';
    let { location, libraries, expanded = $bindable(false), refresh }: { location: Location; libraries: Library[]; expanded: boolean; refresh: () => void } = $props();
   const searchHref = $derived(href(location, { screen: 'search', query: '', types: undefined, title: undefined }));
@@ -15,7 +14,7 @@
     <nav aria-label="Main menu">
       <a href="/" aria-label="Home" aria-current={location.screen === 'home' ? 'page' : undefined}><span class="icon" aria-hidden="true">⌂</span><span class="label">Home</span></a>
       <a href={searchHref} aria-label="Search titles" aria-current={location.screen === 'search' ? 'page' : undefined}><span class="icon" aria-hidden="true">⌕</span><span class="label">Search titles</span></a>
-      {#if operatorConfig.enabled}<a href="/?screen=maintenance" aria-label="Maintenance" aria-current={location.screen === 'maintenance' ? 'page' : undefined}><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m4 20 8-8m-5-8 3 3-3 3-3-3a6 6 0 0 0 8 7l6 6a2 2 0 0 0 3-3l-6-6a6 6 0 0 0-8-7Z" /></svg></span><span class="label">Maintenance</span></a>{/if}
+      <a href="/maintenance" aria-label="Maintenance" aria-current={location.screen === 'maintenance' ? 'page' : undefined}><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="m4 20 8-8m-5-8 3 3-3 3-3-3a6 6 0 0 0 8 7l6 6a2 2 0 0 0 3-3l-6-6a6 6 0 0 0-8-7Z" /></svg></span><span class="label">Maintenance</span></a>
       {#if expanded}<h2>Libraries</h2>{/if}
       {#each libraries as library}
         <a href={libraryHref(library, location.sourceId)} aria-label={library.title} aria-current={location.screen === 'browse' && location.library.id === library.id ? 'page' : undefined}><span class="icon" aria-hidden="true">▤</span><span class="label">{library.title}</span></a>

@@ -52,6 +52,9 @@ test('mounted cards and details show only explicit watched state without reacqui
       build.onResolve({ filter: /^\.\.\/core\/client$/ }, () => ({ path: 'client', namespace: 'artwork-client' }));
       build.onLoad({ filter: /.*/, namespace: 'artwork-client' }, () => ({ contents: `
         import { createArtworkLoader } from './src/lib/core/artwork.ts';
+        export const client = async () => ({ invalidate_reads() {} });
+        export const newClient = client;
+        export const records = new Map();
         window.loads = [];
         export const acquireArtwork = createArtworkLoader(async url => {
           window.loads.push(url);
@@ -81,7 +84,7 @@ test('mounted cards and details show only explicit watched state without reacqui
       assert.deepEqual(await page.locator('img').evaluateAll(images => images.map(image => image.src)), sources);
       assert.deepEqual(await page.evaluate(() => window.loads), ['poster']);
       assert.equal(await page.locator('.watched svg:not([aria-hidden="true"])').count(), 0);
-      assert.equal(await page.getByRole('button').count(), 0);
+       assert.equal(await page.getByRole('button', { name: 'Play', exact: true }).count(), 1);
     }
     for (const kind of ['Movie', 'Episode', 'Season', 'Series']) {
       await page.evaluate(kind => window.setItem(true, 'poster', kind), kind);
