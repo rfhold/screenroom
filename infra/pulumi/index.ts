@@ -12,6 +12,7 @@ const databaseImage = config.require("databaseImage");
 const s3Endpoint = config.require("s3Endpoint");
 const s3Region = config.require("s3Region");
 const s3Peer = { ipBlock: { cidr: config.require("s3EgressCidr") } };
+const s3Gateway = config.getObject<{ namespace: string; podLabels: Record<string, string> }>("s3Gateway");
 const components = {
   catalog: "catalogImage",
   user: "userImage",
@@ -211,7 +212,10 @@ const dns: Rule = { to: [{ namespaceSelector: nsSelector("kube-system") }],
   ports: [{ port: 53, protocol: "UDP" }, { port: 53, protocol: "TCP" }] };
 const postgres: Rule = { to: [{ podSelector: { matchLabels: { "cnpg.io/cluster": clusterName } } }],
   ports: port(5432) };
-const s3: Rule = { to: [s3Peer], ports: port(443) };
+const s3: Rule = { to: [s3Peer, ...(s3Gateway ? [{
+  namespaceSelector: nsSelector(s3Gateway.namespace),
+  podSelector: { matchLabels: s3Gateway.podLabels },
+}] : [])], ports: port(443) };
 const jellyfinPort = 8096;
 const jellyfinNamespace = "media-server";
 const credentialPath = "/run/screenroom/credentials";
