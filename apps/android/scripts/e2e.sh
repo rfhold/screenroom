@@ -216,6 +216,7 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
   profile=${profiles[$index]}
   serial=${verified_serials[$index]}
   package=${verified_packages[$index]}
+  test_class="org.screenroom.$profile.e2e.HomeE2ETest"
   timeout 120 "$ADB" -s "$serial" install -r -t "$ROOT/$profile/build/outputs/apk/debug/$profile-debug.apk"
   timeout 120 "$ADB" -s "$serial" install -r -t "$ROOT/$profile/build/outputs/apk/androidTest/debug/$profile-debug-androidTest.apk"
   adb shell input keyevent KEYCODE_WAKEUP
@@ -237,25 +238,25 @@ for ((index = 0; index < ${#profiles[@]}; index++)); do
       showcase_args+=(-e SCREENROOM_SHOWCASE_RUN "$playback_run")
     fi
     run_owned_instrumentation 300 "$serial" "$package" "$log" "${showcase_args[@]}" -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-$category" -e class \
-      "$package.e2e.HomeE2ETest#$method"
+      "$test_class#$method"
     cat "$log" >> "$OUT/$profile-instrumentation.txt"
     grep -Eq '^OK \(1 test\)' "$log" || fail "$profile $category E2E failed; no screenshot exported"
     if [ "$journey" = playback ]; then
       grep -Fxq 'INSTRUMENTATION_STATUS: test=playbackShowcase' "$log" || fail 'Playback method did not execute'
-      grep -Fxq "INSTRUMENTATION_STATUS: class=$package.e2e.HomeE2ETest" "$log" || fail 'Unexpected playback test class'
+      grep -Fxq "INSTRUMENTATION_STATUS: class=$test_class" "$log" || fail 'Unexpected playback test class'
       ! grep -Eq '^INSTRUMENTATION_STATUS_CODE: -[34]' "$log" || fail 'Skipped playback test cannot export captures'
     fi
     if [ "$category" = regression ]; then
       run_owned_instrumentation 180 "$serial" "$package" "$OUT/$profile-correction-edges-instrumentation.txt" \
         -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" \
-        -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-edges" -e class "$package.e2e.HomeE2ETest#correctionEdges"
+        -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-edges" -e class "$test_class#correctionEdges"
       for phase in write read; do
         timeout 15 "$ADB" -s "$serial" shell am force-stop "$package"
         persistence_log="$OUT/$profile-settings-$phase-instrumentation.txt"
         run_owned_instrumentation 120 "$serial" "$package" "$persistence_log" \
           -e SCREENROOM_API_ENDPOINT "$SCREENROOM_API_ENDPOINT" -e SCREENROOM_USER_ID "$SCREENROOM_USER_ID" \
           -e SCREENROOM_E2E_SETTINGS_NAMESPACE "$profile_prefix-$profile-persistence" -e SCREENROOM_SETTINGS_PHASE "$phase" \
-          -e class "$package.e2e.HomeE2ETest#settingsPersistence"
+          -e class "$test_class#settingsPersistence"
         grep -Eq '^OK \(1 test\)' "$persistence_log" || fail "$profile process-persistence $phase failed"
       done
     fi

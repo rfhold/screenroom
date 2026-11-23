@@ -2,6 +2,17 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+for profile in mobile tv; do
+  app_id=tv.screenroom
+  if [[ $profile == tv ]]; then app_id=tv.screenroom.tv; fi
+  grep -Fq "applicationId = \"$app_id\"" "$ROOT/$profile/build.gradle.kts"
+  namespace="org.screenroom.$profile.e2e"
+  source="$ROOT/$profile/src/androidTest/kotlin/${namespace//./\/}/HomeE2ETest.kt"
+  grep -Fxq "package $namespace" "$source"
+  grep -Fq 'class HomeE2ETest' "$source"
+done
+grep -Fq 'test_class="org.screenroom.$profile.e2e.HomeE2ETest"' "$ROOT/scripts/e2e.sh"
+! grep -Fq '$package.e2e.' "$ROOT/scripts/e2e.sh" || exit 1
 mkdir -p "$ROOT/build"
 fixture=$(mktemp -d "$ROOT/build/category-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT
