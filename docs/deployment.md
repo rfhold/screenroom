@@ -37,6 +37,10 @@ Setup does not import provider data or copy the local instance's credentials. We
 
 The deployment sets no cross-origin browser allowlist. If a separate Web origin enters scope, review an explicit origin allowlist first. Keep the media capability query parameter out of Gateway logs and traces.
 
+## Embeddings
+
+Both stacks configure catalog and the index worker to use Agent Gateway's `local-embedding` alias over HTTPS. They share the `qwen3-embedding-0.6b-local-v1` revision and the database's 1024 dimensions. Only those services gain egress on TCP 443 to the private Gateway VIP or its pods. The stacks do not set an embedding API key. See the [search contract](backend.md#search) for lexical fallback and model revision rules.
+
 ## Local verification
 
 From `infra/pulumi/`, run `bun install --frozen-lockfile` and `bun run build`. The build type-checks the Pulumi program without contacting Kubernetes. It does not validate backup compatibility, media transport, or provider acceptance on Pantheon.

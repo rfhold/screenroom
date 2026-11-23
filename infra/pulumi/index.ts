@@ -178,6 +178,12 @@ type Env = k8s.types.input.core.v1.EnvVar;
 type Port = k8s.types.input.core.v1.ContainerPort;
 type Rule = k8s.types.input.networking.v1.NetworkPolicyEgressRule;
 const env = (name: string, value: string): Env => ({ name, value });
+const embeddingEnv = [
+  env("SCREENROOM_EMBEDDING_BASE_URL", config.require("embeddingBaseUrl")),
+  env("SCREENROOM_EMBEDDING_MODEL", config.require("embeddingModel")),
+  env("SCREENROOM_EMBEDDING_DIMENSIONS", "1024"),
+  env("SCREENROOM_EMBEDDING_REVISION", config.require("embeddingRevision")),
+];
 const secretEnv = (name: string, secret: pulumi.Input<string>, key: string): Env =>
   ({ name, valueFrom: { secretKeyRef: { name: secret, key } } });
 const dbEnv = (component: Component): Env[] => [
@@ -327,18 +333,25 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   const gatewayPod = { ...gateway, podSelector: { matchLabels: {
     "gateway.networking.k8s.io/gateway-name": gatewayName,
   } } };
+  const embedding: Rule = {
+    to: [{ ipBlock: { cidr: config.require("embeddingEgressCidr") } }, gatewayPod],
+    ports: port(443),
+  };
   const fromGateway = (value: number) => ({ from: [gateway], ports: port(value) });
   const listen = (name: string, value: number) => env(name, `0.0.0.0:${value}`);
   const catalog = backend("catalog", ["screenroom-catalog"], [
     listen("SCREENROOM_CATALOG_LISTEN", 50052), env("SCREENROOM_CATALOG_PUBLIC_ORIGIN", origin),
-    env("SCREENROOM_USER_PRIVATE_URI", "http://user:50063"), ...s3Env(artworkReader.metadata.name),
-  ], [{ name: "grpc", containerPort: 50052 }], [s3, { to: [pod("user")], ports: port(50063) }],
+    env("SCREENROOM_USER_PRIVATE_URI", "http://user:50063"), ...s3Env(artworkReader.metadata.name), ...embeddingEnv,
+  ], [{ name: "grpc", containerPort: 50052 }], [s3, embedding, { to: [pod("user")], ports: port(50063) }],
   [fromGateway(50052)]);
   const user = backend("user", ["screenroom-user"], [
     listen("SCREENROOM_USER_LISTEN", 50053), listen("SCREENROOM_USER_PRIVATE_LISTEN", 50063),
   ], [{ name: "grpc", containerPort: 50053 }, { name: "internal", containerPort: 50063 }], [jellyfin], [
     fromGateway(50053), { from: [pod("catalog")], ports: port(50063) },
   ], { credentials: "read" });
+  backend("worker", ["screenroom-index-worker", "serve"], [
+    ...s3Env(artworkBucket.metadata.name), ...embeddingEnv,
+  ], [], [s3, jellyfin, embedding], [], { credentials: "read" });
   const playback = backend("playback-gateway", ["screenroom-playback-gateway"], [
     listen("SCREENROOM_PLAYBACK_GATEWAY_LISTEN", 50054), env("SCREENROOM_PLAYBACK_API_ORIGIN", origin),
   ], [{ name: "http", containerPort: 50054 }], [jellyfin], [fromGateway(50054)],

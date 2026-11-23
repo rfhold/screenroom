@@ -9,6 +9,10 @@ config:
   screenroom:s3Endpoint: https://s3.pantheon.holdenitdown.net
   screenroom:s3EgressCidr: 172.16.3.52/32
   screenroom:s3Region: us-east-1
+  screenroom:embeddingBaseUrl: https://agent-gateway.holdenitdown.net/v1
+  screenroom:embeddingModel: local-embedding
+  screenroom:embeddingRevision: qwen3-embedding-0.6b-local-v1
+  screenroom:embeddingEgressCidr: 172.16.3.53/32
   screenroom:storageClass: database
   screenroom:databaseStorageSize: 20Gi
   screenroom:bucketStorageClass: default-bucket
