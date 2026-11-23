@@ -3,7 +3,7 @@ kind: PipelineRun
 metadata:
   name: screenroom-preview
   annotations:
-    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/db8891ad3b9467db8ff15d80bb931e01c2af2e0d/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
+    pipelinesascode.tekton.dev/task: "[https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-build-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-manifest-v1.yaml, https://git.holdenitdown.net/rfhold/homelab/raw/commit/a9d0362fba59263a4087d34b12b23174d267c783/src/components/tekton-tasks/service-pulumi-up-v1.yaml]"
     pipelinesascode.tekton.dev/on-cel-expression: 'event == "push" && target_branch in ["main", "refs/heads/main"]'
     pipelinesascode.tekton.dev/max-keep-runs: "2"
 spec:
