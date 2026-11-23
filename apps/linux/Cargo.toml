@@ -8,22 +8,32 @@ edition = "2024"
 publish = false
 
 [dependencies]
-gtk = { package = "gtk4", version = "0.11.5", features = ["v4_10"] }
-adw = { package = "libadwaita", version = "0.9.2" }
+gtk = { package = "gtk4", version = "0.11.5", features = ["v4_10"], optional = true }
+adw = { package = "libadwaita", version = "0.9.2", optional = true }
 serde_json = "1"
 screenroom-client-core = { path = "../../crates/screenroom-client-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
+gst = { package = "gstreamer", version = "0.25", optional = true }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+waydriver = { version = "=0.3.10", optional = true }
+waydriver-compositor-mutter = { version = "=0.3.10", optional = true }
+waydriver-input-mutter = { version = "=0.3.10", optional = true }
+waydriver-capture-mutter = { version = "=0.3.10", optional = true }
 
 [features]
-e2e = []
+default = ["native-ui"]
+native-ui = ["dep:gtk", "dep:adw", "dep:gst", "dep:image"]
+e2e = ["native-ui", "dep:waydriver", "dep:waydriver-compositor-mutter", "dep:waydriver-input-mutter", "dep:waydriver-capture-mutter"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
-waydriver = "=0.3.10"
-waydriver-compositor-mutter = "=0.3.10"
-waydriver-input-mutter = "=0.3.10"
-waydriver-capture-mutter = "=0.3.10"
+
+[[bin]]
+name = "screenroom-linux"
+path = "src/main.rs"
+required-features = ["native-ui"]
 
 [[test]]
 name = "e2e"

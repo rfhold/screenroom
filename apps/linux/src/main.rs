@@ -3,16 +3,14 @@ use adw::prelude::*;
 mod assets;
 mod backend;
 mod cache;
-mod catalog;
 mod home;
 mod jellyfin;
-mod paging;
+mod playback;
 mod poster;
-mod presentation;
 mod profile_change;
 mod search;
 mod settings;
-mod state;
+use screenroom_linux::{catalog, paging, playback_state, presentation, state};
 
 fn main() -> gtk::glib::ExitCode {
     let app = adw::Application::builder()

@@ -95,6 +95,9 @@ pub fn merge_items(items: Vec<core::Item>) {
 pub fn catalog() -> Vec<Item> {
     DATA.with(|d| d.borrow().items.clone())
 }
+pub fn snapshot() -> Catalog {
+    DATA.with(|d| d.borrow().clone())
+}
 pub fn home_rows(library: &str) -> Vec<(String, Vec<(String, Option<u8>)>)> {
     DATA.with(|d| d.borrow().homes.get(library).cloned().unwrap_or_default())
 }
@@ -177,7 +180,12 @@ pub fn rating_labels(metadata: &Value) -> (String, String) {
         provider
     };
     let scale = metadata["ratingScale"].as_f64();
-    match (metadata["rating"].as_f64(), metadata["votes"].as_u64()) {
+    let rating = metadata["rating"].as_f64().filter(|value| {
+        value.is_finite()
+            && *value >= 0.0
+            && scale.is_none_or(|scale| scale.is_finite() && scale > 0.0 && *value <= scale)
+    });
+    match (rating, metadata["votes"].as_u64()) {
         (Some(rating), votes) => (
             if votes == Some(0) {
                 format!("{provider} · Unrated")
@@ -213,7 +221,7 @@ pub fn provider_info(metadata: &Value) -> String {
             format!(
                 "{} · {}{}",
                 text(r, "provider"),
-                text(r, "status"),
+                crate::presentation::reference_status(text(r, "status")),
                 if text(r, "url").is_empty() {
                     String::new()
                 } else {

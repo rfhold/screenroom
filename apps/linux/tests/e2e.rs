@@ -7,6 +7,8 @@ use waydriver_input_mutter::MutterInput;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 const FLOWS: [&str; 5] = ["home", "sidebar", "library", "search", "detail"];
+#[path = "e2e/playback.rs"]
+mod playback;
 
 fn client() -> Result<Arc<Client>> {
     Ok(Client::new(ClientConfig {
@@ -145,6 +147,20 @@ async fn click_library(session: &Arc<Session>, library: &MediaLibrary) -> Result
         .iter()
         .filter(|entry| entry.title == library.title)
         .count();
+    if playback_input() {
+        let count = page
+            .libraries
+            .iter()
+            .filter(|entry| entry.title == library.title)
+            .count();
+        return pointer_settled(
+            session,
+            &format!("//Button[@name={}]", xpath_literal(&library.title)),
+            occurrence,
+            count,
+        )
+        .await;
+    }
     activate_settled(
         session,
         &format!("//Button[@name={}]", xpath_literal(&library.title)),
@@ -154,6 +170,9 @@ async fn click_library(session: &Arc<Session>, library: &MediaLibrary) -> Result
 }
 
 async fn activate_settled(session: &Arc<Session>, selector: &str, occurrence: usize) -> Result {
+    if playback_input() {
+        return pointer_settled(session, selector, occurrence, 1).await;
+    }
     let locator = session.locate(selector);
     tokio::time::timeout(session.default_timeout(), async {
         let mut previous = None;
@@ -185,6 +204,274 @@ async fn activate_settled(session: &Arc<Session>, selector: &str, occurrence: us
         }
     })
     .await??;
+    Ok(())
+}
+
+fn playback_input() -> bool {
+    std::env::var("SCREENROOM_E2E_JOURNEY").as_deref() == Ok("playback")
+}
+
+fn missing_pointer_bounds(error: &waydriver::Error, bus: &str, path: &str) -> bool {
+    matches!(error, waydriver::Error::Atspi { message, source: None }
+        if message == &format!("click_ref: {bus}{path} has no Component bounds — element may not be laid out"))
+}
+
+// Only click_ref's pre-pointer bounds failure permits another observation.
+async fn pointer_policy<T, Observe, ObserveFuture, Click, ClickFuture>(
+    timeout: Duration,
+    mut observe: Observe,
+    mut click: Click,
+) -> Result
+where
+    T: PartialEq,
+    Observe: FnMut() -> ObserveFuture,
+    ObserveFuture: std::future::Future<Output = Result<Option<T>>>,
+    Click: FnMut(T) -> ClickFuture,
+    ClickFuture: std::future::Future<Output = Result<bool>>,
+{
+    tokio::time::timeout(timeout, async {
+        let mut previous = None;
+        loop {
+            match observe().await? {
+                Some(current) if previous.as_ref() == Some(&current) => {
+                    if click(current).await? {
+                        return Ok::<(), Box<dyn Error>>(());
+                    }
+                    previous = None;
+                }
+                current => previous = current,
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn pointer_settled(
+    session: &Arc<Session>,
+    selector: &str,
+    occurrence: usize,
+    expected_count: usize,
+) -> Result {
+    let locator = session.locate(selector);
+    pointer_policy(
+        session.default_timeout(),
+        || async {
+            let matches = locator.inspect_all().await?;
+            if matches.len() > expected_count {
+                return Err("Pointer selector matched additional UI controls".into());
+            }
+            if matches.len() != expected_count {
+                return Ok(None);
+            }
+            let button = matches
+                .get(occurrence)
+                .ok_or("Invalid pointer selector occurrence")?;
+            let reference = format!("{}|{}", button.ref_.0, button.ref_.1);
+            let tree = session.dump_tree().await?;
+            let bounds = tree
+                .lines()
+                .find_map(|line| pointer_snapshot_bounds(line, &reference));
+            Ok(bounds.map(|bounds| {
+                (
+                    button.ref_.0.clone(),
+                    button.ref_.1.clone(),
+                    bounds.to_owned(),
+                )
+            }))
+        },
+        |(bus, path, _bounds)| async move {
+            // Public click_ref fetches live Component bounds, then uses only pointer input.
+            match session.click_ref(&bus, &path).await {
+                Ok(()) => Ok(true),
+                Err(error) if missing_pointer_bounds(&error, &bus, &path) => Ok(false),
+                Err(error) => Err(error.into()),
+            }
+        },
+    )
+    .await
+}
+
+fn pointer_snapshot_bounds<'a>(line: &'a str, reference: &str) -> Option<&'a str> {
+    if snapshot_attribute(line, "_ref") != Some(reference)
+        || ["showing", "visible", "sensitive"]
+            .iter()
+            .any(|name| snapshot_attribute(line, name) != Some("true"))
+    {
+        return None;
+    }
+    // GTK exposes its disabled state through AT-SPI Sensitive, not Enabled.
+    let bounds = snapshot_attribute(line, "bbox")?;
+    let mut values = bounds.split(',').map(str::parse::<i32>);
+    let (x, y, width, height) = (
+        values.next()?.ok()?,
+        values.next()?.ok()?,
+        values.next()?.ok()?,
+        values.next()?.ok()?,
+    );
+    if values.next().is_some() || x < 0 || y < 0 || width <= 0 || height <= 0 {
+        return None;
+    }
+    x.checked_add(width)?;
+    y.checked_add(height)?;
+    Some(bounds)
+}
+
+#[test]
+fn pointer_snapshot_eligibility_contract() {
+    // Actual first focused failure, line 11; only the opaque reference is sanitized.
+    let line = r#"<Button role="button" name="Expand sidebar" showing="true" visible="true" sensitive="true" focused="true" focusable="true" bbox="10,16,43,44" keyshortcuts="" toolkit="GTK" _ref=":1.2|/example">"#;
+    let reference = ":1.2|/example";
+    assert_eq!(
+        pointer_snapshot_bounds(line, reference),
+        Some("10,16,43,44")
+    );
+    assert!(!line.contains("enabled="));
+    assert_eq!(pointer_snapshot_bounds(line, ":1.2|/stale"), None);
+    for name in ["showing", "visible", "sensitive"] {
+        assert_eq!(
+            pointer_snapshot_bounds(
+                &line.replace(&format!("{name}=\"true\""), &format!("{name}=\"false\"")),
+                reference
+            ),
+            None,
+        );
+        assert_eq!(
+            pointer_snapshot_bounds(&line.replace(&format!(" {name}=\"true\""), ""), reference),
+            None,
+        );
+    }
+    for bounds in [
+        "",
+        "10,16,0,44",
+        "10,16,43,-1",
+        "-1,16,43,44",
+        "10,-1,43,44",
+        "10,16,43",
+        "10,16,43,44,1",
+        "10,16,NaN,44",
+        "10,16,43.5,44",
+        "2147483647,16,43,44",
+        "10,2147483647,43,44",
+    ] {
+        assert_eq!(
+            pointer_snapshot_bounds(&line.replace("10,16,43,44", bounds), reference),
+            None,
+            "{bounds}",
+        );
+    }
+    assert_eq!(
+        pointer_snapshot_bounds(&line.replace(" bbox=\"10,16,43,44\"", ""), reference),
+        None
+    );
+    // Enabled must never substitute for GTK's missing or false Sensitive state.
+    assert_eq!(
+        pointer_snapshot_bounds(
+            &line.replace("sensitive=\"true\"", "enabled=\"true\""),
+            reference
+        ),
+        None
+    );
+    assert_eq!(
+        pointer_snapshot_bounds(
+            &line.replace("sensitive=\"true\"", "sensitive=\"false\" enabled=\"true\""),
+            reference
+        ),
+        None
+    );
+}
+
+#[tokio::test]
+async fn pointer_policy_contract() -> Result {
+    use std::{cell::Cell, collections::VecDeque};
+    let bus = ":1.2";
+    let path = "/example";
+    let absent =
+        format!("click_ref: {bus}{path} has no Component bounds — element may not be laid out");
+    assert!(missing_pointer_bounds(
+        &waydriver::Error::atspi(&absent),
+        bus,
+        path
+    ));
+    for error in [
+        waydriver::Error::atspi(format!("{absent} extra")),
+        waydriver::Error::atspi(&absent.replace(path, "/other")),
+        waydriver::Error::atspi("Component.GetExtents: timed out"),
+        waydriver::Error::atspi("activate_ref: do_action(0) returned false"),
+        waydriver::Error::Timeout(absent.clone()),
+        waydriver::Error::atspi_with(&absent, std::io::Error::other("unknown")),
+    ] {
+        assert!(!missing_pointer_bounds(&error, bus, path));
+    }
+    let observations = Cell::new(0);
+    let attempts = Cell::new(0);
+    let inputs = Cell::new(0);
+    let mut sequence = VecDeque::from([Some(1), Some(2), Some(2), None, Some(3), Some(3)]);
+    pointer_policy(
+        Duration::from_secs(1),
+        || {
+            observations.set(observations.get() + 1);
+            std::future::ready(Ok(sequence.pop_front().flatten()))
+        },
+        |_| {
+            attempts.set(attempts.get() + 1);
+            // First attempt represents click_ref's exact pre-input missing-bounds result.
+            let dispatched = attempts.get() == 2;
+            inputs.set(inputs.get() + usize::from(dispatched));
+            std::future::ready(Ok(dispatched))
+        },
+    )
+    .await?;
+    assert_eq!(
+        (observations.get(), attempts.get(), inputs.get()),
+        (6, 2, 1)
+    );
+    let attempts = Cell::new(0);
+    let inputs = Cell::new(0);
+    let failure = pointer_policy(
+        Duration::from_secs(1),
+        || std::future::ready(Ok(Some(1))),
+        |_| {
+            attempts.set(attempts.get() + 1);
+            inputs.set(inputs.get() + 1);
+            std::future::ready(Err("unknown error after possible input".into()))
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(failure.to_string(), "unknown error after possible input");
+    assert_eq!((attempts.get(), inputs.get()), (1, 1));
+    let attempts = Cell::new(0);
+    let start = std::time::Instant::now();
+    assert!(
+        pointer_policy(
+            Duration::from_millis(65),
+            || std::future::ready(Ok(Some(1))),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Ok(false))
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(attempts.get() <= 2);
+    assert!(start.elapsed() < Duration::from_secs(1));
+    let attempts = Cell::new(0);
+    assert!(
+        pointer_policy(
+            Duration::from_millis(65),
+            || std::future::ready(Ok::<Option<usize>, Box<dyn Error>>(None)),
+            |_| {
+                attempts.set(attempts.get() + 1);
+                std::future::ready(Ok(true))
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(attempts.get(), 0);
     Ok(())
 }
 
@@ -624,7 +911,11 @@ async fn journey(captures: bool) -> Result {
         click(&session, &item.title).await?;
         visible(&session, &format!("{} · {}", item.kind, item.year)).await?;
         session
-            .locate("//Button[@name='Play' or @name='Resume']")
+            .locate("//Button[@name='Play']")
+            .wait_for_count(1)
+            .await?;
+        session
+            .locate("//Button[@name='Resume']")
             .wait_for_count(0)
             .await?;
         let art = item.artwork.as_ref().unwrap();
@@ -701,6 +992,11 @@ async fn visible_detail_art(session: &Arc<Session>, item: &Item) -> Result {
 #[tokio::test]
 async fn happy_path() -> Result {
     journey(true).await
+}
+
+#[tokio::test]
+async fn playback_showcase() -> Result {
+    playback::journey().await
 }
 
 #[tokio::test]

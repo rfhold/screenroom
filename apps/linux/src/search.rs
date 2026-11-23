@@ -21,6 +21,7 @@ impl App {
             )
             .hexpand(true)
             .build();
+        entry.set_widget_name("title-search");
         accessible_label(&entry, &format!("Search {}", state.library.label()));
         toolbar.append(&entry);
         let clear_button = gtk::Button::with_label("Clear query");

@@ -2679,12 +2679,15 @@ dependencies = [
 name = "screenroom-linux"
 version = "0.1.0"
 dependencies = [
+ "gstreamer",
  "gtk4",
  "image",
  "libadwaita",
  "screenroom-client-core",
  "serde_json",
  "tokio",
+ "url",
+ "uuid",
  "waydriver",
  "waydriver-capture-mutter",
  "waydriver-compositor-mutter",

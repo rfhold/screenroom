@@ -25,6 +25,7 @@ pub enum Screen {
     Browse,
     Search,
 }
+#[derive(Clone)]
 pub struct State {
     pub screen: Screen,
     pub library: Library,
@@ -70,6 +71,14 @@ impl Default for State {
     }
 }
 impl State {
+    pub fn restore(&mut self, mut saved: Self) {
+        saved.search_revision = self
+            .search_revision
+            .max(saved.search_revision)
+            .wrapping_add(1);
+        saved.query_debouncing = false;
+        *self = saved;
+    }
     pub fn apply_capabilities(
         &mut self,
         capabilities: &screenroom_client_core::SearchCapabilities,
@@ -195,6 +204,30 @@ fn toggle_required(values: &mut [bool; 3], index: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn history_restores_scope_search_options_results_and_invalidates_old_reads() {
+        let mut state = State::default();
+        state.navigate(Screen::Search, Library("library-a".into()));
+        state.source = "jellyfin".into();
+        state.query = "a query".into();
+        state.types = [false, false, true];
+        state.methods = [false, true, false];
+        state.result_ids = vec!["episode-a".into()];
+        let saved_revision = state.search_revision;
+        let saved = state.clone();
+        state.navigate(Screen::Browse, Library("library-b".into()));
+        let departed_revision = state.search_revision;
+        state.restore(saved);
+        assert!(state.search_revision > saved_revision);
+        assert!(state.search_revision > departed_revision);
+        assert!(state.screen == Screen::Search);
+        assert_eq!(state.library.id(), "library-a");
+        assert_eq!(state.source, "jellyfin");
+        assert_eq!(state.query, "a query");
+        assert_eq!(state.types, [false, false, true]);
+        assert_eq!(state.methods, [false, true, false]);
+        assert_eq!(state.result_ids, ["episode-a"]);
+    }
     #[test]
     fn library_identity_and_order_are_server_owned() {
         use crate::catalog::{self, Catalog};
@@ -351,6 +384,18 @@ mod tests {
                 rating_labels(&record),
                 ("Rating —".into(), "Rating snapshot not imported.".into())
             );
+        }
+    }
+    #[test]
+    fn invalid_ratings_never_become_scores() {
+        use serde_json::json;
+        for record in [
+            json!({"rating": -1, "ratingScale": 10}),
+            json!({"rating": 11, "ratingScale": 10}),
+            json!({"rating": 1, "ratingScale": 0}),
+            json!({"rating": 1, "ratingScale": -5}),
+        ] {
+            assert_eq!(crate::catalog::rating_labels(&record).0, "Rating —");
         }
     }
 }

@@ -15,7 +15,7 @@ impl Generation {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Paging {
     pub ids: Vec<String>,
     pub next: String,

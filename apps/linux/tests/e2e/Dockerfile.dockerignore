@@ -9,6 +9,8 @@
 !apps/linux/Cargo.lock
 !apps/linux/src
 !apps/linux/src/**
+!apps/linux/scripts
+!apps/linux/scripts/check-playback-plugins.sh
 !apps/linux/tests
 !apps/linux/tests/e2e.rs
 !apps/linux/tests/e2e
@@ -16,3 +18,4 @@
 !apps/linux/tests/e2e/app.sh
 !apps/linux/tests/e2e/origin.py
 !apps/linux/tests/e2e/origin_test.py
+!apps/linux/tests/e2e/playback.rs

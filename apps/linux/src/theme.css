@@ -23,3 +23,19 @@
 .screenroom .portrait-placeholder { background: #202020; border-radius: 10px; }
 .screenroom menubutton > button, .screenroom button.link { min-height: 24px; }
 .screenroom .row-heading { margin-left: 0; }
+.native-player {
+  background: #000;
+  color: #fff;
+}
+.native-player .player-header { padding: 12px; background: linear-gradient(to bottom, rgba(0,0,0,.85), transparent); }
+.native-player .player-footer { padding: 40px 12px 12px; background: linear-gradient(to top, rgba(0,0,0,.9), transparent); }
+.native-player .player-icon, .native-player .player-icon > button { min-width: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 22px; background: transparent; color: #fff; box-shadow: none; }
+.native-player .player-icon:hover, .native-player .player-icon > button:hover { background: rgba(255,255,255,.16); }
+.native-player button:focus-visible, .native-player scale:focus-visible, .player-menu button:focus-visible { outline: 2px solid #a8c9ff; outline-offset: -2px; }
+.native-player .muted { color: #ddd; }
+.native-player scale { min-height: 44px; }
+.native-player .player-feedback { padding: 20px; margin: 80px 24px 160px; border-radius: 12px; background: rgba(0,0,0,.6); }
+.native-player .player-feedback spinner { min-width: 32px; min-height: 32px; }
+.player-menu contents { background: #202020; color: #fff; padding: 12px; }
+.player-menu button { min-height: 44px; }
+.player-menu scale { min-height: 44px; }

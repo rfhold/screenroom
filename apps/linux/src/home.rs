@@ -47,6 +47,19 @@ pub struct App {
     home_retry_task: RefCell<Option<tokio::task::AbortHandle>>,
     sidebar: gtk::ScrolledWindow,
     page: gtk::ScrolledWindow,
+    history: RefCell<std::collections::VecDeque<HistoryEntry>>,
+    pub player: RefCell<Option<Rc<crate::playback::Player>>>,
+    playback_error: RefCell<Option<String>>,
+    playback_notice: gtk::Label,
+}
+
+struct HistoryEntry {
+    state: State,
+    catalog: catalog::Catalog,
+    browse: crate::paging::Paging,
+    search: crate::paging::Paging,
+    scroll: f64,
+    focus: String,
 }
 
 pub fn view() -> gtk::Box {
@@ -93,6 +106,10 @@ pub fn view() -> gtk::Box {
         profile_panel: column(8),
         home_dirty: Cell::new(false),
         home_retry_task: RefCell::default(),
+        history: RefCell::default(),
+        player: RefCell::default(),
+        playback_error: RefCell::default(),
+        playback_notice: label("", "muted"),
     });
     {
         let pref = app.preferences.borrow();
@@ -113,8 +130,21 @@ pub fn view() -> gtk::Box {
         }
     }
     app.reload();
+    let keys = gtk::EventControllerKey::new();
+    let weak = Rc::downgrade(&app);
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        if key == gtk::gdk::Key::Left && modifiers.contains(gtk::gdk::ModifierType::ALT_MASK) {
+            if let Some(app) = weak.upgrade() {
+                app.back();
+            }
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    root.add_controller(keys);
     // Keep state for the lifetime of the root without retaining it from child callbacks.
     root.connect_destroy(move |_| {
+        app.stop_playback("app_disposed");
         app.cancel_load();
         app.cancel_search();
         app.cancel_artwork();
@@ -145,6 +175,17 @@ pub fn clear(container: &gtk::Box) {
     }
 }
 
+fn capture_item_description(item_id: &str) -> Option<String> {
+    if std::env::var("SCREENROOM_E2E_ACCESSIBILITY_IDS")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return None;
+    }
+    Some(format!("screenroom-item:{item_id}"))
+}
+
 pub fn accessible_label(widget: &impl IsA<gtk::Widget>, title: &str) {
     let title = title.to_owned();
     widget
@@ -162,6 +203,140 @@ fn labelled_by(widget: &impl IsA<gtk::Widget>, label: &gtk::Label) {
 }
 
 impl App {
+    pub fn stop_playback(&self, reason: &str) {
+        if let Some(player) = self.player.borrow().as_ref() {
+            player.close(reason);
+        }
+    }
+    pub fn clear_history(&self) {
+        self.history.borrow_mut().clear();
+    }
+    fn remember(&self) {
+        if self.loading.get() || self.error.borrow().is_some() {
+            return;
+        }
+        let data = catalog::snapshot();
+        let focus = self
+            .page
+            .root()
+            .and_then(|root| root.focus())
+            .map(|widget| widget.widget_name().to_string())
+            .unwrap_or_default();
+        let mut browse = self.browse_paging.borrow().clone();
+        let mut search = self.search_paging.borrow().clone();
+        browse.busy = false;
+        search.busy = false;
+        let mut history = self.history.borrow_mut();
+        history.push_back(HistoryEntry {
+            state: self.state.borrow().clone(),
+            catalog: data,
+            browse,
+            search,
+            scroll: self.page.vadjustment().value(),
+            focus,
+        });
+        while history.len() > 8 {
+            history.pop_front();
+        }
+    }
+    fn back(self: &Rc<Self>) {
+        let Some(entry) = self.history.borrow_mut().pop_back() else {
+            return;
+        };
+        self.stop_playback("navigation");
+        self.cancel_load();
+        self.cancel_search();
+        self.cancel_artwork();
+        self.suspend_profile();
+        self.generation.advance();
+        self.loading.set(false);
+        self.error.replace(None);
+        self.state.borrow_mut().restore(entry.state);
+        self.browse_paging.replace(entry.browse);
+        self.search_paging.replace(entry.search);
+        catalog::install(entry.catalog);
+        if self.home_dirty.get() && self.state.borrow().screen == Screen::Home {
+            self.reload();
+        } else {
+            self.render();
+            self.request_artwork();
+        }
+        let frames = Cell::new(0);
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        self.page.add_tick_callback(move |page, _| {
+            let Some(app) = weak.upgrade() else {
+                return gtk::glib::ControlFlow::Break;
+            };
+            if !app.generation.is_current(generation) {
+                return gtk::glib::ControlFlow::Break;
+            }
+            if app.loading.get() {
+                return gtk::glib::ControlFlow::Continue;
+            }
+            frames.set(frames.get() + 1);
+            if frames.get() < 2 {
+                return gtk::glib::ControlFlow::Continue;
+            }
+            fn find(widget: &gtk::Widget, name: &str) -> Option<gtk::Widget> {
+                if widget.widget_name() == name && widget.is_focusable() {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    if let Some(found) = find(&current, name) {
+                        return Some(found);
+                    }
+                    child = current.next_sibling();
+                }
+                None
+            }
+            if let Some(widget) = find(page.upcast_ref(), &entry.focus) {
+                widget.grab_focus();
+            }
+            page.vadjustment().set_value(entry.scroll);
+            gtk::glib::ControlFlow::Break
+        });
+        if should_resume_search(&self.state.borrow()) && self.state.borrow().search_pending {
+            self.request_search();
+        }
+    }
+    fn play_item(self: &Rc<Self>, id: String, title: String, beginning: bool) {
+        self.stop_playback("replacement");
+        self.player.borrow_mut().take();
+        let Ok(client) = self.client.clone() else {
+            return;
+        };
+        let Some(parent) = self.page.root().and_downcast::<gtk::Window>() else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        self.playback_notice.set_text("");
+        match crate::playback::Player::open(
+            &parent,
+            client,
+            id,
+            &title,
+            self.scope(),
+            beginning,
+            move |message| {
+                if let Some(app) = weak.upgrade() {
+                    app.home_dirty.set(true);
+                    app.playback_notice.set_text(message);
+                    // Keep the visible details stable; the next catalog read observes live personal state.
+                }
+            },
+        ) {
+            Ok(player) => {
+                self.player.replace(Some(player));
+                self.playback_error.replace(None);
+            }
+            Err(message) => {
+                self.playback_error.replace(Some(message.into()));
+                self.render_page();
+            }
+        }
+    }
     fn default_library(&self) -> Library {
         let libraries = catalog::libraries();
         let pref = self.preferences.borrow();
@@ -562,6 +737,8 @@ impl App {
         self.render_page();
     }
     pub fn navigate(self: &Rc<Self>, screen: Screen, library: Library) {
+        self.remember();
+        self.stop_playback("navigation");
         self.cancel_search();
         self.state.borrow_mut().navigate(screen, library);
         self.save_preferences();
@@ -658,6 +835,7 @@ impl App {
             let target = library.clone();
             let button = self.button(&title, move |app| {
                 if screen == Screen::Search {
+                    app.remember();
                     app.cancel_search();
                     app.state.borrow_mut().fresh_search(target.clone());
                     app.state
@@ -724,6 +902,13 @@ impl App {
             .child(&content)
             .build();
         content.append(&self.breadcrumbs());
+        if let Some(parent) = self.playback_notice.parent().and_downcast::<gtk::Box>() {
+            parent.remove(&self.playback_notice);
+        }
+        content.append(&self.playback_notice);
+        if let Some(message) = self.playback_error.borrow().as_deref() {
+            content.append(&label(message, "muted"));
+        }
         if let Some(parent) = self.settings_notice.parent().and_downcast::<gtk::Box>() {
             parent.remove(&self.settings_notice);
         }
@@ -767,9 +952,15 @@ impl App {
                         app.navigate(Screen::Browse, app.default_library())
                     }));
                     content.append(&heading);
+                    if catalog::home_rows(&state.library.id()).is_empty() {
+                        content.append(&label("No titles are available on Home.", "muted"));
+                    }
                     for (title, items) in catalog::home_rows(&state.library.id()) {
                         let section = column(16);
                         section.append(&label(&title, "row-heading"));
+                        if items.is_empty() && catalog::home_error(&title).is_none() {
+                            section.append(&label("No titles in this row.", "muted"));
+                        }
                         if let Some(error) = catalog::home_error(&title) {
                             section.append(&label(&error, "muted"));
                             section.append(&self.button("Retry row", |app| app.retry_home()));
@@ -830,6 +1021,9 @@ impl App {
                         .iter()
                         .filter_map(|id| items.iter().position(|item| &item.id == id))
                         .collect::<Vec<_>>();
+                    if indices.is_empty() {
+                        content.append(&label("No titles are available in this view.", "muted"));
+                    }
                     let grid = self.grid(&indices);
                     self.browse_grid.replace(grid.downgrade());
                     content.append(&grid);
@@ -849,6 +1043,9 @@ impl App {
             app.navigate(Screen::Home, app.default_library())
         }));
         let state = self.state.borrow();
+        if !self.history.borrow().is_empty() {
+            line.prepend(&self.button("Back", |app| app.back()));
+        }
         if state.screen != Screen::Home {
             line.append(&label("›", "muted"));
             let library = state.library.clone();
@@ -863,6 +1060,7 @@ impl App {
                     .map(|i| i.title.as_str())
                     .unwrap_or("");
                 line.append(&self.button(title, move |app| {
+                    app.remember();
                     {
                         let mut state = app.state.borrow_mut();
                         state.path.truncate(depth + 1);
@@ -876,6 +1074,7 @@ impl App {
         if state.screen == Screen::Search || state.search_origin {
             line.append(&label("›", "muted"));
             line.append(&self.button("Search", |app| {
+                app.remember();
                 {
                     let mut state = app.state.borrow_mut();
                     state.screen = Screen::Search;
@@ -923,10 +1122,15 @@ impl App {
             .then(|| crate::presentation::episode_labels(&item.meta, season_context));
         let id = item.id.clone();
         let button = self.button(&item.title, move |app| {
+            app.remember();
             app.state.borrow_mut().open(&id, &catalog::catalog());
             app.reload();
         });
         button.add_css_class("poster-card");
+        button.set_widget_name(&format!("title-{}", item.id));
+        if let Some(description) = capture_item_description(&item.id) {
+            button.update_property(&[gtk::accessible::Property::Description(&description)]);
+        }
         button.set_height_request(328);
         let content = column(7);
         content.set_valign(gtk::Align::Start);
@@ -1013,7 +1217,7 @@ impl App {
         }
         grid
     }
-    fn detail(&self, index: usize) -> gtk::Box {
+    fn detail(self: &Rc<Self>, index: usize) -> gtk::Box {
         let items = catalog::catalog();
         let item = &items[index];
         let detail = column(28);
@@ -1023,11 +1227,33 @@ impl App {
         let text = column(16);
         text.set_hexpand(true);
         text.append(&label(
-            &format!("{} · {}", item.kind.label(), item.year),
+            &if item.year == 0 {
+                item.kind.label().to_owned()
+            } else {
+                format!("{} · {}", item.kind.label(), item.year)
+            },
             "muted",
         ));
         text.append(&label(&item.title, "heading"));
         text.append(&label(&item.meta, "muted"));
+        if item.kind == Kind::Episode && !catalog::text(&item.metadata, "date").is_empty() {
+            text.append(&label(
+                &format!("Aired {}", catalog::text(&item.metadata, "date")),
+                "muted",
+            ));
+        }
+        let playback = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let id = item.id.clone();
+        let title = item.title.clone();
+        playback.append(&self.button("Play", move |app| {
+            app.play_item(id.clone(), title.clone(), false)
+        }));
+        let id = item.id.clone();
+        let title = item.title.clone();
+        playback.append(&self.button("Play from beginning", move |app| {
+            app.play_item(id.clone(), title.clone(), true)
+        }));
+        text.append(&playback);
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.set_halign(gtk::Align::Start);
         let (score, rating_info) = catalog::rating_labels(&item.metadata);
@@ -1039,7 +1265,7 @@ impl App {
             .find(|reference| catalog::text(reference, "provider") == rating_provider)
             .map(|reference| catalog::text(reference, "url"))
             .unwrap_or("");
-        if rating_url.is_empty() {
+        if !crate::presentation::safe_external_url(rating_url) {
             row.append(&label(&format!("★ {score}"), "muted"));
         } else {
             row.append(&gtk::LinkButton::with_label(
@@ -1049,12 +1275,12 @@ impl App {
         }
         for reference in item.metadata["providers"].as_array().into_iter().flatten() {
             let provider = catalog::text(reference, "provider");
-            if provider == rating_provider && !rating_url.is_empty() {
+            if provider == rating_provider && crate::presentation::safe_external_url(rating_url) {
                 continue;
             }
-            let status = catalog::text(reference, "status");
+            let status = crate::presentation::reference_status(catalog::text(reference, "status"));
             let url = catalog::text(reference, "url");
-            if url.is_empty() {
+            if !crate::presentation::safe_external_url(url) {
                 let status_label = label(&format!("{provider} · {status}"), "muted");
                 accessible_label(&status_label, &format!("{provider} {status}"));
                 row.append(&status_label);

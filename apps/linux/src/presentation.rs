@@ -58,9 +58,41 @@ pub fn row_error(code: &str) -> &'static str {
 pub fn season_context(item_parent: Option<&str>, displayed: Option<&str>, is_season: bool) -> bool {
     is_season && item_parent.is_some() && item_parent == displayed
 }
+pub fn safe_external_url(value: &str) -> bool {
+    if value.chars().any(|c| c.is_control() || c.is_whitespace()) || value.contains('\\') {
+        return false;
+    }
+    url::Url::parse(value).is_ok_and(|url| {
+        matches!(url.scheme(), "https" | "http")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+    })
+}
+pub fn reference_status(value: &str) -> String {
+    if value == "source_supplied" {
+        "Identifier supplied by Jellyfin".into()
+    } else {
+        value.replace('_', " ")
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn external_links_reject_credentials_and_non_web_schemes() {
+        assert!(safe_external_url("https://example.com/title/123"));
+        for url in [
+            "javascript:alert(1)",
+            "file:///private/key",
+            "//example.com",
+            "https://user:secret@example.com",
+            "https://example.com/\nsecret",
+            "https://example.com\\other",
+        ] {
+            assert!(!safe_external_url(url));
+        }
+    }
     #[test]
     fn short_number_requires_matching_season_parent() {
         assert!(season_context(Some("season"), Some("season"), true));

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+scenario=${E2E_SCENARIO:-happy_path}
+case "${SCREENROOM_E2E_JOURNEY:-browse}:$scenario" in
+    browse:happy_path|browse:regression_catalog|browse:regression_search|browse:fault_recovery|playback:playback_showcase) ;;
+    *) printf 'Invalid journey/scenario selection\n' >&2; exit 2 ;;
+esac
 server=
 cleanup() {
     if [[ -n "$server" ]]; then kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true; fi
@@ -17,9 +22,8 @@ done
 python3 -c 'import json,os; d=json.load(open("/artifacts/backend-instance.json")); assert d["instanceID"] == os.environ["SCREENROOM_BACKEND_INSTANCE_ID"], d'
 export SCREENROOM_SETTINGS_PATH="/artifacts/settings-${SCREENROOM_E2E_SETTINGS_NAMESPACE:?}.json"
 printf '%s\n' "$SCREENROOM_SETTINGS_PATH" > /artifacts/settings-path.txt
-scenario=${E2E_SCENARIO:-happy_path}
 case "$scenario" in
-    happy_path|regression_catalog|regression_search) ;;
+    happy_path|regression_catalog|regression_search|playback_showcase) ;;
     fault_recovery)
         kill "$server"; wait "$server" || true; server=
         export E2E_APP=${E2E_APP:-screenroom-linux-capture}

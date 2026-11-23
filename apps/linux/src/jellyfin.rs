@@ -273,6 +273,8 @@ impl App {
         });
     }
     fn change_profile(self: &Rc<Self>, profile: Option<String>) {
+        self.stop_playback("profile_change");
+        self.clear_history();
         let (source, generation) = {
             let mut state = self.profile.borrow_mut();
             if state.busy
