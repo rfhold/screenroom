@@ -7,6 +7,7 @@
 | [Playback](playback.md) | Jellyfin sessions, Web/native engines, gateway media, personal identity, lifecycle differences, uncertainty, and security limits. |
 | [Backend development](backend.md) | Persistent local instance, startup migrations, durable ingest, exact vector search, private artwork, and shared telemetry. |
 | [Pantheon deployment](deployment.md) | Private preview and production scaffolding, CI contract, and activation prerequisites. |
+| [Build and release](build-release.md) | Local build commands, native package targets, and private artifact storage. |
 | [Indexing architecture](indexing.md) | Shared queue, supported backend policies and limits, retry/redrive, incremental Jellyfin, operator HTTP routes, diagnostics, and cutover boundaries. |
 | [Index maintenance](index-maintenance.md) | Canonical poster repair, complete-generation publication, operator security, and explicit Web attachment. |
 | [Jellyfin connections](jellyfin.md) | Web setup, managed connection discovery/save, private API-key ownership, destination guards, and first-add limits. |

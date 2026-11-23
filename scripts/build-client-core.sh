@@ -13,7 +13,7 @@ ARGS=()
 if [ "$PROFILE" = release ]; then ARGS+=(--release); elif [ "$PROFILE" != debug ]; then echo "profile must be debug or release" >&2; exit 2; fi
 OUT="$ROOT/target/client-core"
 mkdir -p "$OUT"
-native() { cargo build --locked -p screenroom-client-core --lib "${ARGS[@]}"; }
+native() { cargo build --locked -p screenroom-client-core --lib ${ARGS[@]+"${ARGS[@]}"}; }
 bindings() {
   native
   cargo run --locked -p screenroom-client-core --features bindgen --bin screenroom-uniffi-bindgen -- generate \
@@ -39,7 +39,7 @@ wasm() {
     if [ -n "${WASM_BINDGEN:-}" ]; then echo "Unset WASM_BINDGEN or point it to the matching executable." >&2; fi
     return 2
   fi
-  cargo build --locked -p screenroom-client-core --lib --target wasm32-unknown-unknown "${ARGS[@]}"
+  cargo build --locked -p screenroom-client-core --lib --target wasm32-unknown-unknown ${ARGS[@]+"${ARGS[@]}"}
   "$bindgen" "target/wasm32-unknown-unknown/$PROFILE/screenroom_client_core.wasm" --target web --out-dir "$OUT/wasm"
 }
 apple() {
@@ -48,8 +48,8 @@ apple() {
   local targets=${SCREENROOM_APPLE_TARGETS:-"aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-tvos aarch64-apple-tvos-sim x86_64-apple-tvos"}
   for target in $targets; do
     case " ${SCREENROOM_APPLE_BUILD_STD_TARGETS:-x86_64-apple-tvos} " in
-      *" $target "*) cargo +nightly build --locked -Zbuild-std -p screenroom-client-core --lib --target "$target" "${ARGS[@]}";;
-      *) cargo build --locked -p screenroom-client-core --lib --target "$target" "${ARGS[@]}";;
+      *" $target "*) cargo +nightly build --locked -Zbuild-std -p screenroom-client-core --lib --target "$target" ${ARGS[@]+"${ARGS[@]}"};;
+      *) cargo build --locked -p screenroom-client-core --lib --target "$target" ${ARGS[@]+"${ARGS[@]}"};;
     esac
   done
   local headers="$OUT/apple/headers"
@@ -77,7 +77,7 @@ apple() {
   done
   # xcodebuild cannot overwrite an existing XCFramework; restrict removal to our generated artifact.
   if [ -d "$OUT/apple/ScreenroomClientCore.xcframework" ]; then rm -r "$OUT/apple/ScreenroomClientCore.xcframework"; fi
-  xcodebuild -create-xcframework "${xcargs[@]}" -output "$OUT/apple/ScreenroomClientCore.xcframework"
+  xcodebuild -create-xcframework ${xcargs[@]+"${xcargs[@]}"} -output "$OUT/apple/ScreenroomClientCore.xcframework"
 }
 android() {
   if [ "$HOST_OS" = Linux ] && [ "$(uname -m)" != x86_64 ]; then echo "unsupported Android NDK host: Linux $(uname -m) (requires x86_64)" >&2; exit 2; fi
@@ -89,7 +89,7 @@ android() {
   for target in aarch64-linux-android x86_64-linux-android; do
     if [ "$target" = aarch64-linux-android ]; then abi=arm64-v8a; compiler=aarch64-linux-android26-clang; key=AARCH64_LINUX_ANDROID; else abi=x86_64; compiler=x86_64-linux-android26-clang; key=X86_64_LINUX_ANDROID; fi
     env "CARGO_TARGET_${key}_LINKER=$bin/$compiler" "CC_${target//-/_}=$bin/$compiler" "AR_${target//-/_}=$bin/llvm-ar" \
-      cargo build --locked -p screenroom-client-core --lib --target "$target" "${ARGS[@]}"
+      cargo build --locked -p screenroom-client-core --lib --target "$target" ${ARGS[@]+"${ARGS[@]}"}
     mkdir -p "$OUT/android/jniLibs/$abi"
     cp "target/$target/$PROFILE/libscreenroom_client_core.so" "$OUT/android/jniLibs/$abi/"
   done

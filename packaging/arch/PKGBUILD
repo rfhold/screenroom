@@ -1,0 +1,11 @@
+pkgname=screenroom
+pkgver=${SCREENROOM_VERSION:?}
+pkgrel=${SCREENROOM_BUILD:?}
+pkgdesc='Native Screenroom catalog and playback client'
+arch=(x86_64)
+depends=(gtk4 libadwaita gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugin-gtk4 gst-libav)
+options=(!debug !strip)
+
+package() {
+    cp -a -- "${SCREENROOM_STAGE:?}/usr" "$pkgdir/"
+}

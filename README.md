@@ -25,6 +25,7 @@ The website remains separate from the Web SPA; historical showcase images are st
 | [Indexing architecture](docs/indexing.md) | Shared queue, policies, retry/redrive, durable progress, and incremental acquisition. |
 | [Index maintenance](docs/index-maintenance.md) | Canonical repair, publication, and trusted-local operator security. |
 | [Testing](docs/testing.md) | Isolated fault tests, real-source acceptance, E2E commands, and platform limits. |
+| [Build and release](docs/build-release.md) | Local builds, native packages, and private artifact storage. |
 | [Component outline](docs/components.md) | Implemented boundaries and intended product scope. |
 
 The default local instance uses `http://127.0.0.1:50051`; an empty catalog is healthy before source setup.

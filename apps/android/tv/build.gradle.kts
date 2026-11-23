@@ -11,9 +11,10 @@ android {
         applicationId = "org.screenroom.tv"
         minSdk = 26
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = providers.gradleProperty("screenroomBuild").orElse("1").get().toInt()
+        versionName = providers.gradleProperty("screenroomVersion").orElse("0.1.0").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     buildFeatures { compose = true; buildConfig = true }
