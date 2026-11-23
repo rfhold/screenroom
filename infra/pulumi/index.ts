@@ -66,8 +66,7 @@ const runtimeSecrets = Object.fromEntries(Object.entries(runtimeRoles).map(([com
   component, databaseSecret(component, login),
 ]));
 
-function bucket(purpose: string, named?: { bucketName: pulumi.Input<string>; bucketPolicy: pulumi.Input<string> },
-  dependsOn: pulumi.Resource[] = []) {
+function bucket(purpose: string, named?: { bucketName: pulumi.Input<string>; bucketPolicy: pulumi.Input<string> }) {
   return new k8s.apiextensions.CustomResource(`screenroom-${purpose}-bucket`, {
     apiVersion: "objectbucket.io/v1alpha1", kind: "ObjectBucketClaim",
     metadata: { ...metadata(`screenroom-${purpose}`),
@@ -77,48 +76,26 @@ function bucket(purpose: string, named?: { bucketName: pulumi.Input<string>; buc
       ...(named ? { bucketName: named.bucketName, additionalConfig: { bucketPolicy: named.bucketPolicy } }
         : { generateBucketName: `${namespaceName}-${purpose}` }),
     },
-  }, { ...protection, dependsOn });
+  }, protection);
 }
 
 const artworkId = new random.RandomId("screenroom-artwork-id", { byteLength: 8 }, protection).hex;
 const artworkName = artworkId.apply(id => `${namespaceName}-artwork-${id}`);
-const artworkStore = "default";
-function artworkUser(component: "catalog" | "worker") {
-  const id = artworkId.apply(id => `${namespaceName}-artwork-${component}-${id}`);
-  const user = new k8s.apiextensions.CustomResource(`screenroom-artwork-${component}-user`, {
-    apiVersion: "ceph.rook.io/v1", kind: "CephObjectStoreUser",
-    metadata: { name: id, namespace: "storage", labels,
-      annotations: { "pulumi.com/waitFor": "jsonpath={.status.phase}=Ready" } },
-    spec: { store: artworkStore, displayName: id, quotas: { maxBuckets: 0 } },
-  }, protection);
-  const source = k8s.core.v1.Secret.get(`screenroom-artwork-${component}-rook-key`,
-    pulumi.interpolate`storage/rook-ceph-object-user-${artworkStore}-${user.metadata.name}`,
-    { dependsOn: [user] });
-  const keys = pulumi.secret(source.data);
-  const secret = new k8s.core.v1.Secret(`screenroom-artwork-${component}`, {
-    metadata: metadata(`screenroom-artwork-${component}`),
-    data: {
-      AWS_ACCESS_KEY_ID: keys.apply(data => data.AccessKey),
-      AWS_SECRET_ACCESS_KEY: keys.apply(data => data.SecretKey),
-    },
-  }, protection);
-  return { id, user, secret };
-}
-
-const artworkCatalog = artworkUser("catalog");
-const artworkWorker = artworkUser("worker");
-const artworkPolicy = pulumi.all([artworkName, artworkCatalog.id, artworkWorker.id]).apply(([name, catalog, worker]) =>
+const artworkReader = bucket("artwork-reader");
+// Rook includes the claim UID in the generated principal. The reader's own bucket stays empty.
+const readerPrincipal = artworkReader.metadata.apply(({ namespace, name, uid }) => {
+  if (!namespace || !name || !uid) throw new Error("artwork reader claim is missing metadata");
+  return `obc-${namespace}-${name}-${uid}`;
+});
+const artworkPolicy = pulumi.all([artworkName, readerPrincipal]).apply(([name, reader]) =>
   JSON.stringify({
     Version: "2012-10-17",
     Statement: [
-      { Effect: "Allow", Principal: { AWS: `arn:aws:iam:::user/${catalog}` },
+      { Effect: "Allow", Principal: { AWS: `arn:aws:iam:::user/${reader}` },
         Action: ["s3:GetObject"], Resource: `arn:aws:s3:::${name}/*` },
-      { Effect: "Allow", Principal: { AWS: `arn:aws:iam:::user/${worker}` },
-        Action: ["s3:GetObject", "s3:PutObject"], Resource: `arn:aws:s3:::${name}/*` },
     ],
   }));
-const artworkBucket = bucket("artwork", { bucketName: artworkName, bucketPolicy: artworkPolicy },
-  [artworkCatalog.user, artworkWorker.user]);
+const artworkBucket = bucket("artwork", { bucketName: artworkName, bucketPolicy: artworkPolicy });
 const backupBucket = bucket("backups");
 const backupConfig = pulumi.all([namespace.metadata.name, backupBucket.id]).apply(([ns]) =>
   k8s.core.v1.ConfigMap.get("screenroom-backups-generated-config", `${ns}/screenroom-backups`));
@@ -350,7 +327,7 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   const listen = (name: string, value: number) => env(name, `0.0.0.0:${value}`);
   const catalog = backend("catalog", ["screenroom-catalog"], [
     listen("SCREENROOM_CATALOG_LISTEN", 50052), env("SCREENROOM_CATALOG_PUBLIC_ORIGIN", origin),
-    env("SCREENROOM_USER_PRIVATE_URI", "http://user:50063"), ...s3Env(artworkCatalog.secret.metadata.name),
+    env("SCREENROOM_USER_PRIVATE_URI", "http://user:50063"), ...s3Env(artworkReader.metadata.name),
   ], [{ name: "grpc", containerPort: 50052 }], [s3, { to: [pod("user")], ports: port(50063) }],
   [fromGateway(50052)]);
   const user = backend("user", ["screenroom-user"], [
@@ -358,7 +335,7 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   ], [{ name: "grpc", containerPort: 50053 }, { name: "internal", containerPort: 50063 }], [jellyfin], [
     fromGateway(50053), { from: [pod("catalog")], ports: port(50063) },
   ], { credentials: "read" });
-  backend("worker", ["screenroom-index-worker", "serve"], s3Env(artworkWorker.secret.metadata.name), [], [s3, jellyfin], [],
+  backend("worker", ["screenroom-index-worker", "serve"], s3Env(artworkBucket.metadata.name), [], [s3, jellyfin], [],
     { credentials: "read" });
   const playback = backend("playback-gateway", ["screenroom-playback-gateway"], [
     listen("SCREENROOM_PLAYBACK_GATEWAY_LISTEN", 50054), env("SCREENROOM_PLAYBACK_API_ORIGIN", origin),

@@ -27,7 +27,7 @@ The shared HTTPS Gateway terminates TLS and routes directly to catalog, user, an
 | Resource | Setup |
 | --- | --- |
 | PostgreSQL | CloudNativePG creates the database and app Secret. Bootstrap SQL installs the extensions and grant roles. Managed roles use generated passwords for the five service logins. URLs verify TLS against the cluster CA. |
-| Ceph | The backup claim supplies CloudNativePG's Secret. The artwork claim supplies the bucket name and applies its bucket policy. Rook creates two users in `storage`: catalog reads objects, and worker reads and writes them. Neither service uses the bucket owner key. |
+| Ceph | The backup claim supplies CloudNativePG's Secret. The worker uses the artwork claim's owner key. Catalog uses a separate claim's key, which the artwork bucket policy grants only object reads. Catalog's own claim bucket stays empty. |
 | Private volumes | The operator and playback gateway initialize their own `0700` directories in init containers, as Waltr does. Jellyfin-facing readers mount the credential claim read-only. |
 | Initial user | The user service runs `screenroom-user-init --create-missing` before it starts. The selector comes from the `screenroom-initial-user` ConfigMap. Repeated startup preserves changes to the user and their provider links. |
 
