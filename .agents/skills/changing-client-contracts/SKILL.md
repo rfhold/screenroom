@@ -22,13 +22,13 @@ Platform-only styling does not require this skill unless it changes contract con
 
 ## Invariants
 
-- Ordinary public `Client` and separate HTTP `OperatorClient` expose distinct capabilities.
+- `Client.operator()` derives a distinct typed capability over the same configured RPC endpoint.
 - Keep private RPCs, SQLx, provider keys, private locators, and operator profile bindings outside public models.
 - Buf owns generated wire Rust; the model generator owns ordinary Rust and TypeScript domain records.
 - Preserve native/WASM API parity, wide integers, nullable fields, errors, explicit scope, and immutable client configuration.
 - Preserve cancellation ownership, bounded caches, same-origin artwork fetches, and profile-generation guards.
 - Profile changes cannot expose previous-profile snapshots or accept stale responses.
-- Proxy transport retains explicit opt-in, fixed loopback targets, exact origin guards, bounds, and lossless integer bytes.
+- Operator RPCs retain payload bounds, lossless integers, and the trusted private network boundary.
 - Neither operator attachment identifiers nor local user/profile selectors supply authentication.
 - Older maintenance APIs and browser operation-journal replay are not supported; do not add compatibility surfaces.
 
@@ -40,7 +40,7 @@ Paths below start at the repository root.
 | --- | --- |
 | Public wire field or RPC | `proto/screenroom/{catalog,common,user}/v1/`, `buf.gen.yaml`, `crates/screenroom-proto/src/{generated,lib.rs}`, service implementations |
 | Ordinary domain record | `scripts/generate-client-models.py`, client core `src/{models.rs,wasm.rs,wasm-models.ts}`, Rust-to-wire mappings |
-| Operator DTO or method | `crates/screenroom-index-operator/src/lib.rs`, client core `src/{operator.rs,operator_models.rs,operator_wasm.rs,operator-models.ts}`, Web proxy |
+| Operator DTO or method | `proto/screenroom/operator/v1/`, `crates/screenroom-index-operator/src/rpc.rs`, client core `src/{operator.rs,operator_models.rs,operator_wasm.rs,operator-models.ts}` |
 | Native export or cancellation | `scripts/build-client-core.sh`, `scripts/patch-swift-cancellation.py`, core UniFFI config, Apple preparation, Android JNI preparation |
 | Consumer parity | `apps/apple/Sources/`, `apps/android/ui/`, `apps/linux/src/`, `apps/web/src/lib/`, platform tests and generated-artifact cache keys |
 

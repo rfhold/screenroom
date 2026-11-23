@@ -40,6 +40,8 @@ static_resources:
                           route: {cluster: catalog, timeout: 60s}
                         - match: {prefix: /screenroom.user.v1.UserService/}
                           route: {cluster: user, timeout: 60s}
+                        - match: {prefix: /screenroom.operator.v1.OperatorService/}
+                          route: {cluster: index-operator, timeout: 30s}
                         - match: {prefix: /screenroom.playback_gateway.v1.PlaybackService/}
                           route: {cluster: playback, timeout: 35s}
                         - match:
@@ -65,6 +67,17 @@ static_resources:
                     typed_config:
                       "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
   clusters:
+    - name: index-operator
+      connect_timeout: 5s
+      type: STRICT_DNS
+      http2_protocol_options: {}
+      load_assignment:
+        cluster_name: index-operator
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: {address: index-operator, port_value: 50072}
     - name: playback
       connect_timeout: 5s
       type: STRICT_DNS

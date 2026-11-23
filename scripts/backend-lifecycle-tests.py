@@ -155,7 +155,7 @@ class LifecycleTests(unittest.TestCase):
             backend.main()
         self.assertFalse(any('screenroom-catalog-init' in call for call in calls))
         self.assertIn(('run', '--rm', '--no-deps', 'user', 'screenroom-user-init', '--create-missing', '/runtime/users.json'), calls)
-        self.assertIn(('up', '-d', 'user', 'catalog', 'worker', 'playback-gateway', 'edge'), calls)
+        self.assertIn(('up', '-d', 'user', 'catalog', 'worker', 'playback-gateway', 'index-operator', 'edge'), calls)
         credentials.assert_called_once()
         playback_secrets.assert_called_once()
         role.assert_called_once()
@@ -241,45 +241,8 @@ class LifecycleTests(unittest.TestCase):
                 backend.main()
         self.assertEqual(owner.read_text(), 'another-project')
 
-    def test_operator_commands_preserve_files_and_do_not_activate_other_services(self):
-        self.prepare()
-        before = {p: p.read_bytes() for p in self.runtime.iterdir() if p.is_file()}
-        with patch.dict(os.environ, {}, clear=True), patch.object(backend, 'operator_public_identity'), \
-                patch.object(backend, 'operator_database') as database, patch.object(backend, 'operator_health'), \
-                patch.object(backend, 'operator_container'), patch.object(backend, 'operator_compose') as compose, \
-                patch.object(backend, 'initialize_files', side_effect=AssertionError('no init')):
-            for command in ('operator-up', 'operator-status', 'operator-down'):
-                backend.operator_command(command)
-            self.assertEqual([c.args for c in compose.call_args_list], [
-                ('up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'index-operator'),
-                ('stop', '--timeout', '15', 'index-operator')])
-            database.assert_called_once()
-        self.assertEqual(before, {p: p.read_bytes() for p in before})
-
-    def test_operator_rejects_wrong_identity_and_private_permissions(self):
-        self.prepare()
-        descriptor = backend.read_config(self.runtime / 'descriptor.json')
-        descriptor['instanceID'] = 'wrong'
-        (self.runtime / 'descriptor.json').write_text(json.dumps(descriptor))
-        with self.assertRaisesRegex(RuntimeError, 'matching ready'):
-            backend.operator_instance()
-        (self.runtime / 'runtime.env').chmod(0o644)
-        with self.assertRaisesRegex(RuntimeError, 'owner-private'):
-            backend.operator_instance()
-
-    def test_operator_ports_and_origin_remain_exact(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(backend.operator_settings(), 'http://127.0.0.1:50072')
-        for invalid in ('50051', '50052', '50073', '4173', '4176', '5173', '0', '65536', '050074', '50074;bad'):
-            with patch.dict(os.environ, {'SCREENROOM_OPERATOR_PORT': invalid}, clear=True):
-                with self.assertRaisesRegex(RuntimeError, 'operator port'):
-                    backend.operator_settings()
-        with patch.dict(os.environ, {'SCREENROOM_OPERATOR_ORIGIN': 'http://localhost:50072'}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, 'must equal'):
-                backend.operator_settings()
-
     def test_credentials_init_only_repairs_empty_new_volume(self):
-        with patch.object(backend, 'operator_compose') as compose:
+        with patch.object(backend, 'compose') as compose:
             backend.initialize_credentials()
         args = compose.call_args.args
         self.assertEqual(args[:8], ('run', '--rm', '--no-deps', '--user', '0:0', '--entrypoint', '/bin/sh', 'index-operator'))
@@ -308,8 +271,8 @@ class LifecycleTests(unittest.TestCase):
             self.assertEqual(mount.endswith(':ro'), name != 'index-operator')
             self.assertEqual(services[name]['environment']['SCREENROOM_JELLYFIN_CREDENTIAL_DIRECTORY'], '/run/screenroom/credentials')
         operator = services['index-operator']
-        self.assertEqual(operator['profiles'], ['index-operator'])
-        self.assertTrue(operator['ports'][0].startswith('127.0.0.1:'))
+        self.assertNotIn('profiles', operator)
+        self.assertNotIn('ports', operator)
         self.assertIn('operator_runtime:', operator['environment']['DATABASE_URL'])
         self.assertIn('SCREENROOM_MIGRATION_DATABASE_URL', operator['environment'])
         dockerfile = (backend.ROOT / 'docker/backend/Dockerfile').read_text()

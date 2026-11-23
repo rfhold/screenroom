@@ -14,11 +14,11 @@ Implemented source does not establish active runtime capabilities or authorize l
 | `screenroom-catalog` | `screenroom.catalog.v1.BrowseService`, `screenroom.catalog.v1.CatalogService`, and `screenroom.catalog.v1.SearchService` | Persistent scoped catalog, search, artwork credits, and artwork HTTP transport. |
 | `screenroom-user` | `screenroom.user.v1.UserService` | Local user reads and validated Jellyfin profile links through UUID metadata. |
 | `screenroom-playback-gateway` | `screenroom.playback_gateway.v1.PlaybackService` and `/playback/v1/media/` | Durable Jellyfin sessions, private device authorization, media transport, personal reports, and cleanup. |
-| `screenroom-index-operator` | Separate local HTTP/JSON API | Managed Jellyfin discovery/save and canonical policies, diagnostics, history, redrive, and run controls; no frontend hosting. |
+| `screenroom-index-operator` | `screenroom.operator.v1.OperatorService` | Managed Jellyfin discovery/save and canonical policies, diagnostics, history, redrive, and run controls; no frontend hosting. |
 
 The catalog, user, and playback gateway accept HTTP/2 gRPC and HTTP/1 gRPC-Web through `tonic-web` on one listener.
-Envoy routes public catalog, user, and playback paths through one loopback edge.
-It does not expose operator or internal playback-state RPCs.
+Envoy routes catalog, user, playback, and operator RPCs through one loopback edge.
+It does not expose internal playback-state RPCs.
 No service implements authentication or JWT verification.
 
 Local user UUIDs select state; they are not credentials. Private listeners provide network separation, not authentication or administrator validation.
@@ -54,7 +54,7 @@ The default project is `screenroom-local`; `SCREENROOM_BACKEND_PROJECT` accepts 
 `SCREENROOM_BACKEND_PORT` defaults to `50051`. The public edge binds `127.0.0.1` on that port.
 PostgreSQL 18 with pgvector, Garage, catalog, user, worker, playback gateway, and Envoy share this named instance.
 Private database, object-store, and internal RPC ports have no host publication.
-The optional index operator has a separate loopback HTTP port.
+The index operator shares the loopback edge and has no separate published port.
 
 Runtime files live under `build/backend-runtime/<project>/`. Preserve `runtime.env` and `identity.json` with the associated volumes.
 The helper refuses implicit identity or key rotation when volumes already exist.
@@ -71,51 +71,19 @@ Android uses same-port ADB reverse. Web uses ports `4173` and `4176` for develop
 
 ### Local index operator
 
-The [index maintenance guide](index-maintenance.md) owns canonical poster repair, security, and Web opt-in.
+The [index maintenance guide](index-maintenance.md) owns canonical poster repair, Web setup, and the trusted-network boundary.
 The [canonical API](indexing.md#canonical-operator-api) adds backend policy, queue diagnostics, progress, attempts, and terminal redrive routes.
 The operator supports managed connection discovery/save and canonical indexing; connection operations contact Jellyfin and write private credential files.
 The [Jellyfin guide](jellyfin.md) defines those operations, private ownership, and unsupported edit/rotation paths.
-The Web Maintenance screen supports managed setup through shared operator methods and guarded proxy routes.
+The Web Maintenance screen uses shared client RPCs for managed setup.
 The listener serves no frontend files and requires no frontend build.
 The operator starts no worker and needs no embedding credentials or private object-store keys.
 Older maintenance HTTP routes and browser operation-journal recovery have no supported compatibility interface.
 
-The [lifecycle helper](../scripts/backend-lifecycle.py) requires an owned runtime with `runtime.env`, `identity.json`, `descriptor.json`, and `lifecycle.lock`.
-The descriptor must mark the matching instance ready.
-Startup also requires matching public instance identity, healthy owned PostgreSQL, and the restricted `operator_runtime` login role.
-The helper does not initialize these prerequisites.
-
-Prepare the backend image before launch, from the repository root:
-
-```sh
-docker build -f docker/backend/Dockerfile -t screenroom-backend:local .
-```
-
-The [backend Dockerfile](../docker/backend/Dockerfile) includes `screenroom-index-operator`.
-This build command does not start services.
-Launch requires explicit approval: operator startup applies forward-only database migrations before it opens the listener.
-With an approved ready local instance, use:
-
-```sh
-bash scripts/backend.sh operator-up
-bash scripts/backend.sh operator-status
-bash scripts/backend.sh operator-down
-```
-
-Preserve the instance's explicit `SCREENROOM_BACKEND_PROJECT` and `SCREENROOM_BACKEND_PORT` values for each command.
-The default operator origin is `http://127.0.0.1:50072`.
-`SCREENROOM_OPERATOR_PORT` selects an explicit nonconflicting port.
-If set, `SCREENROOM_OPERATOR_ORIGIN` must equal `http://127.0.0.1:<operator-port>` exactly.
-The helper rejects reserved client/public ports, including the retired profile port `50073`.
-
-`operator-up` uses `up -d --no-deps --no-build --pull never index-operator` with the base Compose file.
-It starts only the operator and waits for its database-backed health endpoint.
-`operator-status` checks public instance identity and operator health.
-`operator-down` stops only `index-operator`; it preserves the backend, worker, volumes, keys, and descriptor.
-Worker activation and provider work require separate explicit approval.
-These lifecycle commands do not opt the Web app into operator access or replay historical browser records.
-Web opt-in requires a separate restart with the [explicit attachment configuration](index-maintenance.md#explicit-local-attachment).
-Local jobs, worker execution, runtime identity, and provider activation retain their current boundaries.
+The normal `backend.sh up` flow starts the operator and checks its database-backed `Health` RPC through the local edge.
+Compose does not publish a separate operator port. The operator retains its restricted `operator_runtime` login and its private credential volume.
+Existing local runtimes need an approved backend rebuild and restart to adopt the new route.
+Provider work remains separate from startup. Any client that can reach the private edge can call the operator.
 
 ### Database startup and migrations
 
@@ -176,7 +144,7 @@ Terminal redrive retains attempts, receipts, coverage provenance, and consumed b
 The [managed connection API](jellyfin.md#connection-api) provisions private connection references and canonical source/profile bindings.
 User and worker resolve current connections from PostgreSQL without manual provider JSON, enrollment commands, or service restart.
 No manual catalog JSON initializer, file-backed `ProviderRegistry`, or private catalog `IngestionService` forms part of source provisioning.
-The canonical operator HTTP API owns admission and run controls; internal progress reads remain separate.
+The operator RPC service owns admission and run controls; internal progress reads remain separate.
 The [binding contract](indexing.md#source-provisioning-and-locator-binding) retains source snapshots, capability checks, and fail-closed admission.
 The worker CLI accepts only `serve`, `drain`, and `activate-model`; old fixture, sample, index, and run-control commands are not interfaces.
 Canonical configure/start and run controls use the operator API.
@@ -473,6 +441,6 @@ buf generate
 
 Catalog owns BrowseService, CatalogService, SearchService, and catalog messages; user owns UserService and local user messages.
 Common owns the shared SearchTypes and SearchMethods records.
-The ordinary client exposes public catalog/common/user/playback RPC contracts, not private operator/internal RPC bindings or backend database dependencies.
-The separate [operator capability](client-api.md#operator-capability) uses typed HTTP/JSON through explicit `OperatorClient` construction.
+The ordinary client exposes catalog, common, user, and playback RPCs without internal RPC or backend database dependencies.
+The [operator capability](client-api.md#operator-capability) uses the same client endpoint and RPC transport.
 The contract supplies no old PreferencesService or mock-profile aliases.

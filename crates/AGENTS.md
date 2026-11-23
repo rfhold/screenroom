@@ -5,7 +5,7 @@
 | [screenroom-backend/src/](screenroom-backend/src/) | Domain repositories, persistence, search, storage, and admission. |
 | [screenroom-queue/src/lib.rs](screenroom-queue/src/lib.rs) | Provider-neutral PostgreSQL queue primitives. |
 | [screenroom-index-worker/src/](screenroom-index-worker/src/) | Stateless work execution and fenced domain commits. |
-| [screenroom-index-operator/src/](screenroom-index-operator/src/) | Private loopback HTTP operator capability. |
+| [screenroom-index-operator/src/](screenroom-index-operator/src/) | Operator RPC service on the trusted private edge. |
 | [screenroom-catalog-adapter/AGENTS.md](screenroom-catalog-adapter/AGENTS.md) | Provider boundary. |
 | [screenroom-client-core/AGENTS.md](screenroom-client-core/AGENTS.md) | Shared public client and separate operator client. |
 | [screenroom-proto/AGENTS.md](screenroom-proto/AGENTS.md) | Generated Rust wire contracts. |

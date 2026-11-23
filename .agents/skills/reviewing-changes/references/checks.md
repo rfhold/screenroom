@@ -71,7 +71,7 @@ pnpm --filter @screenroom/web check
 pnpm --filter @screenroom/web build
 pnpm --filter @screenroom/website check
 pnpm --filter @screenroom/website build
-node --test apps/web/tests/operator-proxy.test.mjs
+(cd apps/web && pnpm exec playwright test --config e2e/maintenance.config.ts)
 ```
 
 - Use the Node range and pnpm pin from root `package.json`.

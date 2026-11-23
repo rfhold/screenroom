@@ -26,7 +26,7 @@ Keep per-run publication dependencies independent; byte dedupe cannot orphan a d
 - Inspect adapter `crates/screenroom-catalog-adapter/src/jellyfin/{connection,secret,network,revision,delta,watched}.rs` for transport contracts.
 - Managed database connections own runtime resolution; no file-backed provider registry or manual catalog initializer supplies runtime configuration.
 - Runtime mocks, TMDB catalog fixtures, demo-user bootstrap, older maintenance APIs, and browser operation-journal replay are not supported product interfaces.
-- Web setup uses managed private connections, shared operator methods, and guarded proxy routes; native apps supply no onboarding UI.
+- Web setup uses managed private connections and shared operator RPCs; native apps supply no onboarding UI.
 - Check URL/key discovery invalidation, exact in-memory UUID/body Retry, key cleanup, and no automatic mutation or browser-journal replay.
 - Refresh requires a saved policy; no-policy Refresh never creates a configure-to-start chain.
 - First-add supports no edit, key rotation, or connection/server replacement API or UI workflow.
@@ -46,7 +46,7 @@ Keep per-run publication dependencies independent; byte dedupe cannot orphan a d
 
 - Inspect `proto/`, `buf.gen.yaml`, generated Rust, shared client models, UniFFI/WASM exports, TypeScript models, and every application consumer.
 - Generated protobuf files belong to Buf; ordinary domain records belong to `scripts/generate-client-models.py`.
-- Public `Client` and HTTP `OperatorClient` carry distinct capabilities; private RPCs and SQLx do not cross the public model boundary.
+- `Client.operator()` derives a distinct RPC capability; internal RPCs and SQLx do not cross the client model boundary.
 - Preserve explicit scope, immutable client configuration, bounded caches, provenance, cancellation, and wide integer precision.
 - Profile changes invalidate profile-bound caches and fence stale responses on all platforms.
 - Inspect Swift cancellation patches, buffer ownership, future lifecycle, Kotlin coroutine ownership, and WASM abort behavior.
@@ -58,12 +58,12 @@ Keep per-run publication dependencies independent; byte dedupe cannot orphan a d
 - Treat library IDs as opaque; literal `movies` or `tv` values imply no special behavior.
 - Normalize old saved `tmdb` settings to `all` without a whole-settings reset; ignore obsolete subtitle fields in ordinary settings files.
 
-## Proxy and Public Edge
+## Operator and Shared Edge
 
-- Inspect `apps/web/server/operator-proxy.mjs`, direct operator guards, shared operator DTOs, and proxy tests together.
-- Preserve explicit target/origin opt-in, loopback peers, exact Host/Origin, Fetch Metadata, fixed targets, and narrow route allowlists.
-- Keep request/response bounds and lossless JSON integer transport.
-- The proxy supplies no authentication and does not grant ordinary clients operator access.
+- Inspect operator protobuf, shared client DTOs, Compose Envoy routes, and Pantheon Gateway routes together.
+- Keep the operator on the trusted private edge with exact service prefixes and preserve internal RPC isolation.
+- Preserve request/response bounds and lossless integer transport.
+- The operator has no administrator authentication. CORS and user selectors do not grant authority.
 - Keep the Web SPA fallback separate from static website prerender/no-client-JavaScript behavior.
 - Preserve `website/static/404.html` in output to prevent Cloudflare Pages' implicit SPA fallback.
 

@@ -607,16 +607,16 @@ impl OperatorConnectionErrorCode {
             Self::DiscoveryUnavailable => "discovery_unavailable",
         }
     }
-    pub(crate) fn status(&self) -> u16 {
+    pub(crate) fn status(&self) -> tonic::Code {
         match self {
             Self::RequestConflict
             | Self::RequestExpired
             | Self::ServerIdentityMismatch
-            | Self::ServerAlreadyConnected => 409,
+            | Self::ServerAlreadyConnected => tonic::Code::AlreadyExists,
             Self::ConnectionUnavailable
             | Self::CredentialStoreUnavailable
-            | Self::DiscoveryUnavailable => 503,
-            _ => 400,
+            | Self::DiscoveryUnavailable => tonic::Code::Unavailable,
+            _ => tonic::Code::InvalidArgument,
         }
     }
 }

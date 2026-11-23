@@ -1,7 +1,6 @@
 use crate::*;
-use js_sys::{Array, Function, Object, Promise, Reflect, Uint8Array};
-use wasm_bindgen::{JsCast, prelude::*};
-use wasm_bindgen_futures::JsFuture;
+use js_sys::Reflect;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(typescript_custom_section)]
 const TYPES: &str = include_str!("operator-models.ts");
@@ -43,6 +42,13 @@ fn to<T: serde::Serialize>(value: Result<T, OperatorError>) -> Result<JsValue, J
 #[wasm_bindgen(js_name = OperatorClient)]
 pub struct WasmOperatorClient {
     inner: Arc<OperatorClient>,
+}
+impl WasmOperatorClient {
+    pub(crate) fn from_client(client: Arc<Client>) -> Self {
+        Self {
+            inner: client.operator(),
+        }
+    }
 }
 #[wasm_bindgen(js_class = OperatorClient)]
 impl WasmOperatorClient {
@@ -260,77 +266,4 @@ impl WasmOperatorClient {
     ) -> Result<JsValue, JsValue> {
         to(self.inner.indexing_queue(from(input)?).await)
     }
-}
-
-fn get(object: &JsValue, field: &str) -> Result<JsValue, JsValue> {
-    Reflect::get(object, &field.into())
-}
-fn invoke(object: &JsValue, method: &str, args: &Array) -> Result<JsValue, JsValue> {
-    get(object, method)?
-        .dyn_into::<Function>()?
-        .apply(object, args)
-}
-async fn promise(value: JsValue) -> Result<JsValue, JsValue> {
-    JsFuture::from(value.dyn_into::<Promise>()?).await
-}
-struct Abort(JsValue);
-impl Drop for Abort {
-    fn drop(&mut self) {
-        let _ = invoke(&self.0, "abort", &Array::new());
-    }
-}
-
-pub(crate) async fn fetch(
-    url: &str,
-    body: Option<Vec<u8>>,
-    ambiguous: bool,
-) -> Result<(u16, Vec<u8>), OperatorError> {
-    let result: Result<_, JsValue> = async {
-        let global = js_sys::global();
-        let constructor = get(&global, "AbortController")?.dyn_into::<Function>()?;
-        let abort = Abort(Reflect::construct(&constructor, &Array::new())?);
-        let init = Object::new();
-        for (name, value) in [
-            ("redirect", "error".into()),
-            ("mode", "same-origin".into()),
-            ("credentials", "omit".into()),
-            ("cache", "no-store".into()),
-            ("signal", get(&abort.0, "signal")?),
-            ("method", if body.is_some() { "POST" } else { "GET" }.into()),
-        ] {
-            Reflect::set(&init, &name.into(), &value)?;
-        }
-        let headers = Object::new();
-        Reflect::set(&headers, &"accept".into(), &"application/json".into())?;
-        if let Some(body) = body {
-            Reflect::set(&headers, &"content-type".into(), &"application/json".into())?;
-            Reflect::set(&init, &"body".into(), &Uint8Array::from(body.as_slice()))?;
-        }
-        Reflect::set(&init, &"headers".into(), &headers)?;
-        let args = Array::new();
-        args.push(&url.into());
-        args.push(&init);
-        let response = promise(invoke(&global, "fetch", &args)?).await?;
-        let status = get(&response, "status")?.as_f64().unwrap_or(0.0) as u16;
-        let body = get(&response, "body")?;
-        if body.is_null() || body.is_undefined() {
-            return Ok(Ok((status, Vec::new())));
-        }
-        let reader = invoke(&body, "getReader", &Array::new())?;
-        let mut bytes = Vec::new();
-        loop {
-            let chunk = promise(invoke(&reader, "read", &Array::new())?).await?;
-            if get(&chunk, "done")?.as_bool() == Some(true) {
-                break;
-            }
-            let value = Uint8Array::new(&get(&chunk, "value")?);
-            if value.length() as usize > crate::operator::RESPONSE_LIMIT - bytes.len() {
-                return Ok(Err(OperatorError::InvalidResponse { ambiguous }));
-            }
-            bytes.extend(value.to_vec());
-        }
-        Ok(Ok((status, bytes)))
-    }
-    .await;
-    result.map_err(|_| OperatorError::Unavailable { ambiguous })?
 }

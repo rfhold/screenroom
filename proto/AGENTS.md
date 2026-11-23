@@ -11,7 +11,7 @@
 
 # Contracts
 
-- Keep public services separate from private operator and internal packages.
+- Keep operator, ordinary client, and internal services in separate packages.
 - Keep provider keys, file locators, private connection references, and operator profile bindings outside public fields.
 - Treat source and profile identifiers as selectors, not authorization.
 - Preserve empty adapter and playback packages unless the task explicitly implements them.

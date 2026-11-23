@@ -54,6 +54,10 @@ pub struct WasmClient {
 }
 #[wasm_bindgen(js_class=Client)]
 impl WasmClient {
+    pub fn operator(&self) -> crate::operator_wasm::WasmOperatorClient {
+        crate::operator_wasm::WasmOperatorClient::from_client(self.inner.clone())
+    }
+
     #[wasm_bindgen(unchecked_return_type = "CreatePlaybackSessionResponse")]
     pub async fn create_playback_session(
         &self,

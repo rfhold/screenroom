@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+mod rpc;
+pub use rpc::serve;
+
 const BODY_LIMIT: usize = 65_536;
 
 #[derive(Clone)]
@@ -77,18 +80,24 @@ impl Origin {
 #[derive(Clone)]
 pub struct Operator {
     pool: PgPool,
-    origin: Origin,
+    origin: Option<Origin>,
     connections: screenroom_backend::connections::ConnectionRepository,
 }
 impl Operator {
     pub fn new(pool: PgPool, origin: Origin) -> Self {
+        Self {
+            origin: Some(origin),
+            ..Self::new_rpc(pool)
+        }
+    }
+    pub fn new_rpc(pool: PgPool) -> Self {
         Self {
             connections: screenroom_backend::connections::ConnectionRepository::new(
                 pool.clone(),
                 None,
             ),
             pool,
-            origin,
+            origin: None,
         }
     }
     pub fn with_connections(
@@ -240,7 +249,11 @@ struct Diagnostics {
 
 async fn dispatch(State(op): State<Operator>, request: Request) -> Response {
     let mutation = request.method() != Method::GET;
-    if !op.origin.permits(request.headers(), mutation) {
+    if !op
+        .origin
+        .as_ref()
+        .is_some_and(|origin| origin.permits(request.headers(), mutation))
+    {
         return error(StatusCode::FORBIDDEN, "invalid");
     }
     let path = request.uri().path().to_owned();

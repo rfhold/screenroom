@@ -79,9 +79,9 @@ Stateless workers use durable progress, capability-aware claims, fences, classif
 Domain repositories own source eligibility, catalog transactions, and publication.
 Canonical backend policies support full, incremental, reconcile, and poster-only repair within their [validated combinations and limits](indexing.md#policy-model).
 Incremental Jellyfin uses timestamp polls with overlap and periodic complete reconciliation; optional notification hints do not form a journal.
-The canonical operator HTTP API exposes policies, progress, jobs, attempts, diagnostics, and terminal redrive.
+The operator RPC service exposes policies, progress, jobs, attempts, diagnostics, and terminal redrive.
 Its separate service is API-only and also supports managed connection discovery/save.
-Web Maintenance supports URL/API-key discovery, profile/library selection, Save, and Save and refresh through shared operator methods and guarded proxy routes.
+Web Maintenance uses shared client RPCs for discovery, profile and library selection, Save, and Save and refresh.
 Canonical Refresh, Pause, Resume, and Retry use saved policies; Advanced settings expose policy and queue details.
 Browser operation journals and old maintenance routes have no compatibility requirement.
 No native onboarding or operator UI forms part of this support.

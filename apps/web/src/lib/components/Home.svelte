@@ -5,7 +5,6 @@
   import { rememberView, restoreView, viewReady, clearViews, savePages, savedPages } from '../core/view-history';
   import { registerPlayback } from '../core/playback-lifecycle';
   import Maintenance from './Maintenance.svelte';
-  import { operatorConfig } from '../core/operator-config';
   import type { Item, Library } from '../core/models';
   import { client, newClient, credit, allCredits, failure, item, loadSettings, saveSettings, settingsWarning, configure, scope } from '../core/client';
   import { collectPages, IncrementalPages } from '../core/pagination';
@@ -205,7 +204,7 @@
         {#if location.screen === 'home'}<a class="button browse" href="/libraries">Browse libraries</a>{/if}
       </div>
       {#if location.screen === 'home'}
-        {#if libraries.length <= 1 && !homeRows.some(row => row.items.length)}<section class="empty-library"><h2>Your library starts here</h2><p>{operatorConfig.enabled ? 'Add your Jellyfin server to bring your library into Screenroom.' : 'No libraries are available. Server setup is unavailable on this web attachment.'}</p>{#if operatorConfig.enabled}<a class="button" href="/maintenance">Add server</a>{/if}</section>{/if}
+        {#if libraries.length <= 1 && !homeRows.some(row => row.items.length)}<section class="empty-library"><h2>Your library starts here</h2><p>Add your Jellyfin server to bring your library into Screenroom.</p><a class="button" href="/maintenance">Add server</a></section>{/if}
         <div class="rows">{#each homeRows as row, index (row.title)}
           <section aria-labelledby={`row-${index}`}><h2 id={`row-${index}`}>{row.title}</h2>{#if row.readError}<p role="alert">{row.readError}</p><button onclick={refresh}>Retry row</button>{/if}<div class="poster-row">{#each row.items as item (item.id)}<PosterCard {item} href={itemHref(location, item)} />{/each}</div></section>
         {/each}</div>

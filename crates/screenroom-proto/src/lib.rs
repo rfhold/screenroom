@@ -16,6 +16,11 @@ pub mod playback_gateway {
         include!("generated/screenroom/playback_gateway/v1/screenroom.playback_gateway.v1.rs");
     }
 }
+pub mod operator {
+    pub mod v1 {
+        include!("generated/screenroom/operator/v1/screenroom.operator.v1.rs");
+    }
+}
 pub mod user {
     pub mod v1 {
         include!("generated/screenroom/user/v1/screenroom.user.v1.rs");

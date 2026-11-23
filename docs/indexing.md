@@ -2,7 +2,7 @@
 
 This guide owns the implemented provider-neutral queue, backend policy, recovery, incremental acquisition, and status contracts.
 The [backend guide](backend.md) owns runtime lifecycle and migration procedures.
-The [maintenance guide](index-maintenance.md) owns poster semantics, operator security, and Web opt-in.
+The [maintenance guide](index-maintenance.md) owns poster semantics, operator security, and Web setup.
 The [Jellyfin guide](jellyfin.md) owns managed setup and private credential ownership.
 The [client guide](client-api.md#operator-capability) owns the separate shared operator capability.
 
@@ -25,7 +25,7 @@ Source entry points include:
 - [Queue administration](../crates/screenroom-backend/src/queue_admin.rs): diagnostic counts, history, and domain redrive eligibility.
 - [Worker pipeline](../crates/screenroom-index-worker/src/pipeline.rs) and [full traversal](../crates/screenroom-index-worker/src/full.rs): capability-aware execution and incremental acquisition.
 - [Jellyfin delta adapter](../crates/screenroom-catalog-adapter/src/jellyfin/delta.rs): timestamp filters and capability fallback.
-- [Operator service](../crates/screenroom-index-operator/src/lib.rs): local HTTP/JSON routes.
+- [Operator service](../proto/screenroom/operator/v1/operator.proto): shared-edge gRPC and gRPC-Web.
 
 ## Queue and domain responsibilities
 
@@ -208,29 +208,29 @@ The [current telemetry guide](backend.md#shared-telemetry) describes the actual 
 
 ## Canonical operator API
 
-These routes use the [local operator boundary](index-maintenance.md#local-operator-api) and its security/body limits.
+These RPCs use the [operator boundary](index-maintenance.md#local-operator-api) and its payload limits.
 They read or mutate PostgreSQL; provider discovery/save uses the separate [connection API](jellyfin.md#connection-api).
-Web Maintenance consumes these contracts through shared operator methods and the guarded proxy.
+Web Maintenance uses these contracts through the shared client.
 Refresh uses canonical saved policies, not the removed poster preview/start API.
 Explicit Save and Refresh can atomically create a connection and initial run; Save alone creates no jobs.
 Page entry, reload, and settings reads do not authorize work or replay historical browser records.
 
-| Method and path | Contract |
+| RPC | Contract |
 | --- | --- |
-| `GET /api/indexing/sources/{source_id}/policies` | Sanitized canonical policies. |
-| `POST /api/indexing/sources/{source_id}/policies` | `{request_id, existing, configuration}`; versioned, idempotent configure. |
-| `POST /api/indexing/sources/{source_id}/start` | `{request_id, policy_id, policy_version, scope}`; sanitized run summary with identical-request replay. |
-| `GET /api/indexing/sources/{source_id}/policies/{policy_id}/progress` | Durable policy watermark and next reconciliation time. |
-| `GET /api/indexing/sources/{source_id}/runs` | Canonical source run history; UUID cursor. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}` | Shared sanitized run status and allowed run actions. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}/candidates` | Sanitized candidate outcomes; UUID cursor and optional `pending_only`. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}/execution` | Actual mode, window, fallback reason, and settlement time. |
-| `POST /api/indexing/sources/{source_id}/runs/{run_id}/{pause,resume,cancel}` | Empty object; permitted run action, not redrive. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}/jobs` | Payload-free job summaries with `redrive_allowed` and `redrive_reason`. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}/jobs/{job_id}/attempts` | Attempt history without lease-owner strings; numeric fence cursor. |
-| `GET /api/indexing/sources/{source_id}/runs/{run_id}/jobs/{job_id}/redrives` | Redrive history; numeric generation cursor. |
-| `POST /api/indexing/sources/{source_id}/runs/{run_id}/jobs/{job_id}/redrive` | `{request_id}`; idempotent terminal redrive receipt. |
-| `POST /api/indexing/queue` | `{run_id, capabilities}`; non-atomic diagnostic observations and blocker reasons. |
+| `ListPolicies` | Sanitized canonical policies. |
+| `ConfigurePolicy` | `{request_id, existing, configuration}`; versioned, idempotent configure. |
+| `StartRun` | `{request_id, policy_id, policy_version, scope}`; sanitized run summary with identical-request replay. |
+| `GetProgress` | Durable policy watermark and next reconciliation time. |
+| `ListRuns` | Canonical source run history; UUID cursor. |
+| `GetRunStatus` | Shared sanitized run status and allowed run actions. |
+| `ListCandidates` | Sanitized candidate outcomes; UUID cursor and optional `pending_only`. |
+| `GetExecution` | Actual mode, window, fallback reason, and settlement time. |
+| `PauseRun`, `ResumeRun`, `CancelRun` | Permitted run action, not redrive. |
+| `ListJobs` | Payload-free job summaries with `redrive_allowed` and `redrive_reason`. |
+| `ListAttempts` | Attempt history without lease-owner strings; numeric fence cursor. |
+| `ListRedrives` | Redrive history; numeric generation cursor. |
+| `RedriveJob` | `{request_id}`; idempotent terminal redrive receipt. |
+| `ObserveQueue` | `{run_id, capabilities}`; non-atomic diagnostic observations and blocker reasons. |
 
 Policy, job, attempt, and redrive collections accept limits from 1 through 200; the default is 100.
 Run/candidate history accepts limits from 1 through 1,000; candidate `pending_only=true` selects `selected` and `checked` outcomes.
@@ -298,5 +298,5 @@ The operator API serves no standalone dashboard.
 Local code and documentation changes grant no live activation authority.
 Service restarts, migration application, worker activation, and provider acquisition require separate explicit approval for the exact target.
 Destructive commands require separate approval; this guide supplies no reset or volume-removal procedure.
-The operator remains an explicit loopback-only opt-in capability with no administrator authentication.
+The shared private edge routes the operator without administrator authentication.
 The [browser security rules](index-maintenance.md#browser-boundary) retain the trusted-local, no-authentication boundary.

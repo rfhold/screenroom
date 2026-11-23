@@ -15,7 +15,7 @@ function frame(data:Buffer,status=0){const h=Buffer.alloc(5);h.writeUInt32BE(dat
 export async function consumerWire(page:Page,origin:string,handler:(call:Call)=>Promise<Buffer|false|undefined>|Buffer|false|undefined,semantic=true){
  const calls:Call[]=[];
  await page.route('**/*',async route=>{
-  const url=new URL(route.request().url());if(url.origin===origin)return route.continue();if(!url.pathname.startsWith('/screenroom.'))return route.abort();
+  const url=new URL(route.request().url());if(url.origin!==origin)return route.abort();if(!/^\/screenroom\.(catalog|user)\.v1\./.test(url.pathname))return route.continue();
   const body=route.request().postDataBuffer()!;const call={method:url.pathname.split('/').at(-1)!,fields:decode(body.subarray(5,5+body.readUInt32BE(1)))};calls.push(call);
   let data=await handler(call);
   if(data===undefined){

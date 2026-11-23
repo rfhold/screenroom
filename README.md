@@ -28,7 +28,7 @@ The website remains separate from the Web SPA; historical showcase images are st
 | [Component outline](docs/components.md) | Implemented boundaries and intended product scope. |
 
 The default local instance uses `http://127.0.0.1:50051`; an empty catalog is healthy before source setup.
-The operator API requires explicit opt-in and grants trusted-local capability, not authenticated administrator access.
+The operator API shares the trusted private edge. It does not authenticate administrators.
 Web Maintenance supports Jellyfin URL/API-key discovery, profile/library selection, Save, and Save and refresh through the shared operator capability.
 No native onboarding UI forms part of that target.
 

@@ -2833,11 +2833,16 @@ dependencies = [
  "http-body-util",
  "screenroom-backend",
  "screenroom-observability",
+ "screenroom-proto",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-web",
  "tower",
+ "tower-http",
  "uuid",
 ]
 

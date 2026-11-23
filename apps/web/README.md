@@ -6,7 +6,7 @@ Managed Jellyfin connections supply real provider data through backend adapters;
 Abstract posters and initials identify absent images; failed artwork loads show an unavailable state.
 Cards open details or browse children; Movie and Episode details expose gateway-backed **Play**.
 There are no accounts or client-owned provider connections.
-Maintenance in the shared sidebar supports backend-managed Jellyfin setup and canonical index controls through an opt-in attachment.
+Maintenance in the shared sidebar supports backend-managed Jellyfin setup and canonical index controls.
 Watched snapshots remain separate from Continue Watching progress, Up Next, and addition order; none implies watched completion.
 The static public website lives separately in [`../../website/`](../../website/).
 The [wire contract](../../docs/client-api.md) places catalog RPCs in `screenroom.catalog.v1` and UserService in `screenroom.user.v1`.
@@ -15,7 +15,7 @@ Immutable ClientConfig contains endpoint, local user UUID selector, and timeout;
 ## Playback
 
 The [playback guide](../../docs/playback.md) owns session, identity, media, uncertainty, and security rules.
-The player uses ordinary shared WASM `Client` methods, not the operator capability or Maintenance proxy.
+The player uses ordinary shared WASM `Client` methods, not the operator capability.
 Video, HLS, and subtitles use validated gateway media URLs outside gRPC/WASM; the browser never contacts Jellyfin.
 Playback requires an enabled local user, a current personal Jellyfin link, and backend-owned Quick Connect authorization.
 The gateway never substitutes the indexing profile for an absent personal link or enables Quick Connect automatically.
@@ -73,23 +73,21 @@ The backend creates that selector once; use the installation descriptor, not a f
 Vite accepts `SCREENROOM_API_ENDPOINT` and `SCREENROOM_USER_ID` aliases when explicit `VITE_` values are absent.
 Ordinary Vite builds compile these public settings; preview environment changes do not update them.
 The [Pantheon Web image](../../docs/deployment.md) uses the browser origin and a runtime configuration file for the local user selector.
-The image does not include the Vite operator proxy.
+The shared Gateway routes operator RPCs directly to the operator service.
 Validated localStorage settings use an origin/endpoint/user/namespace key; failed writes retain in-memory choices and show a warning.
 
 `predev`, `prebuild` and `precheck` run [`scripts/prepare-core.mjs`](scripts/prepare-core.mjs), which checks freshness and rebuilds stale artifacts through the root WASM build script. Cargo checks source changes incrementally, not just output-file existence. Install Rust's `wasm32-unknown-unknown` target and the matching `wasm-bindgen` CLI from the [client API guide](../../docs/client-api.md#build-the-core). Generated JS/types/WASM stay under `target/client-core/wasm`. Vite bundles the imported WASM asset into production output. Generated binaries stay outside Git.
 
 ## Maintenance
 
-The optional web Maintenance screen uses a separate typed Rust WASM `OperatorClient`, not the ordinary public RPC client.
+Web Maintenance uses the shared Rust WASM client's typed operator capability.
 It provides Refresh, Pause, Resume and Retry, with policy settings, run history and queue details under Advanced settings.
 Direct `/maintenance` entry does not depend on public catalog initialization.
 Native bindings expose the capability, but native apps supply no Maintenance UI.
 
-Maintenance is always discoverable; disabled attachments show an unavailable state and expose no operator API.
-Opt-in requires both server-only `SCREENROOM_WEB_OPERATOR_TARGET` and `SCREENROOM_WEB_OPERATOR_ORIGIN`, plus a separately approved web restart.
-The [maintenance guide](../../docs/index-maintenance.md#explicit-local-attachment) owns exact values, development/preview commands, and production build/preview configuration parity.
-Both Vite servers provide the guarded same-origin proxy; static deployment alone provides none.
-Every script on the opt-in origin gains trusted-local administrator capability; the proxy provides no authentication.
+Maintenance needs no separate origin, proxy, or enable flag.
+It uses the same configured endpoint and user selector as catalog. Local Compose and Pantheon route `OperatorService` to the index operator.
+Any caller that can reach the trusted private API endpoint has operator access. The local user selector does not authenticate callers.
 
 Choose **Add server**, enter a backend-reachable Jellyfin URL and administrator API key, then choose **Connect**.
 Select an enabled profile and 1–32 distinct supported libraries, with at most one collections library.
@@ -270,7 +268,7 @@ Initial RPC and search failures expose errors and Retry, never hidden local fixt
 All routes use the SPA's existing `/` path with readable query parameters:
 
 - `/` — Home.
-- `/?screen=maintenance` — explicit operator capability; unavailable without the opt-in configuration above.
+- `/?screen=maintenance` — redirects to `/maintenance`, which uses the configured backend.
 - `/?screen=browse&library=<public-library-id>` — browse a server-supplied library.
 - `series=<public-series-id>&season=<public-season-id>` — hierarchy within the current library.
 - `/?screen=search&library=<public-library-id>&q=<query>` — library-scoped search.
@@ -284,7 +282,7 @@ Links support normal browser navigation and modified-click/new-tab behavior. Rel
 
 Public and operator control use shared WASM clients; media uses the gateway HTTP routes.
 Page loads never call Jellyfin, S3, or external image services directly.
-Managed setup sends the key through the guarded operator proxy to the private backend, not to a browser provider adapter.
+Managed setup sends the key to the operator RPC, not directly to the provider.
 External links require a user click. App startup and builds perform no provider import.
 Runtime product mocks, TMDB importers, fixture feeds, and demo-user bootstrap are not supported interfaces.
 Provider acquisition requires separate operational approval; the [Jellyfin guide](../../docs/jellyfin.md) owns supported setup and key ownership.

@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package screenroom.operator.v1;
+
+// Administrative operations for trusted deployments. Selectors do not authenticate callers.
+service OperatorService {
+  rpc Health(OperatorRequest) returns (OperatorResponse);
+  rpc DiscoverConnection(OperatorRequest) returns (OperatorResponse);
+  rpc SaveConnection(OperatorRequest) returns (OperatorResponse);
+  rpc ListConnections(OperatorRequest) returns (OperatorResponse);
+  rpc ListSources(OperatorRequest) returns (OperatorResponse);
+  rpc ListLibraries(OperatorRequest) returns (OperatorResponse);
+  rpc ListRuns(OperatorRequest) returns (OperatorResponse);
+  rpc ListCandidates(OperatorRequest) returns (OperatorResponse);
+  rpc ListPolicies(OperatorRequest) returns (OperatorResponse);
+  rpc ConfigurePolicy(OperatorRequest) returns (OperatorResponse);
+  rpc GetProgress(OperatorRequest) returns (OperatorResponse);
+  rpc StartRun(OperatorRequest) returns (OperatorResponse);
+  rpc GetRunStatus(OperatorRequest) returns (OperatorResponse);
+  rpc GetExecution(OperatorRequest) returns (OperatorResponse);
+  rpc PauseRun(OperatorRequest) returns (OperatorResponse);
+  rpc ResumeRun(OperatorRequest) returns (OperatorResponse);
+  rpc CancelRun(OperatorRequest) returns (OperatorResponse);
+  rpc ListJobs(OperatorRequest) returns (OperatorResponse);
+  rpc ListAttempts(OperatorRequest) returns (OperatorResponse);
+  rpc ListRedrives(OperatorRequest) returns (OperatorResponse);
+  rpc RedriveJob(OperatorRequest) returns (OperatorResponse);
+  rpc ObserveQueue(OperatorRequest) returns (OperatorResponse);
+}
+
+message OperatorPage {
+  optional string after = 1;
+  uint32 limit = 2;
+  optional bool pending_only = 3;
+}
+
+message OperatorRequest {
+  string source_id = 1;
+  string run_id = 2;
+  string policy_id = 3;
+  string job_id = 4;
+  OperatorPage page = 5;
+  // Exact UTF-8 serialization of the operation's domain request, if any.
+  bytes payload_json = 6;
+}
+
+message OperatorResponse {
+  // Exact UTF-8 domain response, including 64-bit integers and nullable values.
+  bytes payload_json = 1;
+}

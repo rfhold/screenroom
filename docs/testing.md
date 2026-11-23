@@ -205,7 +205,7 @@ The acceptance boundary includes:
 - Current watched state and personal links, separate from catalog delta checkpoints.
 - Actual credential-volume ownership, modes, read-only mounts, and restricted database grants.
 
-Web setup uses shared operator methods and guarded proxy routes; isolated browser tests exercise that path with controlled local responses.
+Web setup uses shared client gRPC-Web. Isolated browser tests exercise that path with controlled local responses.
 Those tests do not establish attached real-source acceptance or a live provider deployment.
 No source-only check establishes Docker startup/restart, actual volume ownership, SDK/device behavior, or provider E2E acceptance.
 If a required dependency or data case is absent, report the limitation rather than fabricate success.

@@ -11,9 +11,9 @@ The [Tekton pipelines](../.tekton/) use the shared BuildKit, manifest, promotion
 
 Use the shared Pulumi backend and deployment task. The task expects the stack state record to exist, as it does for sibling projects. For a manual preview, pass `--config` for each immutable image: `catalogImage`, `userImage`, `workerImage`, `playbackGatewayImage`, `indexOperatorImage`, and `webImage`.
 
-The shared HTTPS Gateway terminates TLS and routes directly to catalog, user, and playback over h2c. The worker and index operator have no Gateway routes. Envoy and `/__screenroom_instance` belong to local Compose and do not form part of the Pantheon deployment.
+The shared HTTPS Gateway terminates TLS and routes catalog, user, playback, and operator RPCs over h2c. The worker has no Gateway route. Envoy and `/__screenroom_instance` belong to local Compose.
 
-The same host serves the [Web SPA](../apps/web/) at `/` and supports direct navigation to SPA routes. The browser uses its own origin for API and media requests. A mounted configuration file supplies the same local user selector as backend setup. The selector does not authenticate requests. The Web image serves static files only; it returns 404 for `/__operator/` paths and does not run the local Vite proxy.
+The same host serves the [Web SPA](../apps/web/) at `/` and supports direct navigation to SPA routes. The browser uses its own origin for RPC and media requests. A mounted configuration file supplies the local user selector. The selector does not authenticate requests. The Web image serves static files only; it does not proxy operator traffic.
 
 ## Before activation
 
@@ -33,7 +33,7 @@ The same host serves the [Web SPA](../apps/web/) at `/` and supports direct navi
 | Private volumes | The operator and playback gateway initialize their own `0700` directories in init containers, as Waltr does. Jellyfin-facing readers mount the credential claim read-only. |
 | Initial user | The user service runs `screenroom-user-init --create-missing` before it starts. The selector comes from the `screenroom-initial-user` ConfigMap. Repeated startup preserves changes to the user and their provider links. |
 
-Setup does not import provider data or copy the local instance's credentials. The operator has no Service or Gateway route. Its maintenance access requires a separate approved procedure.
+Setup does not import provider data or copy the local instance's credentials. Web Maintenance uses the same HTTPS origin as the rest of the app. Any caller that can reach this trusted private origin can administer the instance. Do not expose it to untrusted networks.
 
 The deployment sets no cross-origin browser allowlist. If a separate Web origin enters scope, review an explicit origin allowlist first. Keep the media capability query parameter out of Gateway logs and traces.
 

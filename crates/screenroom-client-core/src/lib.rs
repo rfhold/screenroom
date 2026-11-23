@@ -256,6 +256,10 @@ pub struct Client {
 
 #[cfg_attr(not(target_arch = "wasm32"), uniffi::export(async_runtime = "tokio"))]
 impl Client {
+    pub fn operator(self: Arc<Self>) -> Arc<OperatorClient> {
+        OperatorClient::from_client(self)
+    }
+
     #[cfg_attr(not(target_arch = "wasm32"), uniffi::constructor)]
     pub fn new(config: ClientConfig) -> Result<Arc<Self>, ClientError> {
         let url = url::Url::parse(&config.endpoint).map_err(|e| invalid(e.to_string()))?;

@@ -5,6 +5,7 @@ import { createServer, preview } from 'vite';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
+import { decodeOperator, operatorFrame, operatorReply } from './operator-wire';
 export const sourceId='00000000-0000-4000-8000-000000000001',libraryId='00000000-0000-4000-8000-000000000002',policyId='00000000-0000-4000-8000-000000000003',runId='00000000-0000-4000-8000-000000000004',secondSourceId='00000000-0000-4000-8000-000000000005',jobId='00000000-0000-4000-8000-000000000007';
 export const userId='10000000-0000-4000-8000-000000000001';
 const date='2026-11-11T00:00:00Z';
@@ -22,10 +23,16 @@ export async function maintenanceServer(enabled=true,options:Options={}){
  const receipts=new Map<string,unknown>(),attempts=new Map<string,number>();
  let releaseAction=()=>{},releaseLibraries=()=>{},releaseIndexing=()=>{},releaseDiscovery=()=>{},releaseSave=()=>{};
  const upstream=http.createServer(async(req,res)=>{
-  const chunks=[];for await(const chunk of req)chunks.push(chunk);const body=Buffer.concat(chunks).toString(),url=new URL(req.url!,'http://localhost'),path=url.pathname,after=url.searchParams.get('after');
-  calls.push({path,method:req.method!,body,after});res.setHeader('content-type','application/json');
-  const send=(v:unknown)=>res.end(JSON.stringify(v,(_,x)=>typeof x==='bigint'?`__bigint_${x}`:x).replace(/"__bigint_(\d+)"/g,'$1'));
-  const fail=(code:string,status=409)=>{res.statusCode=status;return send({error:{code,message:'PRIVATE upstream detail must never render'}});};
+  const chunks=[];for await(const chunk of req)chunks.push(chunk);
+  const {path,method,body,after}=decodeOperator(req.url!,Buffer.concat(chunks));
+  calls.push({path,method,body,after});res.setHeader('content-type','application/grpc-web+proto');
+  const send=(v:unknown)=>res.end(operatorReply(JSON.stringify(v,(_,x)=>typeof x==='bigint'?`__bigint_${x}`:x).replace(/"__bigint_(\d+)"/g,'$1')));
+  const fail=(code:string,status=409)=>{
+   const grpc=status===400?3:status===404?5:status===503?14:code==='source_busy'?10:code==='stale'?9:6;
+   const detail=code==='source_busy'?`x-screenroom-run-id: ${runId}\r\n`:'';
+   return res.end(operatorFrame(128,Buffer.from(`grpc-status: ${grpc}\r\ngrpc-message: ${code}\r\n${detail}`)));
+  };
+  if(!enabled)return fail('unavailable',503);
   const input=body?JSON.parse(body):null,selected=path.includes(secondSourceId)?secondSourceId:sourceId;
   const status=()=>({...detail,run:{...run,source_id:selected}});
   const receipt=(name:string,value:()=>unknown,failures=options.indexingFailures||0)=>{const key=`${name}:${input.request_id}`;if(!receipts.has(key))receipts.set(key,structuredClone(value()));const count=(attempts.get(key)||0)+1;attempts.set(key,count);return count<=failures?fail('unavailable',503):send(receipts.get(key));};
@@ -34,7 +41,7 @@ export async function maintenanceServer(enabled=true,options:Options={}){
    if(options.discoveryError)return fail(options.discoveryError,options.discoveryError==='discovery_unavailable'?503:400);
    return send({server:{id:'test-server',name:'Test Jellyfin server',version:'10.11.0'},profiles:[{id:'profile-one',name:'Library owner',hidden:false},{id:'hidden-profile',name:'Hidden profile',hidden:true}],libraries:[...Array.from({length:options.manyLibraries?33:2},(_,i)=>({id:`library-${i}`,name:`Library ${i+1}`,kind:i===1?'television':'movies',supported:true})),{id:'collection-one',name:'Collections one',kind:'collections',supported:true},{id:'collection-two',name:'Collections two',kind:'collections',supported:true},{id:'music',name:'Music',kind:'unsupported',supported:false}]});
   }
-  if(path==='/api/connections/jellyfin'&&req.method==='POST'){
+  if(path==='/api/connections/jellyfin'&&method==='POST'){
    if(options.delayedSave)await new Promise<void>(resolve=>releaseSave=resolve);
    if(options.saveError)return fail(options.saveError,['server_identity_mismatch','request_conflict','request_expired','server_already_connected'].includes(options.saveError)?409:400);
    return receipt('save',()=>{connected=true;configured=true;hasRuns=input.refresh;return {connection,policy_id:policyId,policy_version:policy.version,run_id:input.refresh?runId:null};},options.ambiguousSave?1:0);
@@ -44,7 +51,7 @@ export async function maintenanceServer(enabled=true,options:Options={}){
   if(path.endsWith('/libraries')){if(options.delayedLibraries&&selected===sourceId)await new Promise<void>(resolve=>releaseLibraries=resolve);return send({items:Array.from({length:options.cyclicLibraries?100:1},(_,i)=>({public_id:i?generatedId(i):libraryId,title:selected===sourceId?'Test library':'Second library'})),next_after:options.cyclicLibraries?(after==='cycle-a'?'cycle-b':'cycle-a'):null});}
   if(!path.startsWith('/api/indexing/'))return fail('not_found',404);
   if(path.endsWith('/policies')){
-   if(req.method==='POST'){if(options.delayedConfigure)await new Promise<void>(resolve=>releaseIndexing=resolve);if(options.indexingConflict)return fail('stale');if(options.indexingUnsupported)return fail('invalid',400);return receipt('configure',()=>{configured=true;policy={...policy,version:policy.version+1n,configuration:input.configuration,enabled:input.configuration.enabled,automatic_runs:input.configuration.automatic_runs};return {...policy,source_id:selected};});}
+   if(method==='POST'){if(options.delayedConfigure)await new Promise<void>(resolve=>releaseIndexing=resolve);if(options.indexingConflict)return fail('stale');if(options.indexingUnsupported)return fail('invalid',400);return receipt('configure',()=>{configured=true;policy={...policy,version:policy.version+1n,configuration:input.configuration,enabled:input.configuration.enabled,automatic_runs:input.configuration.automatic_runs};return {...policy,source_id:selected};});}
    if(options.indexingReadFailure)return fail('unavailable',503);return send({items:configured?[{...policy,source_id:selected}]:[],next_after:null});
   }
   if(path.endsWith('/progress'))return send({policy_version:policy.version,watermark:null,next_reconcile_at:date});
@@ -58,16 +65,16 @@ export async function maintenanceServer(enabled=true,options:Options={}){
   if(path.endsWith('/redrive'))return receipt('redrive',()=>{job={...job,state:'ready',generation:job.generation+1,redrive_allowed:false,redrive_reason:'not_terminal_failed'};return {job_id:jobId,request_id:input.request_id,generation:job.generation};});
   if(path.endsWith('/queue')){const relative=input.capabilities===null?null:0;return send({atomic:false,queue_observation:{started_at:date,finished_at:'2026-11-11T00:00:01Z'},blockers_as_of:'2026-11-11T00:00:02Z',effective_capabilities:input.capabilities,worker_liveness:'unknown',queue:{ready:2,delayed:1,leased:0,failed:1,cancelled:0,complete:0,claimable:relative,reclaimable:relative,blocked:relative,exhausted:1,oldest_ready_seconds:42},blockers:{deadline_expired:0,policy_disabled:0,policy_version:0,source_disabled:0,source_changed:0,source_concurrency:1,run_state:0,cooldown:1,capability:relative,attempt_limit:1,next_eligible_at:null,as_of:date},count_semantics:{blocked:'Capability-relative eligibility; categories overlap.',exhausted:'Attempt limit; not success.'}});}
   const action=path.split('/').at(-1);
-  if(req.method==='POST'&&['pause','resume','cancel'].includes(action!)){if(options.delayedActions)await new Promise<void>(resolve=>releaseAction=resolve);run.state=action==='pause'?'paused':action==='resume'?'running':'cancelled';detail.allowed_actions=action==='pause'?['resume','cancel']:action==='resume'?['pause','cancel']:[];return send(status());}
+  if(method==='POST'&&['pause','resume','cancel'].includes(action!)){if(options.delayedActions)await new Promise<void>(resolve=>releaseAction=resolve);run.state=action==='pause'?'paused':action==='resume'?'running':'cancelled';detail.allowed_actions=action==='pause'?['resume','cancel']:action==='resume'?['pause','cancel']:[];return send(status());}
   if(path.includes('/runs/')){if(options.delayedIndexing&&selected===sourceId)await new Promise<void>(resolve=>releaseIndexing=resolve);return send(status());}
   return fail('not_found',404);
  });
  const target=await listen(upstream),reservation=http.createServer(),origin=await listen(reservation);await new Promise<void>(resolve=>reservation.close(()=>resolve()));
- if(enabled){process.env.SCREENROOM_WEB_OPERATOR_TARGET=target;process.env.SCREENROOM_WEB_OPERATOR_ORIGIN=origin;}else{delete process.env.SCREENROOM_WEB_OPERATOR_TARGET;delete process.env.SCREENROOM_WEB_OPERATOR_ORIGIN;}
  process.env.VITE_SCREENROOM_USER_ID=options.missingUser?'':userId;
+ process.env.VITE_SCREENROOM_API_ENDPOINT=origin;
  const root=fileURLToPath(new URL('..',import.meta.url));
  try{
-  const config={root,configFile:`${root}/vite.config.ts`,clearScreen:false},address={host:'127.0.0.1',port:Number(new URL(origin).port),strictPort:true};let closeWeb:()=>Promise<void>;
+  const config={root,configFile:`${root}/vite.config.ts`,clearScreen:false},address={host:'127.0.0.1',port:Number(new URL(origin).port),strictPort:true,proxy:{'/screenroom.operator.v1.OperatorService/':target}};let closeWeb:()=>Promise<void>;
   if(options.productionPreview){const cli=join(dirname(createRequire(import.meta.url).resolve('vite/package.json')),'bin/vite.js');await new Promise<void>((resolve,reject)=>{const child=spawn(process.execPath,[cli,'build','--logLevel','error'],{cwd:root,env:{...process.env},stdio:['ignore','pipe','pipe'],timeout:60000});let output='';child.stdout.on('data',c=>output+=c);child.stderr.on('data',c=>output+=c);child.on('error',reject);child.on('exit',code=>code===0?resolve():reject(new Error(`Build failed: ${output}`)));});const web=await preview({...config,preview:address});const server=web.httpServer as http.Server;closeWeb=async()=>{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));};}
   else{const web=await createServer({...config,server:address});await web.listen();closeWeb=()=>web.close();}
   return {origin,calls,releaseAction:()=>releaseAction(),releaseLibraries:()=>releaseLibraries(),releaseIndexing:()=>releaseIndexing(),releaseDiscovery:()=>releaseDiscovery(),releaseSave:()=>releaseSave(),close:async()=>{releaseAction();releaseLibraries();releaseIndexing();releaseDiscovery();releaseSave();await closeWeb();upstream.closeAllConnections();await new Promise<void>(resolve=>upstream.close(()=>resolve()));}};

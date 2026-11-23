@@ -324,6 +324,9 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   }
 
   const gateway = { namespaceSelector: nsSelector(gatewayNamespace) };
+  const gatewayPod = { ...gateway, podSelector: { matchLabels: {
+    "gateway.networking.k8s.io/gateway-name": gatewayName,
+  } } };
   const fromGateway = (value: number) => ({ from: [gateway], ports: port(value) });
   const listen = (name: string, value: number) => env(name, `0.0.0.0:${value}`);
   const catalog = backend("catalog", ["screenroom-catalog"], [
@@ -336,16 +339,15 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   ], [{ name: "grpc", containerPort: 50053 }, { name: "internal", containerPort: 50063 }], [jellyfin], [
     fromGateway(50053), { from: [pod("catalog")], ports: port(50063) },
   ], { credentials: "read" });
-  backend("worker", ["screenroom-index-worker", "serve"], s3Env(artworkBucket.metadata.name), [], [s3, jellyfin], [],
-    { credentials: "read" });
   const playback = backend("playback-gateway", ["screenroom-playback-gateway"], [
     listen("SCREENROOM_PLAYBACK_GATEWAY_LISTEN", 50054), env("SCREENROOM_PLAYBACK_API_ORIGIN", origin),
   ], [{ name: "http", containerPort: 50054 }], [jellyfin], [fromGateway(50054)],
   { credentials: "read", playback: true });
-  backend("index-operator", ["screenroom-index-operator"], [
-    env("SCREENROOM_OPERATOR_LISTEN", "127.0.0.1:50072"),
-    env("SCREENROOM_OPERATOR_ORIGIN", "http://127.0.0.1:50072"),
-  ], [], [jellyfin], [], { credentials: "write" });
+  const operator = backend("index-operator", ["screenroom-index-operator"], [
+    listen("SCREENROOM_OPERATOR_LISTEN", 50072),
+    env("SCREENROOM_OPERATOR_CORS_ORIGINS", origin),
+  ], [{ name: "grpc", containerPort: 50072 }], [jellyfin],
+  [{ from: [gatewayPod], ports: port(50072) }], { credentials: "write" });
 
   const webPort = { name: "http", containerPort: 8080 };
   const webConfig = new k8s.core.v1.ConfigMap("screenroom-web-config", {
@@ -353,7 +355,7 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
     data: { "screenroom-config.js": initialUser.apply(id => `window.__SCREENROOM_USER_ID__ = ${JSON.stringify(id)};\n`) },
   });
   const webPolicy = network("web", [{
-    from: [{ ...gateway, podSelector: { matchLabels: { "gateway.networking.k8s.io/gateway-name": gatewayName } } }],
+    from: [gatewayPod],
     ports: port(webPort.containerPort),
   }], []);
   const webLabels = componentLabels("web");
@@ -396,6 +398,11 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
           matches: [match("/screenroom.user.v1.UserService")],
           backendRefs: [{ name: user!.metadata.name, port: 50053 }],
           timeouts: { request: "60s" },
+        },
+        {
+          matches: [match("/screenroom.operator.v1.OperatorService")],
+          backendRefs: [{ name: operator!.metadata.name, port: 50072 }],
+          timeouts: { request: "30s" },
         },
         {
           matches: [match("/screenroom.playback_gateway.v1.PlaybackService")],

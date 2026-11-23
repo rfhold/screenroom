@@ -1,17 +1,15 @@
 # Jellyfin connections
 
 The backend supports managed Jellyfin connections with private API-key files and dynamic database discovery.
-Web Maintenance supports URL and administrator API-key setup through shared operator methods and guarded proxy routes.
+Web Maintenance uses shared client RPCs for URL and administrator API-key setup.
 Native clients use ordinary shared-core reads, not native onboarding or direct Jellyfin HTTP.
 The [backend guide](backend.md) owns runtime lifecycle; the [indexing guide](indexing.md) owns subsequent acquisition and repair.
 
 ## Web setup
 
-First attach the Web operator capability through the [explicit local configuration](index-maintenance.md#explicit-local-attachment).
-Configure the public API origin and actual enabled local user before development startup or production build.
+Pantheon supplies the backend origin and local user at runtime. Local development uses the configured backend origin and enabled local user.
 `VITE_SCREENROOM_API_ENDPOINT` and `VITE_SCREENROOM_USER_ID` select those values; `SCREENROOM_API_ENDPOINT` and `SCREENROOM_USER_ID` supply aliases.
-Explicit `VITE_` values take precedence. Production build and preview require matching operator target/origin settings.
-Preview cannot change compiled public settings; rebuild after a configuration change.
+Explicit `VITE_` values take precedence for local builds.
 An absent or malformed local user UUID disables setup submission; the backend also requires that the user remains enabled.
 The UUID selects the current user; it does not authenticate an administrator.
 
@@ -61,14 +59,14 @@ Runtime acquisition verifies the actual remote ServerId; a locator digest alone 
 
 ## Connection API
 
-All routes require the [trusted-local operator boundary](index-maintenance.md#browser-boundary).
-No route adds administrator authentication or a public catalog RPC.
+These RPCs use the [trusted operator boundary](index-maintenance.md#browser-boundary).
+They add no administrator authentication and remain separate from the catalog service.
 
-| Route | Body or result |
+| RPC | Payload or result |
 | --- | --- |
-| `POST /api/connections/jellyfin/discover` | `{base_url, api_key}`; safe server identity, libraries, and enabled profiles. |
-| `POST /api/connections/jellyfin` | `{request_id, base_url, api_key, server_id, profile_id, library_ids, local_user_id, refresh}`; saved connection/policy/run result. |
-| `GET /api/connections/jellyfin` | Paginated safe connection summaries with UUID cursor; limit 1–200, default 100. |
+| `DiscoverConnection` | `{base_url, api_key}`; safe server identity, libraries, and enabled profiles. |
+| `SaveConnection` | `{request_id, base_url, api_key, server_id, profile_id, library_ids, local_user_id, refresh}`; saved connection/policy/run result. |
+| `ListConnections` | Paginated safe connection summaries with UUID cursor; limit 1–200, default 100. |
 
 `refresh` defaults to false. Save uses a stable request UUID per intended operation.
 An identical in-session request retains that UUID; reuse with different input conflicts.

@@ -4,6 +4,13 @@ modules:
 lint:
   use:
     - STANDARD
+  ignore_only:
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - proto/screenroom/operator/v1/operator.proto
+    RPC_REQUEST_STANDARD_NAME:
+      - proto/screenroom/operator/v1/operator.proto
+    RPC_RESPONSE_STANDARD_NAME:
+      - proto/screenroom/operator/v1/operator.proto
 breaking:
   use:
     - FILE

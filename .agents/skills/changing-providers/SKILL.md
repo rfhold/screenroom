@@ -36,7 +36,7 @@ Do not use this skill for platform-only presentation changes.
 - The inspected Jellyfin 10.10.7 filter defect lacks live reproduction; do not generalize it across all 10.10 versions.
 - Managed backend connections use private key files, private database references, and dynamic user/worker resolution.
 - First-add is the supported API; edit, credential rotation, and connection/server replacement have no supported API or UI workflow.
-- Web setup consumes shared operator discovery/save through guarded proxy routes; native apps supply no onboarding UI.
+- Web setup uses shared operator discovery/save RPCs; native apps supply no onboarding UI.
 - Browser setup retains keys only in memory; completion, cancel, and unmount clear them. Explicit Retry preserves the same in-memory UUID/body.
 - Page entry and reload read server state; no browser journal or automatic mutation replay exists.
 - Private filesystem storage provides no encryption at rest; source guards do not prove live container ownership or mount permissions.
@@ -62,7 +62,7 @@ Paths below start at the repository root.
 | Credential setup or change | `crates/screenroom-backend/src/connections.rs`, `crates/screenroom-backend/src/connections/secrets.rs`, `migrations/`, worker admission, user-service resolution |
 | Profiles and personal state | `crates/screenroom-user/src/{profiles,watched,progress}.rs`, adapter user-state/watched contracts, shared client, all application profile consumers |
 | Incremental traversal | Adapter `catalog_delta.rs` and `jellyfin/delta.rs`, `crates/screenroom-index-worker/src/full.rs`, backend indexing checkpoints |
-| Web-first setup | `apps/web/src/lib/`, `apps/web/server/operator-proxy.mjs`, operator server and shared-client DTOs; inspect actual routes before claims |
+| Web-first setup | `apps/web/src/lib/`, `proto/screenroom/operator/v1/`, operator server and shared-client DTOs; inspect actual routes before claims |
 
 ## Verification Inputs
 

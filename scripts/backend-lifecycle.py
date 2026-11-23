@@ -32,7 +32,6 @@ for key in ('SCREENROOM_API_ENDPOINT', 'SCREENROOM_E2E_API_ENDPOINT'):
 os.environ.update(SCREENROOM_BACKEND_ENV=str(RUNTIME / 'runtime.env'),
                   SCREENROOM_BACKEND_RUNTIME=str(RUNTIME), SCREENROOM_API_ENDPOINT=ORIGIN)
 COMPOSE = ['docker', 'compose', '--env-file', str(RUNTIME / 'runtime.env'), '-p', PROJECT, '-f', str(ROOT / 'compose.yaml')]
-OPERATOR_COMPOSE = COMPOSE + ['--profile', 'index-operator']
 os.environ['SCREENROOM_BACKEND_PORT'] = PORT
 sys.dont_write_bytecode = True
 _spec = importlib.util.spec_from_file_location('backend_process', ROOT / 'scripts/backend-process.py')
@@ -201,7 +200,8 @@ def bootstrap_garage():
 
 def rpc(method, data=None, user=True):
     args = ['grpcurl', '-plaintext', '-max-time', '15', '-import-path', 'proto',
-            '-proto', 'screenroom/catalog/v1/catalog.proto', '-proto', 'screenroom/user/v1/user.proto']
+            '-proto', 'screenroom/catalog/v1/catalog.proto', '-proto', 'screenroom/user/v1/user.proto',
+            '-proto', 'screenroom/operator/v1/operator.proto']
     if user:
         args += ['-H', f'x-screenroom-user-id: {installation_user()}']
     args += ['-d', json.dumps(data or {}), f'127.0.0.1:{PORT}', method]
@@ -231,8 +231,8 @@ if [ "$(stat -c '%u:%g:%a' "$d")" = '0:0:755' ] && [ -z "$(ls -A "$d")" ]; then
 fi
 test "$(stat -c '%u:%g:%a' "$d")" = '10001:10001:700'
 '''
-    operator_compose('run', '--rm', '--no-deps', '--user', '0:0', '--entrypoint', '/bin/sh',
-                     'index-operator', '-ec', script, capture=True)
+    compose('run', '--rm', '--no-deps', '--user', '0:0', '--entrypoint', '/bin/sh',
+            'index-operator', '-ec', script, capture=True)
 
 
 def provision_operator_role():
@@ -295,6 +295,7 @@ def wait():
             if identity != expected or current.get('user', {}).get('id') != installation_user():
                 raise RuntimeError('public identity or RPC mismatch')
             playback_ready()
+            rpc('screenroom.operator.v1.OperatorService/Health', user=False)
             descriptor = dict(expected, userID=installation_user(),
                 clientUpstream='edge:50051', ready=True,
                 checks=dict(native=True, grpcWeb=True, identity=True, playback=True))
@@ -308,125 +309,11 @@ def wait():
     raise RuntimeError('readiness timed out; inspect private service diagnostics')
 
 
-def operator_settings():
-    port = os.environ.get('SCREENROOM_OPERATOR_PORT', '50072')
-    reserved = {4173, 4176, 5173, 50051, 50052, 50073, int(PORT)}
-    if not port.isascii() or not port.isdigit() or str(int(port)) != port or not 1024 <= int(port) <= 65535 or int(port) in reserved:
-        raise RuntimeError('invalid or conflicting operator port')
-    origin = f'http://127.0.0.1:{port}'
-    if os.environ.get('SCREENROOM_OPERATOR_ORIGIN', origin) != origin:
-        raise RuntimeError(f'SCREENROOM_OPERATOR_ORIGIN must equal {origin}')
-    os.environ.update(SCREENROOM_OPERATOR_PORT=port, SCREENROOM_OPERATOR_ORIGIN=origin,
-                      SCREENROOM_OPERATOR_IMAGE='screenroom-backend:local')
-    return origin
-
-
-def operator_instance():
-    if not RUNTIME.is_dir() or RUNTIME.is_symlink() or RUNTIME.stat().st_uid != os.getuid():
-        raise RuntimeError('operator requires an existing owned runtime')
-    for name in ('runtime.env', 'identity.json', 'descriptor.json', 'lifecycle.lock'):
-        path = RUNTIME / name
-        if path.is_symlink() or not path.is_file() or path.stat().st_uid != os.getuid():
-            raise RuntimeError(f'operator requires existing owned {name}')
-    if (RUNTIME / 'runtime.env').stat().st_mode & 0o077:
-        raise RuntimeError('runtime keys must remain owner-private')
-    identity = read_config(RUNTIME / 'identity.json')
-    descriptor = read_config(RUNTIME / 'descriptor.json')
-    expected = dict(project=PROJECT, publicOrigin=ORIGIN, clientNetwork=f'{PROJECT}_client')
-    if not isinstance(identity, dict) or any(identity.get(k) != v for k, v in expected.items()):
-        raise RuntimeError('operator instance ownership mismatch')
-    uuid.UUID(identity['instanceID'])
-    if not isinstance(descriptor, dict) or descriptor.get('ready') is not True or any(descriptor.get(k) != v for k, v in identity.items()):
-        raise RuntimeError('operator requires matching ready instance descriptor')
-    return identity
-
-
-def operator_compose(*args, capture=False):
-    return run(OPERATOR_COMPOSE + list(args), capture=capture)
-
-
-def operator_database():
-    container = operator_compose('ps', '-q', 'postgres', capture=True).stdout.strip()
-    if not container or '\n' in container:
-        raise RuntimeError('operator requires existing healthy postgres')
-    raw = run(['docker', 'inspect', '--format', '{{json .State}}|{{json .Config.Labels}}', container], capture=True).stdout
-    state, labels = (json.loads(part) for part in raw.strip().split('|', 1))
-    if state.get('Health', {}).get('Status') != 'healthy' or not state.get('Running') or labels.get('com.docker.compose.project') != PROJECT or labels.get('com.docker.compose.service') != 'postgres' or labels.get('com.docker.compose.project.working_dir') != str(ROOT):
-        raise RuntimeError('operator postgres health or ownership mismatch')
-    role = operator_compose('exec', '-T', 'postgres', 'psql', '-XAt', '-v', 'ON_ERROR_STOP=1',
-        '-U', 'screenroom', '-d', 'screenroom', '-c',
-        "SELECT count(*) FROM pg_roles WHERE rolname='operator_runtime' AND rolcanlogin AND NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND pg_has_role(oid,'screenroom_operator','member')", capture=True).stdout.strip()
-    if role != '1':
-        raise RuntimeError('operator requires existing restricted operator runtime database role')
-
-
-def operator_container(origin):
-    container = operator_compose('ps', '-q', 'index-operator', capture=True).stdout.strip()
-    if not container or '\n' in container:
-        raise RuntimeError('operator requires one running container owned by this project')
-    raw = run(['docker', 'inspect', '--format',
-               '{{json .State}}|{{json .Config.Labels}}|{{json .NetworkSettings.Ports}}', container], capture=True).stdout
-    state, labels, ports = (json.loads(part) for part in raw.strip().split('|', 2))
-    if not state.get('Running') or labels.get('com.docker.compose.project') != PROJECT or labels.get('com.docker.compose.service') != 'index-operator' or labels.get('com.docker.compose.project.working_dir') != str(ROOT):
-        raise RuntimeError('operator container ownership or running state mismatch')
-    expected = [{'HostIp': '127.0.0.1', 'HostPort': origin.rsplit(':', 1)[1]}]
-    if not isinstance(ports, dict) or ports.get('50072/tcp') != expected:
-        raise RuntimeError('operator container published port does not match requested loopback origin')
-
-
-def operator_health(origin):
-    request = urllib.request.Request(origin + '/api/health', headers={'Host': origin.removeprefix('http://')})
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=3) as response:
-        if response.geturl() != request.full_url or json.load(response).get('ready') is not True:
-            raise RuntimeError('operator is not ready')
-
-
-def operator_public_identity(identity):
-    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(ORIGIN + '/__screenroom_instance', timeout=3) as response:
-        if response.geturl() != ORIGIN + '/__screenroom_instance' or json.load(response) != identity:
-            raise RuntimeError('operator public instance identity mismatch')
-
-
-def operator_command(command, owner_file=None):
-    origin = operator_settings()
-    identity = operator_instance()
-    if owner_file and (not owner_file.is_file() or owner_file.read_text() != PROJECT):
-        raise RuntimeError('operator owner mismatch')
-    with (RUNTIME / 'lifecycle.lock').open('r+') as lock:
-        fcntl.flock(lock, (fcntl.LOCK_SH if command == 'operator-status' else fcntl.LOCK_EX) | fcntl.LOCK_NB)
-        if command == 'operator-down':
-            operator_compose('stop', '--timeout', '15', 'index-operator')
-            return
-        if command == 'operator-up':
-            operator_public_identity(identity)
-            operator_database()
-            operator_compose('up', '-d', '--no-deps', '--no-build', '--pull', 'never', 'index-operator')
-            deadline = time.monotonic() + 60
-            while True:
-                try:
-                    operator_container(origin)
-                    operator_health(origin)
-                    break
-                except (OSError, ValueError, RuntimeError):
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError('operator readiness timed out; inspect private operator logs')
-                    time.sleep(1)
-        else:
-            operator_public_identity(identity)
-            operator_container(origin)
-            operator_health(origin)
-        print(json.dumps(dict(project=PROJECT, instanceID=identity['instanceID'], operatorOrigin=origin, ready=True)))
-
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['initialize', 'up', 'wait', 'status', 'drain', 'activate-model', 'down',
-                                          'operator-up', 'operator-down', 'operator-status'])
+    parser.add_argument('command', choices=['initialize', 'up', 'wait', 'status', 'drain', 'activate-model', 'down'])
     parser.add_argument('--owner-file', type=Path)
     args = parser.parse_args()
-    if args.command.startswith('operator-'):
-        operator_command(args.command, args.owner_file)
-        return
     if args.command in ('initialize', 'up', 'drain', 'activate-model'):
         validate_embeddings()
     if args.command == 'status':
@@ -461,7 +348,7 @@ def main():
             initialize_playback_secrets()
             compose('run', '--rm', '--no-deps', 'user', 'screenroom-user-init', '--create-missing', '/runtime/users.json')
             provision_operator_role()
-            compose('up', '-d', 'user', 'catalog', 'worker', 'playback-gateway', 'edge')
+            compose('up', '-d', 'user', 'catalog', 'worker', 'playback-gateway', 'index-operator', 'edge')
             wait()
         elif args.command == 'initialize':
             initialize_files()

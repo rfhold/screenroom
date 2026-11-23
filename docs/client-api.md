@@ -102,7 +102,7 @@ Create one core `Client` with an explicit `ClientConfig`:
 The core sends a nonempty `user_id` as `x-screenroom-user-id` on RPCs.
 It selects an enabled local user; it is not authentication, a token, or a security boundary.
 Construct another client when endpoint or user changes. Configuration remains immutable.
-The ordinary `Client` exposes public catalog/common/user/playback contracts, not private operator/internal RPC bindings or backend SQLx dependencies.
+The shared `Client` exposes catalog, common, user, and playback operations. It does not expose internal RPC bindings or backend SQLx dependencies.
 The bindings also expose the separate, explicit [operator capability](#operator-capability).
 
 `Item` carries hierarchy, metadata, tags, colors, artwork, ratings, runtime, provider references, rights, and optional personal progress.
@@ -145,7 +145,7 @@ The ordinary `Client` exposes these methods on Rust, native UniFFI, and WASM:
 
 The [playback contract](playback.md) owns states, sequences, revisions, receipts, personal identity, and HTTP media rules.
 These methods require an enabled local-user selector; session operations also require an in-memory control capability.
-They do not use `OperatorClient`, the Maintenance proxy, or direct provider HTTP.
+They do not use `OperatorClient` or direct provider HTTP.
 Preparation uses 30 seconds; other playback calls use 10 seconds, independent of the Web metadata default of three seconds.
 Playback calls serialize through the mutation gate and retain no completed-read cache.
 The core never retries mutations automatically.
@@ -195,27 +195,26 @@ Visited titles do not establish inventory completeness.
 
 ## Operator capability
 
-`OperatorClient` is a separate typed HTTP/JSON capability within the shared Rust core.
-It does not extend `ClientConfig`, change ordinary `Client` methods, or add public RPC routes.
+`Client.operator()` derives a typed `OperatorClient` from the same configured endpoint, selector, and transport.
+The operator process serves its own protobuf service over gRPC and gRPC-Web.
 Rust and native UniFFI expose the same records and operations as WASM.
 The separate operator service is API-only; native clients have no operator onboarding UI.
 This contract does not claim native UI parity for operator controls.
-The [indexing architecture](indexing.md#canonical-operator-api) defines implemented backend policy, queue status, and terminal redrive HTTP contracts.
+The [indexing architecture](indexing.md#canonical-operator-api) defines policy, queue status, and terminal redrive contracts.
 Canonical indexing replaces older poster-maintenance operations.
-Managed-connection methods support native/WASM parity and guarded proxy routes; Web Maintenance consumes them for [Jellyfin setup](jellyfin.md#web-setup).
+Web Maintenance uses the managed-connection RPCs for [Jellyfin setup](jellyfin.md#web-setup).
 Native apps expose no onboarding UI.
 Generic operator records remain provider-neutral; browsers do not implement provider traversal, retry classification, or checkpoint rules.
-Generic support preserves explicit opt-in, loopback guards, and the absence of administrator authentication.
+The API supplies no administrator authentication.
 
 | Configuration | Contract |
 | --- | --- |
-| `OperatorClientConfig.endpoint`, native | Exact HTTP loopback origin plus `/api`; no credentials, query, fragment, or trailing slash. |
-| `OperatorClientConfig.endpoint`, WASM | Exact current HTTP(S) browser origin plus `/__operator/api`; no cross-origin or direct loopback API bypass. |
+| `OperatorClientConfig.endpoint` | HTTP(S) origin, with no credentials, path, query, fragment, or trailing slash. Use the same origin as `ClientConfig`. |
 | `OperatorClientConfig.timeout_ms` | Required operation deadline from 1 through 120000 milliseconds. |
 
-Construct the capability explicitly; ordinary catalog configuration does not enable it.
+Use the shared client capability to reuse its configured endpoint and user selector.
 `configuration()` returns immutable configuration; `configuration_namespace()` returns the endpoint namespace, not backend identity or authorization proof.
-The [maintenance guide](index-maintenance.md#explicit-local-attachment) owns Web opt-in, proxy security, and origin authority.
+The [maintenance guide](index-maintenance.md#browser-boundary) owns the trusted-network boundary.
 
 | Methods | Typed contract |
 | --- | --- |
@@ -260,18 +259,17 @@ Attempt fences and all `i64` budgets, versions, and counts use `bigint` in WASM;
 `indexing_queue` preserves null capability context separately from an explicit empty list.
 Its result preserves `atomic: false`, `queue_observation`, `blockers_as_of`, nullable eligibility counts, overlapping count semantics, and unknown worker liveness.
 
-The proxy guards exact allowlisted routes and cursor bounds under `/__operator/api`.
-It forwards successful JSON bytes unchanged after validation, so wide integer tokens never pass through JavaScript number serialization.
-Its response limit is 2 MiB; request bodies retain the 65,536-byte limit.
-Canonical source history uses `/api/indexing/sources/{source_id}/runs` and per-run `/candidates`.
+The protobuf service defines named methods, selectors, and pagination. Operation payloads preserve exact UTF-8 domain JSON inside the protobuf messages.
+Wide integers never pass through JavaScript number serialization.
+The response limit is 2 MiB; request payloads retain the 65,536-byte limit.
 Backend and Rust method support do not establish complete generated-binding or Web UI parity for managed setup.
 Neither surface authenticates an administrator.
 
 ### Transport and exact values
 
 Every read requests fresh server state; the capability has no completed-read cache, public-client cache sharing, or automatic retries.
-Native transport bypasses system proxies and rejects redirects.
-WASM uses same-origin fetch, omits credentials, rejects redirects, and aborts fetch on cancellation or deadline.
+Native requests use the shared Tonic channel. WASM uses gRPC-Web with the same configured backend, omits credentials, and rejects redirects.
+WASM aborts fetch on cancellation or deadline.
 Requests allow at most 65,536 body bytes; core responses allow at most 2 MiB.
 The core permits at most 64 active operations per operator client.
 `OperatorPage` supplies `after` and `limit` from 1 through 1000; page records return `items` and `next_after`.

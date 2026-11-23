@@ -6,7 +6,7 @@
 | [src/models.rs](src/models.rs) | Generated ordinary domain records. |
 | [src/wasm.rs](src/wasm.rs) | WASM ordinary client exports. |
 | [src/wasm-models.ts](src/wasm-models.ts) | Generated ordinary TypeScript models. |
-| [src/operator.rs](src/operator.rs) | Separate HTTP `OperatorClient`. |
+| [src/operator.rs](src/operator.rs) | Operator RPC capability. |
 | [src/operator_models.rs](src/operator_models.rs) | Operator domain records. |
 | [src/operator_wasm.rs](src/operator_wasm.rs) | WASM operator exports. |
 | [src/operator-models.ts](src/operator-models.ts) | Operator TypeScript model contract. |
@@ -14,7 +14,7 @@
 
 # Dependencies
 
-Ordinary clients use public protobuf services. `OperatorClient` uses a separate explicit HTTP capability, not ordinary RPC configuration.
+`OperatorClient` uses the shared RPC endpoint and transport with distinct operator methods.
 
 # Dependents
 
@@ -24,8 +24,8 @@ Ordinary clients use public protobuf services. `OperatorClient` uses a separate 
 
 - Preserve native/WASM parity, explicit scope, immutable client configuration, bounded caches, and cancellation ownership.
 - Keep prost, SQLx, provider credentials, and private backend records outside public domain models.
-- Keep ordinary `Client` authority separate from `OperatorClient` authority.
-- Preserve wide integer precision across Rust, UniFFI, WASM, TypeScript, JSON, and proxy transport.
+- Keep operator methods and records distinct from ordinary catalog and playback operations.
+- Preserve wide integer precision across Rust, UniFFI, WASM, TypeScript, and RPC transport.
 - On profile changes, reject stale requests and invalidate profile-bound caches.
 - Browser operation-journal replay and older maintenance APIs are not supported; do not add compatibility aliases.
 - Regenerate ordinary models through [the model generator](../../scripts/generate-client-models.py), not isolated output edits.

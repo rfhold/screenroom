@@ -128,7 +128,7 @@ test('retired remote preferences, mock profiles and private APIs fail public cli
 test('separate operator capability has typed native/WASM parity without private RPC or backend imports', async () => {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const [native, wasm, models, ts, publicModels] = await Promise.all(['operator.rs', 'operator_wasm.rs', 'operator_models.rs', 'operator-models.ts', 'models.rs'].map(name => readFile(path.join(root, 'crates/screenroom-client-core/src', name), 'utf8')));
-  for (const source of [native, wasm, models, ts]) assert.doesNotMatch(source, /screenroom_backend|sqlx|screenroom_proto|ingestion_service_client|playback_state_service_client/);
+  for (const source of [native, wasm, models, ts]) assert.doesNotMatch(source, /screenroom_backend|sqlx|ingestion_service_client|playback_state_service_client/);
   for (const source of [native, wasm]) {
     for (const method of ['health', 'sources', 'libraries', 'discover_connection', 'save_connection', 'connections', 'indexing_runs', 'indexing_candidates', 'indexing_policies', 'indexing_configure', 'indexing_progress', 'indexing_start', 'indexing_run_status', 'indexing_execution', 'indexing_pause', 'indexing_resume', 'indexing_cancel', 'indexing_jobs', 'indexing_attempts', 'indexing_redrives', 'indexing_redrive', 'indexing_queue']) assert.match(source, new RegExp(`pub async fn ${method}\\b`));
     assert.doesNotMatch(source, /pub async fn (policies|runs|run_status|candidates|status|configure|preview|start|pause|resume|cancel)\b/);
@@ -140,8 +140,9 @@ test('separate operator capability has typed native/WASM parity without private 
   }
   assert.match(ts, /policy_version: bigint/);
   assert.match(wasm, /serialize_large_number_types_as_bigints\(true\)/);
-  assert.match(native, /retry\(reqwest::retry::never\(\)\)/);
-  assert.match(wasm, /\("redirect", "error"\.into\(\)\)/);
+  assert.match(native, /OperatorServiceClient::new\(transport\)/);
+  assert.match(native, /\.redirect\(Redirect::Error\)/);
+  assert.doesNotMatch(wasm, /\bfetch\b/);
   for (const source of [models, ts]) assert.doesNotMatch(source, /\bOperator(?:Selection|WorkBudget|Configuration|ConfigureRequest|PreviewRequest|Preview|Status|Policy|PolicyPage)\b|\btrigger\s*:/);
   for (const name of ['OperatorDiscoverConnectionRequest', 'OperatorSaveConnectionRequest']) {
     const prefix = models.slice(0, models.indexOf(`pub struct ${name} `));

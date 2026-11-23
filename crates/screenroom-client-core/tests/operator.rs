@@ -1,19 +1,20 @@
 #![cfg(not(target_arch = "wasm32"))]
 use screenroom_client_core::*;
+use screenroom_proto::operator::v1::{
+    OperatorRequest, OperatorResponse,
+    operator_service_server::{OperatorService, OperatorServiceServer},
+};
 use std::{
-    io::{Read, Write},
     net::TcpListener,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
+use tonic::{Request, Response, Status};
 
 const ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
 #[test]
-#[ignore = "requires scripts/build-client-core.sh wasm and Node; uses only disposable localhost HTTP"]
+#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright Maintenance suite"]
 fn wasm_transport() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -83,75 +84,138 @@ try{
 struct Server {
     endpoint: String,
     requests: Arc<Mutex<Vec<String>>>,
-    stop: Arc<AtomicBool>,
+    _stop: tokio::sync::oneshot::Sender<()>,
 }
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+
+struct Fixture {
+    requests: Arc<Mutex<Vec<String>>>,
+    status: u16,
+    body: String,
+    delay: u64,
+    disconnect: bool,
+}
+impl Fixture {
+    async fn respond(
+        &self,
+        method: &str,
+        mut path: String,
+        request: OperatorRequest,
+    ) -> Result<Response<OperatorResponse>, Status> {
+        if let Some(page) = request.page {
+            let mut query = url::form_urlencoded::Serializer::new(String::new());
+            query.append_pair("limit", &page.limit.to_string());
+            if let Some(after) = page.after {
+                query.append_pair("after", &after);
+            }
+            if let Some(pending) = page.pending_only {
+                query.append_pair("pending_only", &pending.to_string());
+            }
+            path.push('?');
+            path.push_str(&query.finish());
+        }
+        let body = String::from_utf8(request.payload_json).unwrap();
+        // Render the captured fields in the original fixture notation.
+        self.requests.lock().unwrap().push(format!(
+            "{method} {path} HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{body}"
+        ));
+        tokio::time::sleep(Duration::from_millis(self.delay)).await;
+        if self.disconnect {
+            return Err(Status::unavailable("unavailable"));
+        }
+        if self.status == 200 {
+            return Ok(Response::new(OperatorResponse {
+                payload_json: self.body.as_bytes().to_vec(),
+            }));
+        }
+        let value: serde_json::Value = serde_json::from_str(&self.body).unwrap_or_default();
+        let message = value["error"]["code"].as_str().unwrap_or("fixture_invalid");
+        let code = match (self.status, message) {
+            (403, _) => tonic::Code::PermissionDenied,
+            (400, _) => tonic::Code::InvalidArgument,
+            (404, _) => tonic::Code::NotFound,
+            (409, "source_busy") => tonic::Code::Aborted,
+            (409, "stale") => tonic::Code::FailedPrecondition,
+            (409, _) => tonic::Code::AlreadyExists,
+            (503, _) => tonic::Code::Unavailable,
+            _ => tonic::Code::Internal,
+        };
+        let mut status = Status::new(code, message);
+        if let Some(id) = value["error"]["run_id"].as_str() {
+            status
+                .metadata_mut()
+                .insert("x-screenroom-run-id", id.parse().unwrap());
+        }
+        Err(status)
     }
 }
+
+macro_rules! fixture_methods {
+    ($($name:ident($($field:ident),*) => ($method:literal, $path:literal);)+) => {
+        #[tonic::async_trait]
+        impl OperatorService for Fixture {
+            $(async fn $name(&self, request: Request<OperatorRequest>) -> Result<Response<OperatorResponse>, Status> {
+                let input = request.into_inner();
+                self.respond($method, format!($path $(, input.$field)*), input).await
+            })+
+        }
+    };
+}
+fixture_methods! {
+    health() => ("GET", "/api/health");
+    discover_connection() => ("POST", "/api/connections/jellyfin/discover");
+    save_connection() => ("POST", "/api/connections/jellyfin");
+    list_connections() => ("GET", "/api/connections/jellyfin");
+    list_sources() => ("GET", "/api/sources");
+    list_libraries(source_id) => ("GET", "/api/sources/{}/libraries");
+    list_runs(source_id) => ("GET", "/api/indexing/sources/{}/runs");
+    list_candidates(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/candidates");
+    list_policies(source_id) => ("GET", "/api/indexing/sources/{}/policies");
+    configure_policy(source_id) => ("POST", "/api/indexing/sources/{}/policies");
+    get_progress(source_id, policy_id) => ("GET", "/api/indexing/sources/{}/policies/{}/progress");
+    start_run(source_id) => ("POST", "/api/indexing/sources/{}/start");
+    get_run_status(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}");
+    get_execution(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/execution");
+    pause_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/pause");
+    resume_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/resume");
+    cancel_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/cancel");
+    list_jobs(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs");
+    list_attempts(source_id, run_id, job_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs/{}/attempts");
+    list_redrives(source_id, run_id, job_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs/{}/redrives");
+    redrive_job(source_id, run_id, job_id) => ("POST", "/api/indexing/sources/{}/runs/{}/jobs/{}/redrive");
+    observe_queue() => ("POST", "/api/indexing/queue");
+}
+
 impl Server {
     fn new(status: u16, body: String, delay: u64, disconnect: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/api", listener.local_addr().unwrap());
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
         listener.set_nonblocking(true).unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (seen, done) = (requests.clone(), stop.clone());
-        std::thread::spawn(move || {
-            while !done.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(2));
-                    continue;
-                };
-                stream.set_nonblocking(false).unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut bytes = Vec::new();
-                loop {
-                    let mut chunk = [0; 4096];
-                    let Ok(n) = stream.read(&mut chunk) else {
-                        break;
-                    };
-                    if n == 0 {
-                        break;
-                    }
-                    bytes.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = bytes.windows(4).position(|s| s == b"\r\n\r\n") {
-                        let headers = String::from_utf8_lossy(&bytes[..end]);
-                        let len = headers
-                            .lines()
-                            .find_map(|s| {
-                                s.to_lowercase()
-                                    .strip_prefix("content-length: ")
-                                    .and_then(|s| s.parse::<usize>().ok())
-                            })
-                            .unwrap_or(0);
-                        if bytes.len() >= end + 4 + len {
-                            break;
-                        }
-                    }
-                }
-                if bytes.is_empty() {
-                    continue;
-                }
-                seen.lock().unwrap().push(String::from_utf8(bytes).unwrap());
-                std::thread::sleep(Duration::from_millis(delay));
-                if disconnect {
-                    continue;
-                }
-                let response = format!(
-                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
+        let (stop, done) = tokio::sync::oneshot::channel();
+        let fixture = Fixture {
+            requests: requests.clone(),
+            status,
+            body,
+            delay,
+            disconnect,
+        };
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        tokio::spawn(async move {
+            let incoming = futures::stream::unfold(listener, |listener| async {
+                Some((listener.accept().await.map(|(stream, _)| stream), listener))
+            });
+            tonic::transport::Server::builder()
+                .add_service(OperatorServiceServer::new(fixture))
+                .serve_with_incoming_shutdown(incoming, async {
+                    let _ = done.await;
+                })
+                .await
+                .unwrap();
         });
         Self {
             endpoint,
             requests,
-            stop,
+            _stop: stop,
         }
     }
     fn client(&self, timeout_ms: u32) -> Arc<OperatorClient> {
@@ -201,7 +265,7 @@ fn save_request(refresh: bool) -> OperatorSaveConnectionRequest {
 }
 
 #[test]
-#[ignore = "requires isolated WASM via SCREENROOM_OPERATOR_WASM_DIR; disposable localhost only"]
+#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright connections suite"]
 fn connections_wasm_transport() {
     let fixtures = serde_json::json!({"id":ID,"discovery":discovery_fixture().to_string(),"saved":saved_fixture(false).to_string(),"refreshed":saved_fixture(true).to_string(),"connection":saved_fixture(false)["connection"].to_string()});
     let script = r#"
@@ -571,7 +635,7 @@ fn indexing_configuration_fixture() -> serde_json::Value {
 }
 
 #[test]
-#[ignore = "requires separately built WASM via SCREENROOM_OPERATOR_WASM_DIR; disposable localhost only"]
+#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright indexing suite"]
 fn indexing_wasm_transport() {
     let mut status: serde_json::Value = serde_json::from_str(&run_status_body()).unwrap();
     status["run"]["policy_version"] = serde_json::json!(9007199254740993_i64);
@@ -1272,10 +1336,6 @@ async fn fresh_gets_pagination_and_encoded_library_cursor() {
     assert_eq!(requests.len(), 3);
     assert!(requests[0].starts_with("GET /api/sources?limit=2 HTTP/1.1"));
     assert!(requests[2].contains("after=a%26limit%3D999%2Fx%3F%23"));
-    assert!(requests[0].contains(&format!(
-        "origin: {}",
-        server.endpoint.trim_end_matches("/api")
-    )));
 }
 
 #[tokio::test]

@@ -17,7 +17,7 @@ The [backend guide](backend.md#playback-gateway-runtime) owns configuration, pri
 The ordinary Rust/WASM `Client` controls playback through `screenroom.playback_gateway.v1.PlaybackService`.
 Video, HLS, and subtitle requests use gateway HTTP media routes.
 Media bytes never pass through the shared client core.
-`OperatorClient` and the Maintenance proxy have no playback role.
+`OperatorClient` has no playback role.
 Clients never contact Jellyfin directly.
 Native players use the same gateway contract; platform engines and lifecycle differences appear [below](#native-players).
 

@@ -71,84 +71,29 @@ The queue preserves attempts, request receipts, candidate progress, and publicat
 
 ## Local operator API
 
-The [operator implementation](../crates/screenroom-index-operator/src/lib.rs) owns the HTTP routes and sanitized JSON envelopes.
-`GET /api/health` checks the database; it does not verify provider reachability or worker activity.
-`GET /api/sources` and `GET /api/sources/{source_id}/libraries` provide safe source/library discovery.
-The [canonical route table](indexing.md#canonical-operator-api) owns policies, history, candidates, controls, jobs, attempts, redrive, and diagnostics.
+The [operator protobuf](../proto/screenroom/operator/v1/operator.proto) defines the RPC surface.
+`Health` checks the database; it does not verify provider reachability or worker activity.
+`ListSources` and `ListLibraries` provide safe source and library discovery.
+The [canonical RPC table](indexing.md#canonical-operator-api) covers policies, history, candidates, controls, jobs, attempts, redrive, and diagnostics.
 The [connection API](jellyfin.md#connection-api) adds authenticated provider discovery and managed save.
 Those connection operations contact Jellyfin; the operator is not a database-only service.
 
-POST requests reject query parameters; GET requests reject bodies.
-Typed bodies reject unknown fields. Errors contain safe codes, not raw upstream, SQL, or credential details.
-The API returns HTTP 400 for invalid requests, 404 for unknown records, 409 for stale/source-busy conflicts, and 503 for unavailable dependencies.
+RPCs validate selectors, page bounds, and operation payloads. Errors contain safe codes, not raw upstream, SQL, or credential details.
 Connection-specific safe codes appear in the [Jellyfin guide](jellyfin.md#errors-and-unsupported-actions).
 
-### Explicit local attachment
+### Web configuration
 
-Both server-only variables opt into the Web operator proxy:
-
-| Variable | Example |
-| --- | --- |
-| `SCREENROOM_WEB_OPERATOR_TARGET` | `http://127.0.0.1:50073` |
-| `SCREENROOM_WEB_OPERATOR_ORIGIN` | `http://127.0.0.1:5173` |
-
-Neither has a default. Partial or invalid configuration fails Vite configuration.
-Values require exact HTTP origins with numeric loopback hosts and no credentials, path, query, fragment, or trailing slash.
-The target selects one fixed upstream; browser requests cannot supply another target.
-Do not put the target in `VITE_` variables, URL parameters, or browser settings.
-
-After separate approval for the Web restart, the development command is:
-
-```sh
-SCREENROOM_WEB_OPERATOR_TARGET=http://127.0.0.1:50073 \
-  SCREENROOM_WEB_OPERATOR_ORIGIN=http://127.0.0.1:5173 \
-  VITE_SCREENROOM_API_ENDPOINT=http://127.0.0.1:50052 \
-  pnpm --filter @screenroom/web dev --host 127.0.0.1 --port 5173 --strictPort
-```
-
-The same pair must configure the production build and Vite preview.
-These example ports attach the main development Web server to the local Jellyfin installation; confirm them against its descriptor.
-Catalog and `/maintenance` share this origin and navigation. A second Web server is unnecessary.
-Maintenance remains visible when the attachment is disabled and explains that it is unavailable.
+Catalog and `/maintenance` use the same configured backend. Maintenance needs no separate enable flag, listener, or proxy.
+Pantheon serves the Web app and RPCs on one HTTPS origin.
+For local development use the [Web configuration](../apps/web/README.md) and the intended instance descriptor.
 Leaving the route unmounts setup and index controls, clearing keys, retry bodies, and polling.
-Preview configuration cannot enable a build that lacks the capability; rebuild after attachment changes.
-Public endpoint and local-user settings must also match the intended installation at development startup or production build.
-Use `VITE_SCREENROOM_API_ENDPOINT` and the actual enabled user's `VITE_SCREENROOM_USER_ID`; Vite also accepts their `SCREENROOM_` aliases.
-Explicit `VITE_` values take precedence over aliases. A missing or invalid user selector disables Add server submission.
-Preview environment changes do not rewrite compiled public settings; rebuild when those settings change.
-Static deployment alone supplies no proxy. The Web process starts no backend or worker.
-These procedures do not start the operator or authorize provider acquisition, credential operations, or worker activation.
 
 ### Browser boundary
 
-The opt-in origin grants trusted-local operator capability to every script on that origin, not just one screen.
-The ordinary public `Client` and public RPC edge grant no operator authority.
-The separate `OperatorClient` uses typed HTTP/JSON, not private RPC bindings.
-Local user UUIDs, source selectors, and attachment configuration do not authenticate an administrator.
-
-The [proxy](../apps/web/server/operator-proxy.mjs) serves development and preview through an exact `/__operator/api` allowlist and fixed `/api` upstream.
-It checks loopback peers, exact single Host, Origin, Fetch Metadata, methods, query fields, content type, and body bounds.
-POST requires the configured Origin and `application/json`.
-The proxy creates upstream Host/Origin headers; it forwards no browser credentials or arbitrary headers.
-It rejects redirects, bounds duration/responses, cancels upstream work on disconnect, and sanitizes errors.
-Successful JSON bytes remain unchanged, so wide `i64` values avoid JavaScript number conversion.
-The response limit is 2 MiB; request bodies allow 65,536 bytes.
-Responses use `no-store` and `nosniff`.
-These guards do not protect against another script on the trusted origin or authenticate native callers.
-
-The direct operator listener requires exactly one Host header that matches its configured authority.
-Any Origin header must match its configured origin; non-GET requests require Origin.
-If present, `Sec-Fetch-Site` must equal `same-origin` or `none`.
-POST requires exactly `Content-Type: application/json`, without a charset suffix.
-The listener rejects encoded paths, backslashes, and dot segments.
-Non-API paths, including `/`, `/index.html`, and `/assets/`, return 404.
-Normal responses include `no-store`, `nosniff`, and this Content Security Policy:
-
-```text
-default-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'
-```
-
-Native callers can supply matching headers. Do not expose the service to an untrusted network.
+Any caller that can reach the trusted private API can administer the instance. CORS and local user UUIDs do not authenticate callers.
+Do not expose the API to an untrusted network.
+WASM uses gRPC-Web, rejects redirects, and omits browser credentials. Domain payloads stay in Rust so wide integers retain precision.
+Request payloads allow 65,536 bytes and response payloads allow 2 MiB.
 
 ## Source contracts
 
@@ -157,4 +102,4 @@ Native callers can supply matching headers. Do not expose the service to an untr
 - [Ingest repository](../crates/screenroom-backend/src/ingest.rs): durable progress, receipts, and fenced controls.
 - [Queue administration](../crates/screenroom-backend/src/queue_admin.rs): attempts, diagnostics, and redrive eligibility.
 - [Operator startup](../crates/screenroom-index-operator/src/main.rs): managed connections and listener construction.
-- [Vite configuration](../apps/web/vite.config.ts): explicit local attachment.
+- [Operator RPC adapter](../crates/screenroom-index-operator/src/rpc.rs): transport and sanitized errors.

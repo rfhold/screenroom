@@ -19,8 +19,6 @@
 !apps/web/static/**
 !apps/web/scripts/
 !apps/web/scripts/prepare-core.mjs
-!apps/web/server/
-!apps/web/server/**
 !apps/web/nginx.conf
 !website/
 !website/package.json

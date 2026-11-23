@@ -1,7 +1,8 @@
 use crate::operator_models::*;
-#[cfg(not(target_arch = "wasm32"))]
-use futures::StreamExt;
 use futures::future::{AbortHandle, Abortable, Either, select};
+use screenroom_proto::operator::v1::{
+    OperatorPage as WirePage, OperatorRequest, operator_service_client::OperatorServiceClient,
+};
 use serde::{Serialize, de::DeserializeOwned};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
@@ -60,10 +61,7 @@ impl Drop for RequestGuard<'_> {
 #[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Object))]
 pub struct OperatorClient {
     config: OperatorClientConfig,
-    #[cfg(not(target_arch = "wasm32"))]
-    origin: String,
-    #[cfg(not(target_arch = "wasm32"))]
-    http: reqwest::Client,
+    client: Arc<crate::Client>,
     requests: Mutex<Requests>,
 }
 
@@ -141,60 +139,13 @@ fn checked_status(
 impl OperatorClient {
     #[cfg_attr(not(target_arch = "wasm32"), uniffi::constructor)]
     pub fn new(config: OperatorClientConfig) -> Result<Arc<Self>, OperatorError> {
-        let url = url::Url::parse(&config.endpoint).map_err(|_| OperatorError::Invalid)?;
-        let origin = url.origin().ascii_serialization();
-        if !(1..=120_000).contains(&config.timeout_ms)
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.port() == Some(0)
-        {
-            return Err(OperatorError::Invalid);
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let loopback = url.host_str().is_some_and(|host| {
-                host == "localhost"
-                    || host
-                        .trim_matches(['[', ']'])
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())
-            });
-            if url.scheme() != "http" || !loopback || config.endpoint != format!("{origin}/api") {
-                return Err(OperatorError::Invalid);
-            }
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let location = js_sys::Reflect::get(&js_sys::global(), &"location".into())
-                .map_err(|_| OperatorError::Invalid)?;
-            let current = js_sys::Reflect::get(&location, &"origin".into())
-                .ok()
-                .and_then(|v| v.as_string())
-                .ok_or(OperatorError::Invalid)?;
-            if !["http", "https"].contains(&url.scheme())
-                || origin != current
-                || config.endpoint != format!("{origin}/__operator/api")
-            {
-                return Err(OperatorError::Invalid);
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        let http = reqwest::Client::builder()
-            .no_proxy()
-            .retry(reqwest::retry::never())
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| OperatorError::Invalid)?;
-        Ok(Arc::new(Self {
-            config,
-            #[cfg(not(target_arch = "wasm32"))]
-            origin,
-            #[cfg(not(target_arch = "wasm32"))]
-            http,
-            requests: Mutex::new(Requests::default()),
-        }))
+        let client = crate::Client::new(crate::ClientConfig {
+            endpoint: config.endpoint,
+            timeout_ms: config.timeout_ms,
+            user_id: String::new(),
+        })
+        .map_err(|_| OperatorError::Invalid)?;
+        Ok(Self::from_client(client))
     }
     pub fn configuration(&self) -> OperatorClientConfig {
         self.config.clone()
@@ -917,6 +868,16 @@ fn body(input: &impl Serialize) -> Result<Vec<u8>, OperatorError> {
 }
 
 impl OperatorClient {
+    pub(crate) fn from_client(client: Arc<crate::Client>) -> Arc<Self> {
+        Arc::new(Self {
+            config: OperatorClientConfig {
+                endpoint: client.config.endpoint.clone(),
+                timeout_ms: client.config.timeout_ms,
+            },
+            client,
+            requests: Mutex::new(Requests::default()),
+        })
+    }
     async fn indexing_control(
         &self,
         source: String,
@@ -964,8 +925,7 @@ impl OperatorClient {
         body: Option<Vec<u8>>,
         ambiguous: bool,
     ) -> Result<T, OperatorError> {
-        let mut url = url::Url::parse(&format!("{}/{path}", self.config.endpoint))
-            .map_err(|_| OperatorError::Invalid)?;
+        let mut input = OperatorRequest::default();
         if let Some((page, uuid_cursor, pending)) = page {
             if !(1..=1000).contains(&page.limit)
                 || page.after.as_ref().is_some_and(|a| {
@@ -974,15 +934,15 @@ impl OperatorClient {
             {
                 return Err(OperatorError::Invalid);
             }
-            let mut query = url.query_pairs_mut();
-            query.append_pair("limit", &page.limit.to_string());
-            if let Some(after) = &page.after {
-                query.append_pair("after", after);
-            }
-            if let Some(pending) = pending {
-                query.append_pair("pending_only", if pending { "true" } else { "false" });
-            }
+            input.page = Some(WirePage {
+                limit: page.limit,
+                after: page.after.clone(),
+                pending_only: pending,
+            });
         }
+        let parts: Vec<_> = path.split('/').collect();
+        let write = body.is_some();
+        input.payload_json = body.unwrap_or_default();
         let (abort, registration) = AbortHandle::new_pair();
         let (id, generation) = {
             let mut state = self.requests.lock().unwrap();
@@ -999,53 +959,145 @@ impl OperatorClient {
             id,
         };
         let operation = async {
-            #[cfg(not(target_arch = "wasm32"))]
-            let (status, bytes) = {
-                let mut request = if let Some(body) = body {
-                    self.http
-                        .post(url)
-                        .header("content-type", "application/json")
-                        .body(body)
-                } else {
-                    self.http.get(url)
-                };
-                request = request
-                    .header("cache-control", "no-store")
-                    .header("accept", "application/json");
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    request = request.header("origin", &self.origin);
-                }
-                let response = request
-                    .send()
-                    .await
-                    .map_err(|_| OperatorError::Unavailable { ambiguous })?;
-                let status = response.status();
-                let invalid = || OperatorError::InvalidResponse { ambiguous };
-                if response
-                    .content_length()
-                    .is_some_and(|n| n > RESPONSE_LIMIT as u64)
-                {
-                    return Err(invalid());
-                }
-                let mut stream = response.bytes_stream();
-                let mut bytes = Vec::new();
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.map_err(|_| OperatorError::Unavailable { ambiguous })?;
-                    if chunk.len() > RESPONSE_LIMIT - bytes.len() {
-                        return Err(invalid());
-                    }
-                    bytes.extend_from_slice(&chunk);
-                }
-                (status.as_u16(), bytes)
-            };
+            let transport = self
+                .client
+                .transport()
+                .await
+                .map_err(|_| OperatorError::Unavailable { ambiguous: false })?;
             #[cfg(target_arch = "wasm32")]
-            let (status, bytes) =
-                crate::operator_wasm::fetch(url.as_str(), body, ambiguous).await?;
-            if !(200..300).contains(&status) {
-                return Err(response_error(status, &bytes, ambiguous));
+            let transport = {
+                use tonic_web_wasm_client::options::{Cache, Credentials, FetchOptions, Redirect};
+                let mut transport = transport;
+                transport.with_options(
+                    FetchOptions::new()
+                        .redirect(Redirect::Error)
+                        .credentials(Credentials::Omit)
+                        .cache(Cache::NoStore),
+                );
+                transport
+            };
+            let mut rpc = OperatorServiceClient::new(transport)
+                .max_decoding_message_size(RESPONSE_LIMIT + 4096)
+                .max_encoding_message_size(BODY_LIMIT + 4096);
+            macro_rules! send {
+                ($method:ident $(, $field:ident = $value:expr)*) => {{
+                    $(input.$field = (*$value).to_owned();)*
+                    let request = self.client.request(input).map_err(|_| OperatorError::Invalid)?;
+                    rpc.$method(request).await
+                }};
             }
-            serde_json::from_slice(&bytes).map_err(|_| OperatorError::InvalidResponse { ambiguous })
+            let response = match (parts.as_slice(), write) {
+                (["health"], false) => send!(health),
+                (["connections", "jellyfin", "discover"], true) => send!(discover_connection),
+                (["connections", "jellyfin"], true) => send!(save_connection),
+                (["connections", "jellyfin"], false) => send!(list_connections),
+                (["sources"], false) => send!(list_sources),
+                (["sources", source, "libraries"], false) => {
+                    send!(list_libraries, source_id = source)
+                }
+                (["indexing", "sources", source, "runs"], false) => {
+                    send!(list_runs, source_id = source)
+                }
+                (["indexing", "sources", source, "runs", run, "candidates"], false) => {
+                    send!(list_candidates, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "policies"], false) => {
+                    send!(list_policies, source_id = source)
+                }
+                (["indexing", "sources", source, "policies"], true) => {
+                    send!(configure_policy, source_id = source)
+                }
+                (
+                    [
+                        "indexing",
+                        "sources",
+                        source,
+                        "policies",
+                        policy,
+                        "progress",
+                    ],
+                    false,
+                ) => send!(get_progress, source_id = source, policy_id = policy),
+                (["indexing", "sources", source, "start"], true) => {
+                    send!(start_run, source_id = source)
+                }
+                (["indexing", "sources", source, "runs", run], false) => {
+                    send!(get_run_status, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "runs", run, "execution"], false) => {
+                    send!(get_execution, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "runs", run, "pause"], true) => {
+                    send!(pause_run, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "runs", run, "resume"], true) => {
+                    send!(resume_run, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "runs", run, "cancel"], true) => {
+                    send!(cancel_run, source_id = source, run_id = run)
+                }
+                (["indexing", "sources", source, "runs", run, "jobs"], false) => {
+                    send!(list_jobs, source_id = source, run_id = run)
+                }
+                (
+                    [
+                        "indexing",
+                        "sources",
+                        source,
+                        "runs",
+                        run,
+                        "jobs",
+                        job,
+                        "attempts",
+                    ],
+                    false,
+                ) => send!(
+                    list_attempts,
+                    source_id = source,
+                    run_id = run,
+                    job_id = job
+                ),
+                (
+                    [
+                        "indexing",
+                        "sources",
+                        source,
+                        "runs",
+                        run,
+                        "jobs",
+                        job,
+                        "redrives",
+                    ],
+                    false,
+                ) => send!(
+                    list_redrives,
+                    source_id = source,
+                    run_id = run,
+                    job_id = job
+                ),
+                (
+                    [
+                        "indexing",
+                        "sources",
+                        source,
+                        "runs",
+                        run,
+                        "jobs",
+                        job,
+                        "redrive",
+                    ],
+                    true,
+                ) => send!(redrive_job, source_id = source, run_id = run, job_id = job),
+                (["indexing", "queue"], true) => send!(observe_queue),
+                _ => return Err(OperatorError::Invalid),
+            }
+            .map_err(|status| response_error(status, ambiguous))?
+            .into_inner();
+            if response.payload_json.len() > RESPONSE_LIMIT {
+                return Err(OperatorError::InvalidResponse { ambiguous });
+            }
+            serde_json::from_slice(&response.payload_json)
+                .map_err(|_| OperatorError::InvalidResponse { ambiguous })
         };
         #[cfg(not(target_arch = "wasm32"))]
         let deadline = tokio::time::sleep(Duration::from_millis(u64::from(self.config.timeout_ms)));
@@ -1065,42 +1117,39 @@ impl OperatorClient {
     }
 }
 
-fn response_error(status: u16, body: &[u8], ambiguous: bool) -> OperatorError {
-    #[derive(serde::Deserialize)]
-    struct Envelope {
-        error: Detail,
-    }
-    #[derive(serde::Deserialize)]
-    struct Detail {
-        code: String,
-        run_id: Option<String>,
-    }
-    if status == 403 {
-        return OperatorError::Forbidden;
-    }
-    let Ok(envelope) = serde_json::from_slice::<Envelope>(body) else {
-        return OperatorError::InvalidResponse { ambiguous };
-    };
+fn response_error(status: tonic::Status, ambiguous: bool) -> OperatorError {
+    use tonic::Code;
     if let Ok(code) = serde_json::from_value::<OperatorConnectionErrorCode>(
-        serde_json::Value::String(envelope.error.code.clone()),
+        serde_json::Value::String(status.message().to_owned()),
     ) {
-        if status == code.status() {
+        if status.code() == code.status() {
             return OperatorError::Connection {
                 code,
-                ambiguous: ambiguous && status == 503,
+                ambiguous: ambiguous && status.code() == Code::Unavailable,
             };
         }
         return OperatorError::InvalidResponse { ambiguous };
     }
-    match (status, envelope.error.code.as_str()) {
-        (400 | 413 | 415, "invalid") => OperatorError::Invalid,
-        (404, "not_found") => OperatorError::NotFound,
-        (409, "stale") => OperatorError::Stale,
-        (409, "source_busy") => match envelope.error.run_id {
-            Some(run_id) if uuid(&run_id).is_ok() => OperatorError::SourceBusy { run_id },
+    match (status.code(), status.message()) {
+        (Code::InvalidArgument, "invalid") => OperatorError::Invalid,
+        (Code::NotFound, "not_found") => OperatorError::NotFound,
+        (Code::FailedPrecondition, "stale") => OperatorError::Stale,
+        (Code::Aborted, "source_busy") => match status
+            .metadata()
+            .get("x-screenroom-run-id")
+            .and_then(|id| id.to_str().ok())
+        {
+            Some(run_id) if uuid(run_id).is_ok() => OperatorError::SourceBusy {
+                run_id: run_id.to_owned(),
+            },
             _ => OperatorError::InvalidResponse { ambiguous },
         },
-        (503, "unavailable") => OperatorError::Unavailable { ambiguous },
+        (Code::PermissionDenied, _) => OperatorError::Forbidden,
+        (Code::DeadlineExceeded, _) => OperatorError::Deadline { ambiguous },
+        (Code::Cancelled, _) => OperatorError::Cancelled { ambiguous },
+        (Code::Unavailable | Code::Unknown | Code::Unimplemented, _) => {
+            OperatorError::Unavailable { ambiguous }
+        }
         _ => OperatorError::InvalidResponse { ambiguous },
     }
 }
