@@ -55,7 +55,7 @@ struct ProviderRow: View {
                     #else
                     .buttonStyle(.plain)
                     #endif
-                    .accessibilityLabel("\(provider.provider): \(provider.status)\(record.rating?.provider.lowercased() == provider.provider.lowercased() ? "; user rating \(score)" : "")")
+                    .accessibilityLabel("\(provider.provider): \(providerStatus(provider.status))\(record.rating?.provider.lowercased() == provider.provider.lowercased() ? "; user rating \(score)" : "")")
                 }
                 if let rating = record.rating, !record.providers.contains(where: { $0.provider.lowercased() == rating.provider.lowercased() }) {
                     Text("\(rating.provider) · \(score)")
@@ -73,7 +73,7 @@ struct ProviderRow: View {
                 .focused($infoFocused).accessibilityLabel("Rating and catalog details").accessibilityIdentifier("metadata.info")
             }
             if expanded {
-                Text(([ratingDetail, "Metadata snapshot · \(record.retrievedAt)", "Provider date: \(record.date)"] + record.providers.map { "\($0.provider) · \($0.status)" }).joined(separator: " · "))
+                Text(([ratingDetail, "Metadata snapshot · \(record.retrievedAt)", "Provider date: \(record.date)"] + record.providers.map { "\($0.provider) · \(providerStatus($0.status))" }).joined(separator: " · "))
                     .font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("metadata.disclosure")
             }
         }
@@ -85,7 +85,7 @@ struct ProviderRow: View {
             if record.rating?.provider.lowercased() == provider.provider.lowercased() {
                 Image(systemName: "star.fill").foregroundStyle(.yellow)
                 Text(score)
-            } else { Text(provider.status).foregroundStyle(.secondary) }
+            } else { Text(providerStatus(provider.status)).foregroundStyle(.secondary) }
         }
                         .font(.caption).padding(.horizontal, 8).frame(minHeight: ScreenroomTheme.controlSize)
                         .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))

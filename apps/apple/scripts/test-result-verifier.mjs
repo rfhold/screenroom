@@ -14,7 +14,7 @@ for (const profile of ['ios', 'ipad', 'tvos']) {
     const target = `Screenroom-${scheme}-E2ETests`;
     function selectors(category) {
         const result = spawnSync('/bin/bash', ['-c', 'source "$1/test-category.sh"; configure_apple_test_category; printf "%s\\n" "${apple_test_methods[@]}"', 'verifier-test', scriptDirectory], {
-            env: { ...process.env, E2E_CATEGORY: category }, encoding: 'utf8',
+            env: { ...process.env, SCREENROOM_E2E_JOURNEY: 'browse', E2E_CATEGORY: category }, encoding: 'utf8',
         });
         assert.equal(result.status, 0, result.stderr);
         const methods = result.stdout.trimEnd().split('\n');
@@ -29,6 +29,25 @@ for (const profile of ['ios', 'ipad', 'tvos']) {
     for (const category of categories) {
         verifyTestResults(load(category, 'tests'), load(category, 'summary'), selectors(category));
         positive++;
+    }
+    const playbackTests = load('happy-path', 'tests');
+    const playbackSuite = playbackTests.testNodes[0].children[0].children[0];
+    function playbackIdentity(node) {
+        if (node.nodeIdentifierURL) node.nodeIdentifierURL = node.nodeIdentifierURL.replace('HomeE2ETests', 'PlayerScreenshots').replace('testHappyPathShowcase', 'testNosferatuPlayerStates');
+        if (node.nodeIdentifier) node.nodeIdentifier = node.nodeIdentifier.replace('HomeE2ETests', 'PlayerScreenshots').replace('testHappyPathShowcase', 'testNosferatuPlayerStates');
+        node.name = node.name.replace('HomeE2ETests', 'PlayerScreenshots').replace('testHappyPathShowcase', 'testNosferatuPlayerStates');
+        node.children?.forEach(playbackIdentity);
+    }
+    playbackIdentity(playbackSuite);
+    const playbackSelector = [`-only-testing:${target}/PlayerScreenshots/testNosferatuPlayerStates`];
+    verifyTestResults(playbackTests, load('happy-path', 'summary'), playbackSelector);
+    positive++;
+    assert.throws(() => verifyTestResults(playbackTests, load('happy-path', 'summary'), [`-only-testing:${target}/PlayerScreenshots/testOther`]));
+    assert.throws(() => verifyTestResults(load('happy-path', 'tests'), load('happy-path', 'summary'), [`-only-testing:${target}/HomeE2ETests/testUnknown`]));
+    for (const result of ['Skipped', 'Failed']) {
+        const changed = structuredClone(playbackTests);
+        leaves(changed)[0].result = result;
+        assert.throws(() => verifyTestResults(changed, load('happy-path', 'summary'), playbackSelector));
     }
     const allTests = load('regression', 'tests');
     const allSummary = load('regression', 'summary');

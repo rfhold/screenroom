@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 
 export function verifyTestResults(tests, summary, selectors) {
     const expected = selectors.map(value => {
-        assert.match(value, /^-only-testing:Screenroom-(iOS|tvOS|macOS)-E2ETests\/HomeE2ETests\/test[A-Za-z0-9]+$/);
+        assert.match(value, /^-only-testing:Screenroom-(iOS|tvOS|macOS)-E2ETests\/(?:HomeE2ETests\/(?:testHappyPathShowcase|testCoreUnavailableAndRetry|testHomeCatalogAndNavigation|testFreshSearchAndHomeScope|testSearchPaginationAndPreferencesRoundTrip|testSidebarRemoteControls)|PlayerScreenshots\/testNosferatuPlayerStates)$/);
         return value.slice('-only-testing:'.length);
     });
     assert.ok(expected.length > 0, 'No selected test methods');

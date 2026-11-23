@@ -7,7 +7,8 @@ struct MetadataRecord {
     let providers: [ProviderReference]
     let retrievedAt: String
     var score: String {
-        guard let rating else { return "—" }
+        guard let rating, rating.value.isFinite, rating.scale.isFinite, rating.scale > 0,
+              rating.value >= 0, rating.value <= rating.scale else { return "—" }
         return rating.votes == 0 ? "Unrated" : String(format: "%.1f/%g", rating.value, rating.scale)
     }
     var ratingDetail: String {
@@ -17,8 +18,21 @@ struct MetadataRecord {
 }
 
 func externalURL(_ value: String) -> URL? {
-    guard let url = URL(string: value), ["https", "http"].contains(url.scheme), url.host != nil else { return nil }
+    guard let url = URL(string: value), ["https", "http"].contains(url.scheme?.lowercased()),
+          url.host?.isEmpty == false, url.user == nil, url.password == nil,
+          !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
     return url
+}
+
+func providerStatus(_ status: String) -> String {
+    switch status {
+    case "source_supplied": "Identifier supplied by Jellyfin"
+    case "verified": "Verified"
+    case "matched": "Matched"
+    case "unverified": "Unverified"
+    case "unavailable": "Unavailable"
+    default: status.replacingOccurrences(of: "_", with: " ").capitalized
+    }
 }
 
 func choiceLabel(_ value: String) -> String {
@@ -95,6 +109,42 @@ struct CardLabels: Equatable {
     let number: String
     let subtitle: String
     var heading: String { [primary, number].filter { !$0.isEmpty }.joined(separator: " · ") }
+}
+
+struct CatalogNavigationKey: Hashable {
+    let screen: String
+    let library: String
+    let itemID: String
+    let query: String
+    let source: String
+    let types: [String]
+    let methods: [String]
+    let titleOnly: Bool
+    var sourceID: String = ""
+}
+
+struct CatalogNavigationMemory {
+    private struct Entry {
+        var anchor: String?
+        var focus: String?
+    }
+    private var entries: [CatalogNavigationKey: Entry] = [:]
+    private var order: [CatalogNavigationKey] = []
+    func anchor(for key: CatalogNavigationKey) -> String? { entries[key]?.anchor }
+    func focus(for key: CatalogNavigationKey) -> String? { entries[key]?.focus }
+    mutating func forget(_ key: CatalogNavigationKey) {
+        entries.removeValue(forKey: key)
+        order.removeAll { $0 == key }
+    }
+    mutating func remember(_ key: CatalogNavigationKey, anchor: String? = nil, focus: String? = nil) {
+        var entry = entries[key] ?? Entry()
+        if let anchor { entry.anchor = anchor }
+        if let focus { entry.focus = focus }
+        entries[key] = entry
+        order.removeAll { $0 == key }
+        order.append(key)
+        while order.count > 64 { entries.removeValue(forKey: order.removeFirst()) }
+    }
 }
 
 func loadedItemCount(_ count: Int) -> String { "\(count) \(count == 1 ? "item" : "items") loaded" }
@@ -454,7 +504,15 @@ final class CatalogStore {
     private var pageGeneration = 0
     private var searchRequest: SearchRequest?
     var persistenceWarning = ""
-    var scope = SourceLibraryScope(sourceId: "", libraryId: "")
+    var scope = SourceLibraryScope(sourceId: "", libraryId: "") {
+        didSet {
+            if oldValue.sourceId != scope.sourceId {
+                discardNavigationEntries(clearPublished: true)
+            }
+        }
+    }
+    var navigationMemory = CatalogNavigationMemory()
+    private(set) var navigationRestorationRevision = 0
     private var settingsFile: SettingsFile?
     private let operationTimeout: Duration
     private struct LoadContext: Equatable {
@@ -468,6 +526,109 @@ final class CatalogStore {
     private var searchGeneration = 0
     private var homeProfileRevision = 0
     private var configurationError = ""
+    private struct EntrySnapshot {
+        let context: LoadContext?
+        let rows: [HomeRow]
+        let items: [CatalogItem]
+        let results: [CatalogItem]
+        let detail: CatalogItem?
+        let children: [CatalogItem]
+        let credits: [Credit]
+        let itemPage: ItemPagination
+        let searchPage: ItemPagination
+        let searchRequest: SearchRequest?
+        let error: String
+        let pageError: String
+        let degradation: String
+        let effectiveMethods: SearchMethods?
+        let profileRevision: Int
+        let epoch: Int
+        var count: Int { rows.reduce(0) { $0 + $1.items.count } + items.count + results.count + children.count + credits.count + (detail == nil ? 0 : 1) }
+    }
+    private var entrySnapshots: [CatalogNavigationKey: EntrySnapshot] = [:]
+    private var entryOrder: [CatalogNavigationKey] = []
+    private var activeEntry: CatalogNavigationKey?
+    private var activeEntryReady = false
+    private var entryEpoch = 0
+    private var entryProfileRevision = 0
+    private var visitGeneration = 0
+
+    private func discardNavigationEntries(clearPublished: Bool = false) {
+        entryEpoch += 1
+        visitGeneration += 1
+        generation += 1
+        searchGeneration += 1
+        pageGeneration += 1
+        entrySnapshots = [:]; entryOrder = []; activeEntry = nil; activeEntryReady = false
+        navigationMemory = CatalogNavigationMemory()
+        if clearPublished {
+            rows = []; items = []; results = []; children = []; credits = []; detail = nil
+            itemPage = ItemPagination(); searchPage = ItemPagination(); searchRequest = nil
+            loadContext = nil
+            pageError = ""; error = ""; searchDegradation = ""; effectiveSearchMethods = nil
+            loading = false; pageLoading = false
+        }
+    }
+
+    private func retainActiveEntry() {
+        guard activeEntryReady, let key = activeEntry,
+              entryProfileRevision == jellyfinProfile.revision, key.sourceID == scope.sourceId else { return }
+        let snapshot = EntrySnapshot(context: loadContext, rows: rows, items: items, results: results,
+            detail: detail, children: children, credits: credits, itemPage: itemPage, searchPage: searchPage,
+            searchRequest: searchRequest, error: error, pageError: pageError, degradation: searchDegradation,
+            effectiveMethods: effectiveSearchMethods, profileRevision: jellyfinProfile.revision, epoch: entryEpoch)
+        entrySnapshots[key] = snapshot
+        entryOrder.removeAll { $0 == key }; entryOrder.append(key)
+        while entryOrder.count > 16 || entrySnapshots.values.reduce(0, { $0 + $1.count }) > 10000 {
+            let evicted = entryOrder.removeFirst()
+            entrySnapshots.removeValue(forKey: evicted)
+            navigationMemory.forget(evicted)
+        }
+    }
+
+    @discardableResult
+    func visit(_ key: CatalogNavigationKey, options: SearchOptions, forceBootstrap: Bool = false) async -> Bool {
+        guard key.sourceID == scope.sourceId, key.source == options.source,
+              key.types == options.types.sorted(), key.methods == options.methods.sorted(),
+              key.titleOnly == options.titleOnly else { return false }
+        let profile = jellyfinProfile.revision
+        if forceBootstrap || entryProfileRevision != profile {
+            discardNavigationEntries(clearPublished: entryProfileRevision != profile)
+            client?.invalidateReads()
+        } else {
+            retainActiveEntry()
+        }
+        entryProfileRevision = profile
+        visitGeneration += 1
+        let current = visitGeneration
+        let epoch = entryEpoch
+        generation += 1; searchGeneration += 1; pageGeneration += 1
+        pageLoading = false
+        activeEntry = key
+        activeEntryReady = false
+        if let snapshot = entrySnapshots[key], snapshot.epoch == epoch, snapshot.profileRevision == profile {
+            loadContext = snapshot.context
+            scope = snapshot.context?.scope ?? SourceLibraryScope(sourceId: key.sourceID, libraryId: key.library == "all" ? "" : key.library)
+            rows = snapshot.rows; items = snapshot.items; results = snapshot.results
+            detail = snapshot.detail; children = snapshot.children; credits = snapshot.credits
+            itemPage = snapshot.itemPage; searchPage = snapshot.searchPage; searchRequest = snapshot.searchRequest
+            error = snapshot.error; pageError = snapshot.pageError
+            searchDegradation = snapshot.degradation; effectiveSearchMethods = snapshot.effectiveMethods
+            loading = false; activeEntryReady = true
+            navigationRestorationRevision += 1
+            return true
+        }
+        await load(screen: key.screen, library: key.library, itemID: key.itemID.isEmpty ? nil : key.itemID, forceBootstrap: forceBootstrap)
+        guard !Task.isCancelled, current == visitGeneration, epoch == entryEpoch,
+              profile == jellyfinProfile.revision, key.sourceID == scope.sourceId else { return false }
+        if key.screen == "Search" && key.itemID.isEmpty && error.isEmpty {
+            await search(query: key.query, library: key.library, options: options)
+        }
+        guard !Task.isCancelled, current == visitGeneration, epoch == entryEpoch,
+              profile == jellyfinProfile.revision, key.sourceID == scope.sourceId else { return false }
+        activeEntryReady = true
+        return true
+    }
 
     private static func validateEndpoint(_ endpoint: String) throws {
         guard let url = URLComponents(string: endpoint), let host = url.host,
@@ -549,6 +710,7 @@ final class CatalogStore {
     }
 
     func invalidate() {
+        discardNavigationEntries()
         client?.invalidateReads()
         artworkRevision += 1
         loadedArtwork = []; failedArtwork = []
@@ -556,6 +718,7 @@ final class CatalogStore {
 
     func load(screen: String, library: String, itemID: String?, forceBootstrap: Bool = false) async {
         let budget = OperationBudget(operationTimeout)
+        let profileRevision = jellyfinProfile.revision
         generation += 1
         searchGeneration += 1
         pageGeneration += 1
@@ -583,7 +746,7 @@ final class CatalogStore {
                 try Task.checkCancellation()
                 let caps = try await budget.run { try await client.getSearchCapabilities() }
                 try budget.check()
-                guard current == generation else { return }
+                guard current == generation, profileRevision == jellyfinProfile.revision else { return }
                 libraries = values; capabilities = caps
             }
             if let itemID {
@@ -595,33 +758,34 @@ final class CatalogStore {
                 }
                 let descendants = try await budget.run { try await client.listChildren(parentId: itemID, page: Page(size: self.pageSize, token: ""), scope: requestedScope) }
                 try budget.check()
-                guard current == generation else { return }
+                guard current == generation, profileRevision == jellyfinProfile.revision else { return }
                 let mapped = try itemPage.append(descendants.items, next: descendants.nextPageToken, to: [])
                 detail = CatalogItem(value: item); credits = people; children = mapped
             } else if screen == "Home" {
                 try budget.check()
-                guard current == generation else { return }
+                guard current == generation, profileRevision == jellyfinProfile.revision else { return }
                 let profileRevision = jellyfinProfile.revision
                 if homeProfileRevision != profileRevision { client.invalidateReads() }
                 let values = try await budget.run { try await client.getHome(scope: requestedScope) }
                 try budget.check()
-                guard current == generation else { return }
+                guard current == generation, profileRevision == jellyfinProfile.revision else { return }
                 rows = values
                 homeProfileRevision = profileRevision
             } else if screen == "Library" {
                 let values = try await budget.run { try await client.listLibraryItems(scope: requestedScope, page: Page(size: self.pageSize, token: "")) }
                 try budget.check()
-                guard current == generation else { return }
+                guard current == generation, profileRevision == jellyfinProfile.revision else { return }
                 items = try itemPage.append(values.items, next: values.nextPageToken, to: [])
             }
         } catch {
-            if !Task.isCancelled && current == generation { self.error = "Unable to load: \(error.localizedDescription)" }
+            if !Task.isCancelled && current == generation && profileRevision == jellyfinProfile.revision { self.error = "Unable to load: \(error.localizedDescription)" }
         }
         if current == generation { loading = false }
     }
 
     func search(query: String, library: String, options: SearchOptions) async {
         let budget = OperationBudget(operationTimeout)
+        let profileRevision = jellyfinProfile.revision
         searchGeneration += 1
         pageGeneration += 1
         pageLoading = false; pageError = ""; searchPage = ItemPagination(); searchRequest = nil
@@ -635,15 +799,16 @@ final class CatalogStore {
             let request = SearchRequest(query: query, libraryId: requestedScope.libraryId, types: options.coreTypes, methods: options.coreMethods, source: options.source, page: Page(size: pageSize, token: ""), sourceId: requestedScope.sourceId)
             let values = try await budget.run { try await client.search(request: request) }
             try budget.check()
-            guard current == searchGeneration else { return }
+            guard current == searchGeneration, profileRevision == jellyfinProfile.revision else { return }
             results = try searchPage.append(values.items, next: values.nextPageToken, to: [])
             searchRequest = request; searchDegradation = values.degradationReason; effectiveSearchMethods = values.effectiveMethods; error = ""
         } catch {
-            if !Task.isCancelled && current == searchGeneration { self.error = "Search unavailable: \(error.localizedDescription)" }
+            if !Task.isCancelled && current == searchGeneration && profileRevision == jellyfinProfile.revision { self.error = "Search unavailable: \(error.localizedDescription)" }
         }
     }
 
     func loadMore(search: Bool = false) async {
+        let profileRevision = jellyfinProfile.revision
         guard !pageLoading, let client, !(search ? searchPage.token : itemPage.token).isEmpty else { return }
         let current = pageGeneration
         let context = loadContext
@@ -657,7 +822,7 @@ final class CatalogStore {
                 let sent = request
                 let page = try await budget.run { try await client.search(request: sent) }
                 try budget.check()
-                guard current == pageGeneration else { return }
+                guard current == pageGeneration, profileRevision == jellyfinProfile.revision else { return }
                 results = try searchPage.append(page.items, next: page.nextPageToken, to: results)
                 if !page.degradationReason.isEmpty { searchDegradation = page.degradationReason }
                 effectiveSearchMethods = page.effectiveMethods
@@ -667,24 +832,25 @@ final class CatalogStore {
                     return try await client.listLibraryItems(scope: requestedScope, page: Page(size: self.pageSize, token: token))
                 }
                 try budget.check()
-                guard current == pageGeneration else { return }
+                guard current == pageGeneration, profileRevision == jellyfinProfile.revision else { return }
                 if context.itemID != nil { children = try itemPage.append(page.items, next: page.nextPageToken, to: children) }
                 else { items = try itemPage.append(page.items, next: page.nextPageToken, to: items) }
             }
         } catch {
-            if !Task.isCancelled && current == pageGeneration { pageError = "More items could not be loaded. Your current items are still available." }
+            if !Task.isCancelled && current == pageGeneration && profileRevision == jellyfinProfile.revision { pageError = "More items could not be loaded. Your current items are still available." }
         }
         if current == pageGeneration { pageLoading = false }
     }
 
     func retryHomeRows() async {
         guard let client else { return }
+        let profileRevision = jellyfinProfile.revision
         let current = generation
         let requestedScope = scope
         client.invalidateReads()
         do {
             let values = try await OperationBudget(operationTimeout).run { try await client.getHome(scope: requestedScope) }
-            guard current == generation, !Task.isCancelled else { return }
+            guard current == generation, profileRevision == jellyfinProfile.revision, !Task.isCancelled else { return }
             rows = values
         } catch {
             // Keep existing rows, including their sanitized retry state.

@@ -42,6 +42,8 @@ struct HomeView: View {
     @State private var status = ""
     @State private var searchOrigin = "Home"
     @State private var searchOriginPath: [CatalogItem] = []
+    @State private var playback: NativePlayback?
+    @State private var playbackTitle = ""
     @FocusState private var navigationFocus: String?
     @FocusState private var sidebarToggleFocused: Bool
 
@@ -65,7 +67,13 @@ struct HomeView: View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 600
             Group {
-                if compact {
+                if let playback {
+                    NativePlaybackView(playback: playback, title: playbackTitle) {
+                        self.playback = nil
+                        catalog.invalidate()
+                        refresh += 1
+                    }
+                } else if compact {
                     VStack(spacing: 0) { sidebar(compact: true); content(compact: true, width: geometry.size.width - 32) }
                 } else {
                     HStack(alignment: .top, spacing: 0) {
@@ -80,16 +88,13 @@ struct HomeView: View {
         .preferredColorScheme(.dark)
         .tint(.white)
         .environment(catalog)
-        .task(id: "\(screen)|\(library)|\(path.last?.id ?? "")|\(refresh)|\(query)|\(options)|\(catalog.jellyfinProfile.revision)") {
+        .task(id: "\(catalog.scope.sourceId)|\(screen)|\(library)|\(path.last?.id ?? "")|\(refresh)|\(query)|\(options)|\(catalog.jellyfinProfile.revision)") {
             let requested = query
             let requestedRefresh = refresh
             let refreshing = requestedRefresh > completedRefresh
             if refreshing { status = "" }
-            await catalog.load(screen: screen, library: library, itemID: path.last?.id, forceBootstrap: refreshing)
-            if screen == "Search" && path.isEmpty && catalog.error.isEmpty && !Task.isCancelled {
-                await catalog.search(query: requested, library: library, options: options)
-                if !Task.isCancelled { settled = requested }
-            }
+            let accepted = await catalog.visit(viewKey, options: options, forceBootstrap: refreshing)
+            if accepted && screen == "Search" && path.isEmpty { settled = requested }
             if refreshing && !Task.isCancelled {
                 completedRefresh = requestedRefresh
                 status = catalog.error.isEmpty ? "Catalog refreshed from core." : "Refresh failed."
@@ -99,9 +104,24 @@ struct HomeView: View {
             if let capabilities { options.reconcile(capabilities, preferences: catalog.preferences) }
         }
         .onChange(of: library) { _, _ in saveSettings() }
-        .onDisappear { navigationGeneration += 1; navigationTask?.cancel() }
+        .onChange(of: catalog.jellyfinProfile.revision) { _, _ in
+            if let playback { Task { await playback.close(reason: "profile_changed") } }
+        }
+        .onDisappear {
+            navigationGeneration += 1
+            navigationTask?.cancel()
+            if let playback {
+                #if os(iOS)
+                // The fullscreen presenter stops a true unmount without treating a cover as exit.
+                if !playback.presentation.fullscreen { Task { await playback.close(reason: "unmount") } }
+                #else
+                Task { await playback.close(reason: "unmount") }
+                #endif
+            }
+        }
         #if os(tvOS)
         .onExitCommand {
+            guard playback == nil else { return }
             if !path.isEmpty { setPath(Array(path.dropLast())) }
             else if settings && screen == "Search" { settings = false }
             else if expanded { expanded = false }
@@ -136,6 +156,8 @@ struct HomeView: View {
     }
 
     private func open(_ item: CatalogItem) {
+        let row = path.isEmpty && screen == "Home" ? catalog.rows.firstIndex(where: { $0.items.contains(where: { $0.id == item.id }) }) : nil
+        catalog.navigationMemory.remember(viewKey, anchor: row.map { "home.row.\($0)" } ?? item.id, focus: "card.\(item.id)")
         failedOpen = nil
         catalog.error = ""
         navigationGeneration += 1
@@ -164,6 +186,10 @@ struct HomeView: View {
         query = ""
         settled = ""
         settings = false
+        options.source = "all"
+        options.titleOnly = false
+        options.methods = Set(catalog.capabilities?.methods.filter { $0 != "title_only" } ?? ["text", "fuzzy", "semantic"])
+        saveSettings()
         go("Search")
     }
 
@@ -304,7 +330,15 @@ struct HomeView: View {
         .accessibilityIdentifier("sidebar.toggle")
     }
 
+    private var viewKey: CatalogNavigationKey {
+        CatalogNavigationKey(screen: screen, library: library, itemID: path.last?.id ?? "",
+            query: screen == "Search" ? query : "", source: options.source,
+            types: options.types.sorted(), methods: options.methods.sorted(), titleOnly: options.titleOnly,
+            sourceID: catalog.scope.sourceId)
+    }
+
     private func content(compact: Bool, width: CGFloat) -> some View {
+        ScrollViewReader { restorationReader in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if !status.isEmpty { Text(status).foregroundStyle(.secondary).accessibilityIdentifier("refresh.status") }
@@ -335,17 +369,33 @@ struct HomeView: View {
                                 Text(homeRowError(failure.code)).font(.caption).foregroundStyle(.secondary)
                                 Button("Retry \(row.title)") { Task { await catalog.retryHomeRows() } }
                             }
-                            ScrollView(.horizontal) {
-                                HStack(alignment: .top, spacing: 18) {
-                                    ForEach(row.items.map(CatalogItem.init)) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth) }
-                                }.padding(.vertical, 8)
+                            if row.items.isEmpty && row.readError == nil && !catalog.loading {
+                                Text("No titles in this row.").foregroundStyle(.secondary)
                             }
-                        }
+                            ScrollViewReader { reader in
+                                ScrollView(.horizontal) {
+                                    HStack(alignment: .top, spacing: 18) {
+                                        ForEach(row.items.map(CatalogItem.init)) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth) }
+                                    }.padding(.vertical, 8)
+                                }
+                                .onAppear {
+                                    if let focus = catalog.navigationMemory.focus(for: viewKey), focus.hasPrefix("card.") {
+                                        reader.scrollTo(String(focus.dropFirst(5)), anchor: .center)
+                                    }
+                                }
+                            }
+                        }.id("home.row.\(index)")
+                    }
+                    if catalog.rows.isEmpty && !catalog.loading && catalog.error.isEmpty {
+                        Text("No home rows are available. Browse libraries or refresh the catalog.").foregroundStyle(.secondary)
                     }
                 } else if screen == "Library" {
                     heading(catalog.libraryTitle(library))
                     Text(loadedItemCount(catalog.items.count)).foregroundStyle(.secondary).accessibilityIdentifier("catalog.loadedCount")
                     grid(catalog.items, compact: compact)
+                    if catalog.items.isEmpty && !catalog.loading && catalog.error.isEmpty {
+                        Text("No titles in this library.").foregroundStyle(.secondary)
+                    }
                     loadMore(search: false)
                 } else if screen == "Search" {
                     search(compact: compact)
@@ -355,11 +405,28 @@ struct HomeView: View {
                 }
              }
              .padding(compact ? 16 : ScreenroomTheme.inset)
+             .scrollTargetLayout()
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .scrollPosition(id: Binding(get: { catalog.navigationMemory.anchor(for: viewKey) }, set: { catalog.navigationMemory.remember(viewKey, anchor: $0) }))
+        .onChange(of: catalog.loading) { _, loading in
+            if !loading { navigationFocus = catalog.navigationMemory.focus(for: viewKey) }
+        }
+        .onChange(of: catalog.navigationRestorationRevision) { _, revision in
+            let key = viewKey
+            Task { @MainActor in
+                await Task.yield()
+                guard revision == catalog.navigationRestorationRevision, key == viewKey else { return }
+                if let anchor = catalog.navigationMemory.anchor(for: key) {
+                    restorationReader.scrollTo(anchor, anchor: .top)
+                }
+                navigationFocus = catalog.navigationMemory.focus(for: key)
+            }
         }
         #if os(tvOS)
         .focusSection()
         #endif
+        }
     }
 
     private func heading(_ title: String) -> some View {
@@ -414,6 +481,8 @@ struct HomeView: View {
             }.frame(width: width, alignment: .leading).contentShape(Rectangle())
         }
         .buttonStyle(.borderless)
+        .id(item.id)
+        .focused($navigationFocus, equals: "card.\(item.id)")
         .accessibilityLabel([labels.heading, labels.subtitle, item.playbackAccessibility].filter { !$0.isEmpty }.joined(separator: ", "))
         .accessibilityValue(item.artwork == nil ? "Designed placeholder; poster not included" : catalog.loadedArtwork.contains(item.artwork!.url) ? "Core artwork ready" : "Artwork loading")
         .accessibilityIdentifier("card.\(item.id)")
@@ -424,6 +493,7 @@ struct HomeView: View {
             ForEach(items) { item in card(item, width: compact ? 140 : ScreenroomTheme.posterWidth, seasonContext: item.isSeasonChild(of: parent)) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .scrollTargetLayout()
         #if os(tvOS)
         .focusSection()
         #endif
@@ -449,6 +519,9 @@ struct HomeView: View {
                 if item.kind == "Series" || item.kind == "Season" {
                     Text(loadedItemCount(catalog.children.count)).foregroundStyle(.secondary).accessibilityIdentifier("catalog.loadedCount")
                     grid(catalog.children, compact: compact, parent: item)
+                    if catalog.children.isEmpty && !catalog.loading && catalog.error.isEmpty {
+                        Text(item.kind == "Series" ? "No seasons are available." : "No episodes are available.").foregroundStyle(.secondary)
+                    }
                     loadMore(search: false)
                 }
                 PeopleView(title: "Cast", people: catalog.credits.filter { $0.department.lowercased() == "cast" })
@@ -462,6 +535,17 @@ struct HomeView: View {
             Text("\(item.kind) · \(String(item.year))").foregroundStyle(.secondary)
             heading(item.title)
             Text(item.meta).foregroundStyle(.secondary)
+            if item.kind == "Movie" || item.kind == "Episode" {
+                Button("Play", systemImage: "play.fill") {
+                    guard let client = catalog.client else { return }
+                    catalog.navigationMemory.remember(viewKey, focus: "detail.play")
+                    playbackTitle = item.title
+                    playback = NativePlayback(client: client, itemID: item.id, scope: catalog.scope)
+                }
+                .disabled(catalog.client == nil)
+                .accessibilityIdentifier("detail.play")
+                .focused($navigationFocus, equals: "detail.play")
+            }
             if let record = item.record {
                 if item.kind == "Episode" { Text("Aired \(record.date)").font(.caption).foregroundStyle(.secondary) }
                 ProviderRow(record: record)

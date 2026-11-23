@@ -4,6 +4,28 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/test-category.sh
 configure_apple_test_category
+if [ "$apple_test_journey" = playback ]; then
+    for name in SCREENROOM_API_ENDPOINT SCREENROOM_BACKEND_DESCRIPTOR SCREENROOM_BACKEND_INSTANCE_ID SCREENROOM_SHOWCASE_ITEM_ID SCREENROOM_SHOWCASE_TITLE SCREENROOM_SHOWCASE_YEAR; do
+        if [ -z "${!name:-}" ]; then echo "Playback requires explicit $name" >&2; exit 2; fi
+    done
+    if [ "${SCREENROOM_NATIVE_PLAYBACK_RELEASED:-0}" != 1 ]; then
+        echo 'Playback requires SCREENROOM_NATIVE_PLAYBACK_RELEASED=1 from the coordinator' >&2; exit 2
+    fi
+    if [ "${SCREENROOM_BACKEND_ATTACH:-}" != 1 ] ||
+        [ "${SCREENROOM_BACKEND_PROJECT:-}" != screenroom-jellyfin-local ] ||
+        [ "$SCREENROOM_API_ENDPOINT" != http://127.0.0.1:50052 ]; then
+        echo 'Playback requires explicit attachment to screenroom-jellyfin-local at http://127.0.0.1:50052' >&2; exit 2
+    fi
+    if ! node --input-type=module -e '
+        import { readFileSync } from "node:fs";
+        const env = process.env;
+        const descriptor = JSON.parse(readFileSync(env.SCREENROOM_BACKEND_DESCRIPTOR, "utf8"));
+        if (descriptor.instanceID !== env.SCREENROOM_BACKEND_INSTANCE_ID ||
+            descriptor.publicOrigin !== env.SCREENROOM_API_ENDPOINT) process.exit(2);
+    '; then
+        echo 'Playback requires the explicit descriptor-backed backend instance' >&2; exit 2
+    fi
+fi
 case "${E2E_MACOS-0}" in
     0|1) ;;
     *) echo 'E2E_MACOS must be 0 or 1 (or unset)' >&2; exit 2 ;;
@@ -15,7 +37,9 @@ fi
 case "${1:-all}" in
     all)
         profiles=(ios ipad tvos)
-        if [ "${E2E_MACOS-0}" = 1 ]; then profiles+=(macos); fi
+        if [ "${E2E_MACOS-0}" = 1 ]; then
+            if [ "$apple_test_journey" = playback ]; then profiles=(macos "${profiles[@]}"); else profiles+=(macos); fi
+        fi
         ;;
     ios|ipad|tvos|macos) profiles=("$1") ;;
     *) echo "Unknown Apple E2E profile: $1" >&2; exit 2 ;;
@@ -48,8 +72,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 root=$(cd ../.. && pwd)
 export SCREENROOM_BACKEND_DESCRIPTOR=${SCREENROOM_BACKEND_DESCRIPTOR:-"$root/build/backend-runtime/screenroom-e2e/descriptor.json"}
-export SCREENROOM_BACKEND_ATTACH=1
-export SCREENROOM_API_ENDPOINT=${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
+if [ "$apple_test_journey" = browse ]; then
+    export SCREENROOM_BACKEND_ATTACH=1
+    export SCREENROOM_API_ENDPOINT=${SCREENROOM_API_ENDPOINT:-http://127.0.0.1:50051}
+fi
 if [ -n "${SCREENROOM_E2E_API_ENDPOINT:-}" ] && [ "$SCREENROOM_E2E_API_ENDPOINT" != "$SCREENROOM_API_ENDPOINT" ]; then
     echo 'SCREENROOM_E2E_API_ENDPOINT must match SCREENROOM_API_ENDPOINT' >&2; exit 2
 fi
@@ -68,6 +94,13 @@ echo "Attached shared backend $instance at $SCREENROOM_API_ENDPOINT" | tee "$run
 export TEST_RUNNER_SCREENROOM_API_ENDPOINT="$SCREENROOM_API_ENDPOINT"
 export TEST_RUNNER_SCREENROOM_USER_ID="$SCREENROOM_USER_ID"
 export TEST_RUNNER_SCREENROOM_BACKEND_INSTANCE_ID="$instance"
+if [ "$apple_test_journey" = playback ]; then
+    export TEST_RUNNER_SCREENROOM_E2E_JOURNEY=playback
+    export TEST_RUNNER_SCREENROOM_NATIVE_PLAYBACK_RELEASED=1
+    export TEST_RUNNER_SCREENROOM_SHOWCASE_ITEM_ID="$SCREENROOM_SHOWCASE_ITEM_ID"
+    export TEST_RUNNER_SCREENROOM_SHOWCASE_TITLE="$SCREENROOM_SHOWCASE_TITLE"
+    export TEST_RUNNER_SCREENROOM_SHOWCASE_YEAR="$SCREENROOM_SHOWCASE_YEAR"
+fi
 "$timeout" --foreground -k 10s 1200s bash scripts/prepare-core.sh >"$run/core-build.log" 2>&1
 if [ "$apple_test_category" = regression ] || [ "$apple_test_category" = all ]; then
     "$timeout" --foreground -k 10s 120s bash scripts/test-catalog-state.sh >"$run/catalog-state.log" 2>&1
@@ -108,10 +141,17 @@ for profile in "${profiles[@]}"; do
 
     output="$run/$profile"
     mkdir -p "$output"
+    if [ "$apple_test_journey" = playback ]; then
+        export TEST_RUNNER_SCREENROOM_SHOWCASE_PLATFORM="$profile"
+        export TEST_RUNNER_SCREENROOM_SHOWCASE_RUN_ID="$(uuidgen)"
+        capture_started=$(date +%s)
+    fi
+    test_allowance=120
+    if [ "$apple_test_journey" = playback ]; then test_allowance=360; fi
     echo "E2E $profile: $destination"
     selectors=()
     for method in "${apple_test_methods[@]}"; do
-        selectors+=("-only-testing:Screenroom-$scheme-E2ETests/HomeE2ETests/$method")
+        selectors+=("-only-testing:Screenroom-$scheme-E2ETests/$apple_test_class/$method")
     done
     if [ "$profile" = tvos ] && { [ "$apple_test_category" = regression ] || [ "$apple_test_category" = all ]; }; then
         selectors+=("-only-testing:Screenroom-$scheme-E2ETests/HomeE2ETests/testSidebarRemoteControls")
@@ -121,7 +161,7 @@ for profile in "${profiles[@]}"; do
         -scheme "Screenroom-$scheme" -destination "$destination" -destination-timeout 60 \
         -derivedDataPath "$PWD/build/e2e/cache/$scheme" "${signing[@]}" "${selectors[@]}" \
         -resultBundlePath "$output/Home.xcresult" -parallel-testing-enabled NO \
-        -test-timeouts-enabled YES -maximum-test-execution-time-allowance 120 \
+        -test-timeouts-enabled YES -maximum-test-execution-time-allowance "$test_allowance" \
         >"$output/test.log" 2>&1
     for report in tests summary; do
         "$timeout" --foreground -k 10s 60s xcrun xcresulttool get test-results "$report" \
@@ -132,5 +172,9 @@ for profile in "${profiles[@]}"; do
     "$timeout" --foreground -k 10s 60s xcrun xcresulttool export attachments \
         --path "$output/Home.xcresult" --output-path "$output/screenshots" \
         >"$output/export.log" 2>&1
+    if [ "$apple_test_journey" = playback ]; then
+        node scripts/playback-showcase-extract.mjs "$output/screenshots" "$output/playback" \
+            "$profile" "$scheme" "$capture_started" "$TEST_RUNNER_SCREENROOM_SHOWCASE_RUN_ID"
+    fi
     echo "PASS $profile: $output"
 done

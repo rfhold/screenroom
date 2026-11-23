@@ -1,4 +1,4 @@
-# Apple catalog shell
+# Apple apps
 
 The iOS, iPadOS, macOS, and tvOS apps share native SwiftUI views and an isolated dark theme.
 `Sources/Home/Catalog.swift` adapts Rust UniFFI domain records for presentation.
@@ -14,7 +14,8 @@ Item details and people omit per-item rights, provenance, artwork creators, lice
 All visible artwork bytes load through the core with explicit loading and failure states.
 An eight-request FIFO queue shares concurrent URL requests and retains a bounded byte cache. Cancellation releases queued or active work.
 The app contains no bundled catalog JSON, media, portraits, or provider branding. Native app icons and navigation glyphs remain local.
-There is no playback, authentication, or direct native media-provider connection.
+Movie and episode details offer native AVPlayer/AVKit playback through the shared client's public playback API.
+The apps have no authentication or direct native media-provider connection.
 Server-saved Jellyfin profile mappings select progress snapshots for the local user selector; they do not establish sign-in.
 
 ## Core and development endpoint
@@ -60,6 +61,9 @@ Episode cards show the series name and muted `S05:E09`, with the episode title b
 Explicit season children show `E09` instead. Missing numbering context uses Episode without invented numbers.
 An explicit true watched state adds a poster check; playback progress remains separate.
 Back and breadcrumb buttons return to the originating library, home, or search context.
+Bounded in-memory restoration retains scroll targets and focus for 64 library/query/filter/hierarchy contexts.
+Entry-owned snapshots retain result prefixes, pagination tokens, continuation errors, and search context for up to 16 entries and 10,000 records.
+Back restores those snapshots before scroll and focus; refresh, profile changes, source changes, and new clients discard stale snapshots.
 
 The Jellyfin profile destination lists server-provided sources and profiles, the current mapping, Save, and Unlink.
 After one write, the app invalidates reads and checks server state. Retry only reloads that state; it never repeats an ambiguous write.
@@ -81,7 +85,8 @@ Selected item types persist in local settings. Detail breadcrumbs and Back prese
 query, catalog filter, item types, methods, title-only state, and library scope instead.
 Home uses All libraries, so search from Home covers every library. Search from a library retains
 that library's scope, and its Back button restores the prior hierarchy. Other search state remains in memory.
-No subtitle preference or subtitle controls exist. Old settings files ignore the obsolete field.
+Catalog search has no subtitle preference. Playback exposes gateway track choices and Subtitles Off.
+Old settings files ignore the obsolete catalog subtitle field.
 The shared core normalizes a saved `tmdb` provider preference to `all` and preserves unrelated valid settings.
 Library IDs are opaque and imply no icon or media type, even for literal `movies` or `tv` values.
 Refresh invalidates core reads and reloads active catalog, search, and artwork tasks.
@@ -89,6 +94,40 @@ The status reports success or failure only after the active catalog/search reque
 The app has no Log out, Welcome, or Continue authentication flow.
 On tvOS, sidebar destinations use uniform 56-point rows with separate selected and focused
 appearances. Refresh remains below the library navigation, which can scroll. Expansion pushes the content.
+
+## Native playback
+
+Play creates an in-memory session with the current source/library scope and live Jellyfin resume policy.
+Restored catalog navigation never starts playback.
+AVKit receives gateway media URLs, not Jellyfin URLs or provider credentials.
+The app advertises H.264/AAC MP4, native HLS, and WebVTT support.
+Plain WebVTT captions use gateway bytes and the logical media timeline.
+Custom WebVTT styles and cue placement are not reproduced.
+Gateway track changes support audio, subtitles, burn-in choices, and explicit Off.
+Unavailable tracks remain disabled. A compatible transport request remains explicit.
+
+Controls expose Play/Pause, backward and forward seek, mute, volume, track choices, session checks, and Stop.
+iOS and macOS also expose an absolute-position scrubber and fullscreen controls.
+iOS uses an over-fullscreen presentation; macOS uses native window fullscreen; tvOS already occupies the screen.
+The tvOS remote Play/Pause command uses the same report-aware playback toggle as the onscreen control.
+Presentation transitions preserve the player, session, and event sequence without new playback requests.
+The app applies transport offsets once; a seek before the transport origin requests a new gateway timeline.
+Events preserve sequence order even for backward seeks.
+Active sessions send heartbeats every 15 seconds after the first Play.
+An ambiguous personal report blocks later personal reports; a read-only session check never repeats a start.
+Preparation, transport, and Stop retries retain the exact request body and mutation UUID in memory.
+Exit, unmount, profile change, or an inactive/background scene transition detaches media and freezes the final Stop position.
+Foreground activation does not resume the stopped owner; return to details and press Play for a new session.
+Fullscreen presentation alone preserves the session; real scene deactivation still stops playback.
+The app offers no background playback or Picture in Picture.
+Live provider acceptance requires separate device tests.
+
+After core preparation, run isolated playback lifecycle tests without a backend or GUI:
+
+```sh
+bash apps/apple/scripts/test-native-playback.sh
+SCREENROOM_CORE_PREPARED=1 SCREENROOM_STATE_LOCAL_TESTS_ONLY=1 bash apps/apple/scripts/test-catalog-state.sh
+```
 
 ## E2E tests
 

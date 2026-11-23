@@ -234,8 +234,155 @@ private final class BoundaryClient: Client, @unchecked Sendable {
     override func listChildren(parentId: String, page: Page, scope: SourceLibraryScope) async throws -> ItemPage { ItemPage(items: [], nextPageToken: "") }
 }
 
+private actor NavigationProbe {
+    private(set) var requests: [String] = []
+    private var held: CheckedContinuation<ItemPage, Error>?
+    var waiting: Bool { held != nil }
+    func page(scope: SourceLibraryScope, token: String, search: SearchRequest? = nil) async throws -> ItemPage {
+        let prefix = search == nil ? "library" : "search"
+        requests.append("\(prefix)|\(scope.sourceId)|\(scope.libraryId)|\(token)|\(search?.query ?? "")")
+        if scope.libraryId == "slow" {
+            return try await withCheckedThrowingContinuation { held = $0 }
+        }
+        if token == "third" { throw CocoaError(.fileReadUnknown) }
+        return ItemPage(items: [testItem("\(prefix)-\(token.isEmpty ? "1" : "2")")], nextPageToken: token.isEmpty ? "second" : "third")
+    }
+    func release() {
+        held?.resume(returning: ItemPage(items: [testItem("stale")], nextPageToken: ""))
+        held = nil
+    }
+}
+
+private final class NavigationClient: Client, @unchecked Sendable {
+    let probe: NavigationProbe
+    init(_ probe: NavigationProbe) { self.probe = probe; super.init(noHandle: NoHandle()) }
+    required init(unsafeFromHandle handle: UInt64) { fatalError("Test-only transport") }
+    override func invalidateReads() {}
+    override func listLibraryItems(scope: SourceLibraryScope, page: Page) async throws -> ItemPage {
+        try await probe.page(scope: scope, token: page.token)
+    }
+    override func search(request: SearchRequest) async throws -> SearchPage {
+        let values = try await probe.page(scope: SourceLibraryScope(sourceId: request.sourceId, libraryId: request.libraryId),
+            token: request.page?.token ?? "", search: request)
+        return SearchPage(items: values.items, nextPageToken: values.nextPageToken, effectiveMethods: request.methods, degradationReason: "test-degradation")
+    }
+    override func getItem(id: String, scope: SourceLibraryScope) async throws -> Item { testItem(id) }
+    override func listCredits(itemId: String, page: Page, scope: SourceLibraryScope) async throws -> CreditPage {
+        CreditPage(credits: [], nextPageToken: "")
+    }
+    override func listChildren(parentId: String, page: Page, scope: SourceLibraryScope) async throws -> ItemPage {
+        ItemPage(items: [], nextPageToken: "")
+    }
+}
+
 @main
 private struct CatalogStateTests {
+    @MainActor
+    static func navigationRegressions() async throws {
+        let probe = NavigationProbe()
+        let store = CatalogStore(client: NavigationClient(probe), pageSize: 1)
+        store.scope = SourceLibraryScope(sourceId: "source-a", libraryId: "")
+        store.libraries = [MediaLibrary(id: "movies", title: "Movies")]
+        let options = SearchOptions(source: "all", types: ["Movie"], methods: ["text"], titleOnly: false)
+        func key(_ screen: String = "Library", _ item: String = "", source: String = "source-a", library: String = "movies") -> CatalogNavigationKey {
+            CatalogNavigationKey(screen: screen, library: library, itemID: item, query: screen == "Search" ? "query" : "",
+                source: "all", types: ["Movie"], methods: ["text"], titleOnly: false, sourceID: source)
+        }
+        let library = key()
+        await store.visit(library, options: options)
+        await store.loadMore()
+        await store.loadMore()
+        let libraryError = store.pageError
+        precondition(store.items.map(\.id) == ["library-1", "library-2"] && !libraryError.isEmpty)
+        store.navigationMemory.remember(library, anchor: "library-2", focus: "card.library-2")
+        let beforeDetail = await probe.requests
+        await store.visit(key("Library", "library-2"), options: options)
+        await store.visit(library, options: options)
+        let afterLibraryBack = await probe.requests
+        precondition(afterLibraryBack == beforeDetail, "Back must not fetch and replace page one")
+        precondition(store.items.map(\.id) == ["library-1", "library-2"])
+        precondition(store.itemPage.token == "third" && store.itemPage.pages == 2 && store.pageError == libraryError)
+        precondition(store.navigationMemory.anchor(for: library) == "library-2" && store.navigationMemory.focus(for: library) == "card.library-2")
+        await store.loadMore()
+        let resumedLibrary = await probe.requests
+        precondition(resumedLibrary.last == "library|source-a|movies|third|")
+
+        let search = key("Search")
+        await store.visit(search, options: options)
+        await store.loadMore(search: true)
+        await store.loadMore(search: true)
+        let searchError = store.pageError
+        precondition(store.results.map(\.id) == ["search-1", "search-2"] && !searchError.isEmpty)
+        store.navigationMemory.remember(search, anchor: "search-2", focus: "card.search-2")
+        let searchBeforeDetail = await probe.requests
+        await store.visit(key("Search", "search-2"), options: options)
+        await store.visit(search, options: options)
+        let searchAfterBack = await probe.requests
+        precondition(searchAfterBack == searchBeforeDetail, "Search Back must not replace the retained page prefix")
+        precondition(store.results.map(\.id) == ["search-1", "search-2"])
+        precondition(store.searchPage.token == "third" && store.searchPage.pages == 2 && store.pageError == searchError)
+        precondition(store.searchDegradation == "test-degradation" && store.effectiveSearchMethods == options.coreMethods)
+        precondition(store.navigationMemory.anchor(for: search) == "search-2" && store.navigationMemory.focus(for: search) == "card.search-2")
+        await store.loadMore(search: true)
+        let resumedSearch = await probe.requests
+        precondition(resumedSearch.last == "search|source-a|movies|third|query")
+
+        var alternateOptions = options
+        alternateOptions.methods = ["fuzzy"]
+        let alternate = CatalogNavigationKey(screen: "Search", library: "movies", itemID: "", query: "other query",
+            source: "all", types: ["Movie"], methods: ["fuzzy"], titleOnly: false, sourceID: "source-a")
+        await store.visit(alternate, options: alternateOptions)
+        let alternateRequests = await probe.requests
+        precondition(alternateRequests.last == "search|source-a|movies||other query" && store.results.map(\.id) == ["search-1"])
+        let alternateCount = alternateRequests.count
+        await store.visit(search, options: options)
+        let restoredOriginalCount = await probe.requests.count
+        precondition(restoredOriginalCount == alternateCount && store.results.map(\.id) == ["search-1", "search-2"])
+        precondition(store.searchPage.token == "third" && store.pageError == searchError)
+
+        store.jellyfinProfile.revision += 1
+        await store.visit(search, options: options)
+        precondition(store.results.map(\.id) == ["search-1"] && store.searchPage.token == "second")
+        precondition(store.navigationMemory.anchor(for: search) == nil, "Profile change must discard retained positions and results")
+        store.scope = SourceLibraryScope(sourceId: "source-b", libraryId: "")
+        let rejected = await store.visit(library, options: options)
+        precondition(!rejected && store.results.isEmpty && store.items.isEmpty)
+        store.scope = SourceLibraryScope(sourceId: "source-a", libraryId: "")
+        store.libraries = [MediaLibrary(id: "movies", title: "Movies")]
+        await store.visit(library, options: options)
+        precondition(store.items.map(\.id) == ["library-1"], "A previous source generation cannot restore page two")
+
+        let stale = Task { await store.visit(key(library: "slow"), options: options) }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !(await probe.waiting) {
+            precondition(ContinuousClock.now < deadline)
+            await Task.yield()
+        }
+        store.jellyfinProfile.revision += 1
+        await store.visit(library, options: options)
+        await probe.release()
+        let staleAccepted = await stale.value
+        precondition(!staleAccepted && store.items.map(\.id) == ["library-1"])
+
+        let otherClient = CatalogStore(client: NavigationClient(probe), pageSize: 1)
+        otherClient.scope = SourceLibraryScope(sourceId: "source-a", libraryId: "")
+        otherClient.libraries = [MediaLibrary(id: "movies", title: "Movies")]
+        let beforeNewClient = await probe.requests.count
+        await otherClient.visit(library, options: options)
+        let afterNewClient = await probe.requests.count
+        precondition(afterNewClient == beforeNewClient + 1 && otherClient.items.map(\.id) == ["library-1"])
+        await otherClient.loadMore()
+        otherClient.navigationMemory.remember(library, anchor: "library-2", focus: "card.library-2")
+        for index in 0..<17 {
+            await otherClient.visit(key("Library", "detail-\(index)"), options: options)
+        }
+        let beforeEvictedEntry = await probe.requests.count
+        await otherClient.visit(library, options: options)
+        let afterEvictedEntry = await probe.requests.count
+        precondition(afterEvictedEntry == beforeEvictedEntry + 1 && otherClient.items.map(\.id) == ["library-1"])
+        precondition(otherClient.navigationMemory.anchor(for: library) == nil, "Entry eviction must also drop its scroll/focus targets")
+        print("Entry-owned two-page library/search restoration, continuation errors, position/focus targets, profile/source/client fences and stale-response rejection passed")
+    }
     static func wait(_ probe: ReadProbe, _ key: String) async {
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while ContinuousClock.now < deadline {
@@ -461,6 +608,7 @@ private struct CatalogStateTests {
 
     @MainActor
     static func main() async throws {
+        try await navigationRegressions()
         var watchedItem = testItem("watched-state")
         watchedItem.progressPercent = 100
         for state in [nil, false, true, false, nil, true] as [Bool?] {
@@ -505,6 +653,22 @@ private struct CatalogStateTests {
         precondition(mapped.artwork?.source == "https://example.com/poster-source")
         precondition(CatalogItem(value: testItem("neutral")).ink == "303030")
         precondition(externalURL("") == nil && externalURL("relative/path") == nil && externalURL("https://example.com") != nil)
+        precondition(externalURL("https://user:secret@example.com") == nil)
+        precondition(externalURL("javascript:alert(1)") == nil)
+        precondition(providerStatus("source_supplied") == "Identifier supplied by Jellyfin")
+        precondition(MetadataRecord(date: "", rating: Rating(provider: "Invalid", value: .nan, scale: 0, votes: nil, retrievedAt: ""), providers: [], retrievedAt: "").score == "—")
+        var navigation = CatalogNavigationMemory()
+        func key(_ library: String, _ item: String = "", _ query: String = "query") -> CatalogNavigationKey {
+            CatalogNavigationKey(screen: "Search", library: library, itemID: item, query: query, source: "all",
+                types: ["Movie"], methods: ["text"], titleOnly: false)
+        }
+        let origin = key("library")
+        navigation.remember(origin, anchor: "movie", focus: "card.movie")
+        navigation.remember(key("library", "movie"), anchor: "cast")
+        precondition(navigation.anchor(for: origin) == "movie" && navigation.focus(for: origin) == "card.movie")
+        precondition(navigation.anchor(for: key("another-library")) == nil && navigation.anchor(for: key("library", "", "other-query")) == nil)
+        for index in 0..<65 { navigation.remember(key("library-\(index)"), anchor: "row") }
+        precondition(navigation.anchor(for: origin) == nil, "Navigation restoration must be bounded")
         let caps = SearchCapabilities(methods: ["fuzzy"], types: ["Episode"], sources: ["archive"], semanticDescription: "Server-defined method", maximumQueryLength: 17)
         var options = SearchOptions()
         options.reconcile(caps, preferences: nil)
