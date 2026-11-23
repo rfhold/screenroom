@@ -7,7 +7,7 @@ for profile in mobile tv; do
   if [[ $profile == tv ]]; then app_id=tv.screenroom.tv; fi
   grep -Fq "applicationId = \"$app_id\"" "$ROOT/$profile/build.gradle.kts"
   namespace="org.screenroom.$profile.e2e"
-  source="$ROOT/$profile/src/androidTest/kotlin/${namespace//./\/}/HomeE2ETest.kt"
+  source="$ROOT/$profile/src/androidTest/kotlin/org/screenroom/$profile/e2e/HomeE2ETest.kt"
   grep -Fxq "package $namespace" "$source"
   grep -Fq 'class HomeE2ETest' "$source"
 done
