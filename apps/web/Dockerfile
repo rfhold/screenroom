@@ -1,5 +1,5 @@
 FROM node:24-bookworm-slim AS node
-FROM rust:1.98-trixie AS build
+FROM rust:1.98-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS build
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /opt/npm
 ENV PATH="/opt/pnpm/bin:${PATH}" SCREENROOM_CORE_PROFILE=release VITE_SCREENROOM_SAME_ORIGIN=1
