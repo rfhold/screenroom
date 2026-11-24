@@ -125,7 +125,14 @@ impl UserService {
             };
             tokio::select! {
                 _ = stop.changed() => return,
-                _ = tokio::time::timeout(Duration::from_secs(240), sweep) => {}
+                result = tokio::time::timeout(Duration::from_secs(240), sweep) => {
+                    let reason = match result {
+                        Ok(Ok(())) => continue,
+                        Ok(Err(_)) => "binding_list_unavailable",
+                        Err(_) => "sweep_timeout",
+                    };
+                    tracing::warn!(reason, "watched refresh unavailable; retained observations expire normally");
+                }
             }
         }
     }

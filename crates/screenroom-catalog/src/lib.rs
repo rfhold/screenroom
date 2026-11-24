@@ -20,6 +20,7 @@ pub struct Catalog {
     pub(crate) storage: Option<ObjectStorage>,
     pub(crate) origin: String,
     pub(crate) user_uri: Option<String>,
+    pub(crate) progress_channel: std::sync::Arc<std::sync::OnceLock<tonic::transport::Channel>>,
     pub(crate) embedding: Option<screenroom_backend::embedding::EmbeddingClient>,
 }
 
@@ -54,6 +55,7 @@ impl Catalog {
             storage,
             origin: origin.trim_end_matches('/').into(),
             user_uri,
+            progress_channel: Default::default(),
             embedding: None,
         })
     }

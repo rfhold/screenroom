@@ -60,6 +60,12 @@ pub struct CatalogItem {
     pub metadata: Value,
     pub provenance: Value,
 }
+#[derive(FromRow)]
+struct ReferencedItem {
+    ordinal: i64,
+    #[sqlx(flatten)]
+    item: CatalogItem,
+}
 #[derive(Debug, Clone, FromRow)]
 pub struct ItemContext {
     pub source_item_id: Uuid,
@@ -271,6 +277,19 @@ impl CatalogRepository {
         Ok(sqlx::query_as("SELECT l.* FROM catalog.libraries l JOIN catalog.sources s ON s.id=l.source_id WHERE s.state='enabled' AND l.state='enabled' AND (cardinality($1::text[])=0 OR s.source_key=ANY($1)) AND (cardinality($2::text[])=0 OR l.public_id=ANY($2)) AND (cardinality($3::text[])=0 OR s.provider=ANY($3)) ORDER BY l.public_id,s.source_key")
             .bind(&scope.source_keys).bind(&scope.library_ids).bind(&scope.providers).fetch_all(&self.pool).await?)
     }
+    pub async fn library_page(
+        &self,
+        scope: &Scope,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<Library>> {
+        scope.validate()?;
+        if !(1..=201).contains(&limit) {
+            return Err(Error::Invalid("limit"));
+        }
+        Ok(sqlx::query_as("SELECT DISTINCT ON (l.public_id COLLATE \"C\") l.* FROM catalog.libraries l JOIN catalog.sources s ON s.id=l.source_id WHERE s.state='enabled' AND l.state='enabled' AND (cardinality($1::text[])=0 OR s.source_key=ANY($1)) AND (cardinality($2::text[])=0 OR l.public_id=ANY($2)) AND (cardinality($3::text[])=0 OR s.provider=ANY($3)) AND ($4::text IS NULL OR l.public_id COLLATE \"C\">$4) ORDER BY l.public_id COLLATE \"C\",s.source_key,l.id LIMIT $5")
+            .bind(&scope.source_keys).bind(&scope.library_ids).bind(&scope.providers).bind(after).bind(i64::from(limit)).fetch_all(&self.pool).await?)
+    }
     pub async fn list(
         &self,
         scope: &Scope,
@@ -326,6 +345,26 @@ impl CatalogRepository {
             .fetch_optional(&self.pool)
             .await?)
     }
+    pub async fn get_ranked(&self, scope: &Scope, ids: &[String]) -> Result<Vec<CatalogItem>> {
+        scope.validate()?;
+        if ids.len() > 200 {
+            return Err(Error::Invalid("ranked results"));
+        }
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let sql = format!(
+            "{ELIGIBLE} SELECT {ITEM_COLUMNS} FROM eligible JOIN unnest($5::text[]) WITH ORDINALITY AS ranked(ranked_id, rank) ON ranked.ranked_id=public_id WHERE precedence=1 ORDER BY ranked.rank"
+        );
+        Ok(sqlx::query_as(&sql)
+            .bind(&scope.source_keys)
+            .bind(&scope.library_ids)
+            .bind(&scope.providers)
+            .bind(&scope.kinds)
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await?)
+    }
     pub async fn resolve_reference(
         &self,
         scope: &Scope,
@@ -345,6 +384,47 @@ impl CatalogRepository {
             .bind(external_id)
             .fetch_optional(&self.pool)
             .await?)
+    }
+    pub async fn resolve_references(
+        &self,
+        scope: &Scope,
+        references: &[(String, String)],
+    ) -> Result<Vec<(usize, CatalogItem)>> {
+        scope.validate()?;
+        if references.len() > 50 {
+            return Err(Error::Invalid("source references"));
+        }
+        if references.is_empty() {
+            return Ok(vec![]);
+        }
+        let (sources, items): (Vec<_>, Vec<_>) = references.iter().cloned().unzip();
+        let sql = format!(
+            "{ELIGIBLE}, canonical AS (
+            SELECT {ITEM_COLUMNS} FROM eligible WHERE precedence=1
+        ) SELECT r.ordinal, c.*
+          FROM unnest($5::text[], $6::text[]) WITH ORDINALITY AS r(ref_source, ref_item, ordinal)
+          JOIN eligible e ON e.source_key=r.ref_source AND e.external_id=r.ref_item
+          JOIN canonical c ON c.public_id=e.public_id
+          ORDER BY r.ordinal"
+        );
+        let rows: Vec<ReferencedItem> = sqlx::query_as(&sql)
+            .bind(&scope.source_keys)
+            .bind(&scope.library_ids)
+            .bind(&scope.providers)
+            .bind(&scope.kinds)
+            .bind(sources)
+            .bind(items)
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let index = usize::try_from(row.ordinal - 1)
+                    .ok()
+                    .filter(|&index| index < references.len())
+                    .ok_or(Error::Invalid("source reference ordinal"))?;
+                Ok((index, row.item))
+            })
+            .collect()
     }
     pub async fn children(
         &self,

@@ -2,7 +2,9 @@ use crate::{PlaybackService, fences::CleanupFence, records};
 use screenroom_backend::{
     config::ServiceDatabaseConfig,
     connections::{ConnectionRepository, CredentialDirectory},
-    playback::{Cleanup, PlaybackRepository, secrets::PlaybackSecrets},
+    playback::{
+        Cleanup, PlaybackRepository, holds_gateway_lock, secrets::PlaybackSecrets, try_gateway_lock,
+    },
 };
 use screenroom_catalog_adapter::jellyfin::playback as provider;
 use std::{
@@ -108,6 +110,9 @@ async fn check_ownership(
         return Err(provider::DispatchDenial::Revoked);
     }
     if let Err(failure) = probe.await {
+        if failure.cause == "mutex_wait_timeout" {
+            return Err(provider::DispatchDenial::Unavailable);
+        }
         if !stopping.swap(true, Ordering::AcqRel) {
             tracing::error!(
                 component = "playback_ownership",
@@ -148,15 +153,47 @@ impl RuntimeOwnership {
         &self,
         purpose: provider::DispatchPurpose,
     ) -> Result<(), provider::DispatchDenial> {
-        check_ownership(
-            &self.stopping,
-            purpose,
-            ownership_probe(self.connection.lock(), |mut connection| async move {
-                sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=1935897197 AND objid=1 AND objsubid=2 AND granted)")
-                    .fetch_one(&mut **connection).await.map_err(|error|sqlstate(&error))
-            }),
-        ).await
+        check_ownership(&self.stopping, purpose, self.probe()).await
     }
+
+    async fn probe(&self) -> Result<(), OwnershipFailure> {
+        ownership_probe(self.connection.lock(), |mut connection| async move {
+            holds_gateway_lock(&mut connection)
+                .await
+                .map_err(|error| sqlstate(&error))
+        })
+        .await
+    }
+
+    async fn watchdog_healthy(&self) -> bool {
+        watchdog_healthy(&self.stopping, self.probe()).await
+    }
+
+    pub(crate) async fn recover_abandoned(&self) -> screenroom_backend::Result<u64> {
+        let mut connection = self.connection.lock().await;
+        PlaybackRepository::recover_abandoned(&mut connection).await
+    }
+
+    pub(crate) async fn connection(
+        &self,
+    ) -> screenroom_backend::Result<
+        tokio::sync::MutexGuard<'_, sqlx::pool::PoolConnection<sqlx::Postgres>>,
+    > {
+        tokio::time::timeout(Duration::from_millis(500), self.connection.lock())
+            .await
+            .map_err(|_| screenroom_backend::Error::Unavailable)
+    }
+}
+
+async fn watchdog_healthy(
+    stopping: &std::sync::atomic::AtomicBool,
+    probe: impl Future<Output = Result<(), OwnershipFailure>>,
+) -> bool {
+    if stopping.load(Ordering::Acquire) {
+        return false;
+    }
+    let outcome = check_ownership(stopping, provider::DispatchPurpose::Active, probe).await;
+    outcome != Err(provider::DispatchDenial::Revoked) && !stopping.load(Ordering::Acquire)
 }
 
 impl RuntimeConfig {
@@ -266,7 +303,16 @@ impl PlaybackService {
 
     async fn cleanup_batch(&self, limit: usize) {
         for _ in 0..limit {
-            let job = match self.repository.claim_cleanup().await {
+            let claim = match &self.ownership {
+                Some(owner) => match owner.connection().await {
+                    Ok(mut connection) => {
+                        PlaybackRepository::claim_cleanup_owned(&mut connection).await
+                    }
+                    Err(error) => Err(error),
+                },
+                None => self.repository.claim_cleanup().await,
+            };
+            let job = match claim {
                 Ok(Some(job)) => job,
                 Ok(None) => break,
                 Err(_) => {
@@ -324,20 +370,12 @@ impl PlaybackService {
 
     pub(crate) async fn maintain(&self) {
         let _ = self.repository.expire().await;
-        let transports: Vec<_> = self
-            .transports
-            .read()
-            .await
-            .iter()
-            .map(|(key, transport)| (*key, transport.clone()))
-            .collect();
-        for ((id, revision), transport) in transports {
-            if self
-                .repository
-                .media(id, revision, &transport.media_capability, transport.root)
-                .await
-                .is_err()
-            {
+        let transports: Vec<_> = self.transports.read().await.keys().copied().collect();
+        for (id, revision) in transports {
+            if matches!(
+                self.repository.transport_retired(id, revision).await,
+                Ok(true)
+            ) {
                 self.transports.write().await.remove(&(id, revision));
             }
         }
@@ -346,22 +384,39 @@ impl PlaybackService {
             .await
             .retain(|_, lock| lock.strong_count() > 0);
         let meter = opentelemetry::global::meter("screenroom-playback-gateway");
-        if let Ok((active, pending, claimed, failed)) = self.repository.telemetry_counts().await {
+        if let Ok(counts) = self.repository.telemetry_counts().await {
             meter
                 .u64_gauge("playback.sessions.active")
                 .build()
-                .record(active as u64, &[]);
+                .record(counts.active as u64, &[]);
             let backlog = meter.u64_gauge("playback.cleanup.backlog").build();
             for (state, value) in [
-                ("pending", pending),
-                ("claimed", claimed),
-                ("failed", failed),
+                ("pending", counts.pending),
+                ("claimed", counts.claimed),
+                ("failed", counts.failed),
+                ("device_blocked_by_failed_encoding", counts.blocked_device),
             ] {
                 backlog.record(
                     value as u64,
                     &[opentelemetry::KeyValue::new("state", state)],
                 );
             }
+            let failures = meter.u64_gauge("playback.cleanup.failures").build();
+            for (reason, value) in [
+                ("identity_changed", counts.identity_changed),
+                ("attempts_exhausted", counts.attempts_exhausted),
+                ("upstream_unavailable", counts.upstream_unavailable),
+            ] {
+                failures.record(
+                    value as u64,
+                    &[opentelemetry::KeyValue::new("reason", reason)],
+                );
+            }
+            meter
+                .f64_gauge("playback.cleanup.oldest_failed_age")
+                .with_unit("s")
+                .build()
+                .record(counts.oldest_failed_seconds.max(0.0), &[]);
         }
         let transports = self.transports.read().await;
         let methods = meter.u64_gauge("playback.transports.active").build();
@@ -420,9 +475,8 @@ pub async fn run(
         return Err("restricted playback database role required".into());
     }
     let mut ownership = pool.acquire().await?;
-    let exclusive: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock(1935897197,1)")
-        .fetch_one(&mut *ownership)
-        .await?;
+    ownership.close_on_drop();
+    let exclusive = try_gateway_lock(&mut ownership).await?;
     if !exclusive {
         return Err("playback gateway already active".into());
     }
@@ -438,7 +492,7 @@ pub async fn run(
     let ownership = Arc::new(RuntimeOwnership::new(ownership, service.stopping.clone()));
     service.ownership = Some(ownership.clone());
     // Ownership is held before cleanup-only recovery and before binding/readiness.
-    service.repository.recover_abandoned().await?;
+    ownership.recover_abandoned().await?;
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     let (stop, mut stopped) = tokio::sync::watch::channel(false);
     let mut cleanup_stopped = stop.subscribe();
@@ -469,7 +523,7 @@ pub async fn run(
             tokio::select! {
                 _=&mut shutdown=>break "shutdown_signal",
                 _=tokio::time::sleep(Duration::from_secs(1))=>{
-                    if monitor.check(provider::DispatchPurpose::Active).await.is_err() {break "ownership_watchdog";}
+                    if !monitor.watchdog_healthy().await {break "ownership_watchdog";}
                 }
             }
         };
@@ -527,8 +581,7 @@ pub async fn run(
                         .map_err(records::database)?;
                 }
             }
-            service
-                .repository
+            ownership
                 .recover_abandoned()
                 .await
                 .map_err(records::database)?;
@@ -552,6 +605,24 @@ pub async fn run(
 mod ownership_tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    #[tokio::test]
+    async fn watchdog_stops_after_ownership_failure_even_if_next_probe_could_succeed() {
+        let stopping = AtomicBool::new(false);
+        assert!(
+            !watchdog_healthy(&stopping, async {
+                stopping.store(true, Ordering::Release);
+                Ok(())
+            })
+            .await
+        );
+        assert!(
+            !watchdog_healthy(&stopping, async {
+                panic!("latched shutdown must not probe ownership")
+            })
+            .await
+        );
+    }
 
     #[tokio::test]
     async fn ownership_wait_and_query_timeouts_are_distinct_and_share_500ms() {
@@ -596,6 +667,24 @@ mod ownership_tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn local_ownership_contention_denies_dispatch_without_latching_shutdown() {
+        let stopping = AtomicBool::new(false);
+        let result = check_ownership(
+            &stopping,
+            provider::DispatchPurpose::Active,
+            std::future::ready(Err(OwnershipFailure {
+                cause: "mutex_wait_timeout",
+                sqlstate: None,
+                wait_ms: 500,
+                elapsed_ms: 500,
+            })),
+        )
+        .await;
+        assert_eq!(result, Err(provider::DispatchDenial::Unavailable));
+        assert!(!stopping.load(Ordering::Acquire));
     }
 
     #[tokio::test]

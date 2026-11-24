@@ -18,6 +18,16 @@ use std::{
 };
 use tokio::sync::{Mutex, oneshot};
 
+async fn recover_abandoned(pool: &sqlx::PgPool) {
+    use screenroom_backend::playback::{PlaybackRepository, try_gateway_lock};
+    let mut connection = pool.acquire().await.unwrap();
+    connection.close_on_drop();
+    assert!(try_gateway_lock(&mut connection).await.unwrap());
+    PlaybackRepository::recover_abandoned(&mut connection)
+        .await
+        .unwrap();
+}
+
 #[derive(Default)]
 struct FaultProvider {
     requests: Mutex<Vec<(String, String, Vec<u8>)>>,
@@ -689,6 +699,61 @@ async fn losing_exclusive_runtime_ownership_revokes_dispatch_before_watchdog() {
 
 #[tokio::test]
 #[ignore = "database tests explicitly UNRUN; requires separately approved disposable PostgreSQL"]
+async fn former_owner_cannot_recover_successor_sessions() {
+    use playback_service_server::PlaybackService as _;
+    use screenroom_backend::{Error, playback::try_gateway_lock};
+
+    let f = Fixture::new().await;
+    let former = {
+        let mut connection = f.runtime.acquire().await.unwrap();
+        connection.close_on_drop();
+        assert!(try_gateway_lock(&mut connection).await.unwrap());
+        crate::runtime::RuntimeOwnership::new(connection, Arc::new(AtomicBool::new(false)))
+    };
+    former.unlock_for_test().await;
+
+    let mut connection = f.runtime.acquire().await.unwrap();
+    connection.close_on_drop();
+    assert!(try_gateway_lock(&mut connection).await.unwrap());
+    let mut successor = f.service.clone();
+    let owned = Arc::new(crate::runtime::RuntimeOwnership::new(
+        connection,
+        successor.stopping.clone(),
+    ));
+    assert_eq!(owned.recover_abandoned().await.unwrap(), 0);
+    successor.ownership = Some(owned);
+    successor
+        .create_playback_session(f.request(f.create()))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        former.recover_abandoned().await,
+        Err(Error::Stale)
+    ));
+    {
+        let mut connection = former.connection().await.unwrap();
+        assert!(matches!(
+            screenroom_backend::playback::PlaybackRepository::claim_cleanup_owned(&mut connection)
+                .await,
+            Err(Error::Stale)
+        ));
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM playback.sessions")
+            .fetch_one(&f.ddl)
+            .await
+            .unwrap(),
+        "ready"
+    );
+
+    drop(former);
+    drop(successor);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "database tests explicitly UNRUN; requires separately approved disposable PostgreSQL"]
 async fn lost_exchange_restart_cleans_exact_owned_device_after_source_disable_without_auth_replay()
 {
     use playback_service_server::PlaybackService as _;
@@ -729,7 +794,7 @@ async fn lost_exchange_restart_cleans_exact_owned_device_after_source_disable_wi
         .execute(&f.ddl)
         .await
         .unwrap();
-    f.service.repository.recover_abandoned().await.unwrap();
+    recover_abandoned(&f.runtime).await;
     assert_eq!(f.provider.requests.lock().await.len(), before);
     f.service.cleanup_once().await;
     let requests = f.provider.requests.lock().await;
@@ -814,7 +879,7 @@ async fn crash_before_first_publication_replays_stable_terminal_failure_without_
         // Process loss after committed intent but before the first private publication.
         assert!(f.service.secrets.read(created.session.replay_ref).is_err());
         if recover_first {
-            f.service.repository.recover_abandoned().await.unwrap();
+            recover_abandoned(&f.runtime).await;
         }
         for _ in 0..2 {
             let error = f

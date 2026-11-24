@@ -28,14 +28,15 @@ From the repository root, these commands select source-defined checks:
 ```sh
 cargo fmt --all -- --check
 cargo test --locked -p screenroom-catalog-adapter --lib
-python3 scripts/backend-lifecycle-tests.py
+just backend-test
 node --test scripts/test-e2e-orchestration.mjs
 pnpm check:client-boundary
 pnpm test:client-boundary
 ```
 
 Rust tests create build outputs and can use isolated local HTTP/filesystem state.
-The lifecycle tests require Python 3 and PyYAML `6.0.3` for local Compose-source parsing.
+`just backend-test` runs stubbed shell checks, lifecycle tests, and offline packaging checks.
+It uses Bash, `jq`, Python 3, and PyYAML `6.0.3`.
 The lifecycle and orchestration tests check construction and isolation; they do not establish a live Compose deployment.
 The [client-boundary guard](../scripts/check-client-boundary.mjs) checks production source/resources across all four client families.
 Its [tests](../scripts/test-client-boundary.mjs) verify detection rules; test support and the separate website remain outside the production scan.
@@ -62,7 +63,7 @@ cargo test --locked -p screenroom-client-core
 buf lint
 python3 scripts/generate-client-models.py --check
 python3 scripts/test-generate-client-models.py
-python3 scripts/backend-lifecycle-tests.py
+just backend-test
 pnpm --filter @screenroom/web test:playback
 node --test apps/web/tests/watched.test.mjs
 ```
@@ -219,7 +220,7 @@ Use `SCREENROOM_USER_ID` for an actual enabled local user, not a demo UUID or au
 Set `SCREENROOM_API_ENDPOINT` explicitly to `http://127.0.0.1:<port>`, with a port from 1024 through 65535.
 If `SCREENROOM_E2E_API_ENDPOINT` exists, keep it identical to that endpoint.
 The [backend roundtrip tests](../crates/screenroom-backend-tests/tests/roundtrip.rs) also require Python 3, `grpcurl`, and Buf on `PATH`.
-Their subprocess invokes the [backend contract helper](../scripts/backend-contract.py) for native/gRPC-Web and private-route checks.
+Their subprocess invokes the [backend contract helper](../scripts/backend-contract.sh) for native/gRPC-Web and private-route checks.
 It uses the supplied user selector, not a substitute installation identity.
 
 ### Empty installation
@@ -330,7 +331,7 @@ Toolchain builds and binding generation do not establish simulator, device, or p
 The runner retains per-family logs, exit status, category, and measured durations under `build/e2e/runs/`.
 Each `.summary` records those fields; GNU timeout bounds family suites to 40 minutes with a 20-second kill grace.
 Preserve useful failure logs and captures; avoid credentials, private URLs, key files, and raw upstream responses in shared artifacts.
-The [backend contract helper](../scripts/backend-contract.py) compares native/gRPC-Web reads and public/private route separation on an approved live instance.
+The [backend contract helper](../scripts/backend-contract.sh) compares native/gRPC-Web reads and public/private route separation on an approved live instance.
 It accepts an empty catalog and does not establish populated provider acceptance or semantic/artwork completeness.
 
 With separate authority for website file changes, the default browse showcase export uses:

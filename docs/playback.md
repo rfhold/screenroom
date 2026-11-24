@@ -181,6 +181,9 @@ Capacity failures never silently stop another session.
 Player exit or profile change stops playback.
 A reload starts without playback authority.
 Restart recovery performs cleanup, not playback replay.
+Only the gateway that holds the installation lock can classify abandoned sessions or claim cleanup work.
+On lock loss, the former owner closes local admission. The successor classifies abandoned sessions before readiness.
+A failed database check denies media access but does not retire the process-local transport.
 
 Preparation has a separate bounded 30-second client deadline.
 Control I/O and individual cleanup attempts have separate 10-second bounds.

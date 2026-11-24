@@ -1,49 +1,66 @@
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode},
-};
-use http_body_util::BodyExt;
 use screenroom_backend::{
     db::MIGRATOR,
     sqlx::{self, postgres::PgPoolOptions},
 };
-use screenroom_index_operator::{Operator, Origin};
+use screenroom_index_operator::Operator;
+use screenroom_proto::operator::v1::{
+    OperatorPage, OperatorRequest, OperatorResponse, operator_service_client::OperatorServiceClient,
+};
 use serde_json::{Value, json};
-use tower::ServiceExt;
 use uuid::Uuid;
 
-const ORIGIN: &str = "http://127.0.0.1:50072";
-fn app(pool: sqlx::PgPool) -> Router {
-    Operator::new(pool, Origin::parse(ORIGIN).unwrap()).router()
+use tonic::{
+    Code, Response, Status,
+    transport::{Channel, Endpoint},
+};
+
+async fn start_operator(
+    operator: Operator,
+) -> (
+    OperatorServiceClient<Channel>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint =
+        Endpoint::from_shared(format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let (stop, shutdown) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(screenroom_index_operator::serve(
+        operator,
+        listener,
+        async {
+            let _ = shutdown.await;
+        },
+        vec![],
+    ));
+    (
+        OperatorServiceClient::new(endpoint.connect().await.unwrap()),
+        stop,
+        server,
+    )
 }
-fn lazy() -> sqlx::PgPool {
-    PgPoolOptions::new()
-        .connect_lazy("postgres://localhost/never_connect")
-        .unwrap()
+
+fn body(json: &Value) -> OperatorRequest {
+    OperatorRequest {
+        payload_json: serde_json::to_vec(json).unwrap(),
+        ..Default::default()
+    }
 }
-async fn call(app: &Router, method: &str, path: &str, body: Value) -> (StatusCode, Value) {
-    let request = Request::builder()
-        .method(method)
-        .uri(path)
-        .header("host", "127.0.0.1:50072")
-        .header("origin", ORIGIN)
-        .header("content-type", "application/json")
-        .body(if method == "GET" {
-            Body::empty()
-        } else {
-            Body::from(body.to_string())
-        })
-        .unwrap();
-    let response = app.clone().oneshot(request).await.unwrap();
-    let status = response.status();
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    (status, serde_json::from_slice(&bytes).unwrap())
+
+fn page(limit: u32) -> OperatorPage {
+    OperatorPage {
+        limit,
+        ..Default::default()
+    }
+}
+
+fn payload(result: Result<Response<OperatorResponse>, Status>) -> Value {
+    serde_json::from_slice(&result.unwrap().into_inner().payload_json).unwrap()
 }
 
 #[tokio::test]
 #[ignore = "requires task-owned SCREENROOM_OPERATOR_TEST_DATABASE_URL"]
-async fn postgres_managed_connection_http_contract() {
+async fn postgres_managed_connection_rpc_contract() {
     use screenroom_backend::connections::{ConnectionRepository, CredentialDirectory};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let admin =
@@ -78,19 +95,22 @@ async fn postgres_managed_connection_http_contract() {
         .canonicalize()
         .unwrap()
         .join(format!("operator-keys-{}", Uuid::new_v4()));
-    let app = Operator::new(runtime.clone(), Origin::parse(ORIGIN).unwrap())
-        .with_connections(ConnectionRepository::new(
-            runtime.clone(),
-            Some(CredentialDirectory::new(directory.clone()).unwrap()),
-        ))
-        .router();
-    assert_eq!(
-        call(&app, "GET", "/api/health", json!({})).await.0,
-        StatusCode::OK
+    let operator = Operator::new_rpc(runtime.clone()).with_connections(ConnectionRepository::new(
+        runtime.clone(),
+        Some(CredentialDirectory::new(directory.clone()).unwrap()),
+    ));
+    let (mut rpc, stop_rpc, rpc_server) = start_operator(operator).await;
+    assert!(rpc.health(OperatorRequest::default()).await.is_ok());
+    let list = OperatorRequest {
+        page: Some(page(100)),
+        ..Default::default()
+    };
+    assert!(
+        payload(rpc.list_connections(list.clone()).await)["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
-    let (status, empty) = call(&app, "GET", "/api/connections/jellyfin", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(empty["items"].as_array().unwrap().is_empty());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -136,14 +156,7 @@ async fn postgres_managed_connection_http_contract() {
         }
     });
     let prospective = json!({"base_url":url,"api_key":"operator-owned-key"});
-    let (status, discovery) = call(
-        &app,
-        "POST",
-        "/api/connections/jellyfin/discover",
-        prospective.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
+    let discovery = payload(rpc.discover_connection(body(&prospective)).await);
     assert_eq!(discovery["server"]["id"], "operator-server");
     assert_eq!(discovery["profiles"][0]["id"], "selected");
     assert!(!directory.exists());
@@ -157,23 +170,14 @@ async fn postgres_managed_connection_http_contract() {
     let save = json!({"request_id":Uuid::new_v4(),"base_url":url,"api_key":"operator-owned-key","server_id":"operator-server","profile_id":"selected","library_ids":["movies"],"local_user_id":local,"refresh":false});
     let mut oversized = save.clone();
     oversized["library_ids"] = json!((0..33).map(|i| format!("library-{i}")).collect::<Vec<_>>());
-    assert_eq!(
-        call(&app, "POST", "/api/connections/jellyfin", oversized).await,
-        (
-            StatusCode::BAD_REQUEST,
-            json!({"error":{"code":"selection_capacity"}})
-        )
-    );
+    let rejected = rpc.save_connection(body(&oversized)).await.unwrap_err();
+    assert_eq!(rejected.code(), Code::InvalidArgument);
+    assert_eq!(rejected.message(), "selection_capacity");
     assert!(!directory.exists());
-    let (status, saved) = call(&app, "POST", "/api/connections/jellyfin", save.clone()).await;
-    assert_eq!(status, StatusCode::OK, "{saved}");
+    let saved = payload(rpc.save_connection(body(&save)).await);
     assert!(saved["run_id"].is_null());
-    assert_eq!(
-        call(&app, "POST", "/api/connections/jellyfin", save).await,
-        (StatusCode::OK, saved.clone())
-    );
-    let (status, listed) = call(&app, "GET", "/api/connections/jellyfin", json!({})).await;
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payload(rpc.save_connection(body(&save)).await), saved);
+    let listed = payload(rpc.list_connections(list).await);
     assert_eq!(listed["items"].as_array().unwrap().len(), 1);
     for dto in [&saved, &listed] {
         let text = dto.to_string();
@@ -189,29 +193,19 @@ async fn postgres_managed_connection_http_contract() {
         }
     }
     let source = saved["connection"]["source_id"].as_str().unwrap();
-    let (_, policies) = call(
-        &app,
-        "GET",
-        &format!("/api/indexing/sources/{source}/policies"),
-        json!({}),
-    )
-    .await;
+    let policies = payload(
+        rpc.list_policies(OperatorRequest {
+            source_id: source.into(),
+            page: Some(page(100)),
+            ..Default::default()
+        })
+        .await,
+    );
     assert_eq!(policies["items"].as_array().unwrap().len(), 1);
     assert!(
         policies["items"][0]["configuration"]
             .get("operator_profile_id")
             .is_none()
-    );
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            &format!("/api/sources/{source}/start"),
-            json!({})
-        )
-        .await
-        .0,
-        StatusCode::NOT_FOUND
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM queue.jobs")
@@ -220,6 +214,9 @@ async fn postgres_managed_connection_http_contract() {
             .unwrap(),
         0
     );
+    drop(rpc);
+    stop_rpc.send(()).unwrap();
+    rpc_server.await.unwrap().unwrap();
     runtime.close().await;
     pool.close().await;
     server.abort();
@@ -237,184 +234,8 @@ async fn postgres_managed_connection_http_contract() {
     std::fs::remove_dir(directory).unwrap();
 }
 #[tokio::test]
-async fn deny_before_parsing_or_database() {
-    let app = app(lazy());
-    for (host, origin, method) in [
-        (Some("evil.example"), Some(ORIGIN), "GET"),
-        (None, Some(ORIGIN), "GET"),
-        (Some("127.0.0.1:50072"), Some("null"), "GET"),
-        (
-            Some("127.0.0.1:50072"),
-            Some("http://localhost:4173"),
-            "GET",
-        ),
-        (Some("127.0.0.1:50072"), None, "POST"),
-        (Some("127.0.0.1:50072"), Some("http://evil.example"), "POST"),
-    ] {
-        let mut req = Request::builder().method(method).uri("/api/health");
-        if let Some(host) = host {
-            req = req.header("host", host);
-        }
-        if let Some(origin) = origin {
-            req = req.header("origin", origin);
-        }
-        assert_eq!(
-            app.clone()
-                .oneshot(req.body(Body::from("invalid-json")).unwrap())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    for duplicate in ["host", "origin"] {
-        let req = Request::builder()
-            .uri("/api/health")
-            .header("host", "127.0.0.1:50072")
-            .header("origin", ORIGIN)
-            .header(
-                duplicate,
-                if duplicate == "host" {
-                    "127.0.0.1:50072"
-                } else {
-                    ORIGIN
-                },
-            )
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    for site in ["cross-site", "same-site"] {
-        let req = Request::builder()
-            .uri("/api/health")
-            .header("host", "127.0.0.1:50072")
-            .header("sec-fetch-site", site)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::FORBIDDEN
-        );
-    }
-    for ct in [
-        None,
-        Some("text/plain"),
-        Some("application/json; charset=utf-8"),
-    ] {
-        let mut req = Request::builder()
-            .method("POST")
-            .uri("/api/sources/bad/status")
-            .header("host", "127.0.0.1:50072")
-            .header("origin", ORIGIN);
-        if let Some(ct) = ct {
-            req = req.header("content-type", ct);
-        }
-        assert_eq!(
-            app.clone()
-                .oneshot(req.body(Body::from("{}")).unwrap())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::UNSUPPORTED_MEDIA_TYPE
-        );
-    }
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/sources/bad/status")
-        .header("host", "127.0.0.1:50072")
-        .header("origin", ORIGIN)
-        .header("content-type", "application/json")
-        .body(Body::from(vec![b' '; 65537]))
-        .unwrap();
-    assert_eq!(
-        app.clone().oneshot(req).await.unwrap().status(),
-        StatusCode::PAYLOAD_TOO_LARGE
-    );
-    for path in [
-        "/assets/../secret.js",
-        "/assets/%2e%2e/secret.js",
-        "/assets/%252e%252e/secret.js",
-        "/api/sources?limit=1001",
-        "/api/sources?limit=0",
-        "/api/sources?unknown=1",
-    ] {
-        assert_eq!(
-            call(&app, "GET", path, Value::Null).await.0,
-            StatusCode::BAD_REQUEST
-        );
-    }
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            "/api/indexing/sources/00000000-0000-0000-0000-000000000001/start",
-            json!({"trigger":"scheduled"})
-        )
-        .await
-        .0,
-        StatusCode::BAD_REQUEST
-    );
-}
-#[test]
-fn exact_loopback_origin() {
-    for origin in [
-        "http://127.0.0.1:50072",
-        "http://localhost:50072",
-        "http://[::1]:50072",
-    ] {
-        assert!(Origin::parse(origin).is_ok(), "{origin}");
-    }
-    for origin in [
-        "http://127.0.0.1:4173",
-        "http://localhost:99999",
-        "http://localhost:0",
-        "http://evil.example",
-        "https://localhost:50072",
-        "http://localhost:50072/",
-        "http://localhost:50072/path",
-        "http://user@localhost:50072",
-        "http://localhost:50072#x",
-        "null",
-    ] {
-        assert!(Origin::parse(origin).is_err(), "{origin}");
-    }
-}
-#[tokio::test]
-async fn api_only_paths() {
-    let app = app(lazy());
-    for path in [
-        "/",
-        "/index.html",
-        "/assets/index.js",
-        "/assets/index.css",
-        "/private.js",
-        "/arbitrary",
-    ] {
-        for method in ["GET", "POST"] {
-            let (status, body) = call(&app, method, path, json!({})).await;
-            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {path}");
-            assert_eq!(body["error"]["code"], "not_found");
-        }
-        let request = Request::builder()
-            .method("HEAD")
-            .uri(path)
-            .header("host", "127.0.0.1:50072")
-            .header("origin", ORIGIN)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.clone().oneshot(request).await.unwrap().status(),
-            StatusCode::NOT_FOUND
-        );
-    }
-}
-
-#[tokio::test]
 #[ignore = "requires task-owned disposable PostgreSQL 18 + pgvector SCREENROOM_OPERATOR_TEST_DATABASE_URL"]
-async fn postgres_http_contract() {
+async fn postgres_indexing_rpc_contract() {
     let admin = PgPoolOptions::new()
         .max_connections(4)
         .connect(&std::env::var("SCREENROOM_OPERATOR_TEST_DATABASE_URL").unwrap())
@@ -441,57 +262,42 @@ async fn postgres_http_contract() {
     .unwrap();
     let si:Uuid=sqlx::query_scalar("INSERT INTO catalog.source_items(source_id,item_id,external_id,metadata,content_hash) VALUES($1,$2,'private-provider-id','{}',decode(repeat('00',32),'hex')) RETURNING id").bind(source).bind(item).fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO catalog.library_items(library_id,source_item_id,source_id,last_seen_run_id) SELECT id,$2,$1,$3 FROM catalog.libraries WHERE source_id=$1").bind(source).bind(si).bind(Uuid::new_v4()).execute(&pool).await.unwrap();
-    let app = app(pool.clone());
-    let base = format!("/api/sources/{source}");
-    for route in ["policies", "preview", "status", "start", "runs"] {
-        for method in ["GET", "POST"] {
-            assert_eq!(
-                call(&app, method, &format!("{base}/{route}"), json!({}))
-                    .await
-                    .0,
-                StatusCode::NOT_FOUND
-            );
-        }
-    }
+    let (mut rpc, stop_rpc, rpc_server) = start_operator(Operator::new_rpc(pool.clone())).await;
     let legacy_policy:Uuid=sqlx::query_scalar("INSERT INTO ingest.policies(source_id,selection_json,max_items,max_requests,incremental_seconds,reconcile_seconds,enrich_metadata,enrich_people,enrich_artwork) VALUES($1,'{\"profile_id\":\"secret-profile\"}',100,100,60,60,false,false,true) RETURNING id").bind(source).fetch_one(&pool).await.unwrap();
     let legacy:screenroom_backend::ingest::Run=sqlx::query_as("INSERT INTO ingest.runs(policy_id,policy_version,policy_snapshot,selection_snapshot,source_id) SELECT id,version,to_jsonb(p),selection_json,source_id FROM ingest.policies p WHERE id=$1 RETURNING *")
         .bind(legacy_policy).fetch_one(&pool).await.unwrap();
-    let legacy_status = call(
-        &app,
-        "GET",
-        &format!("/api/indexing/sources/{source}/runs/{}", legacy.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(legacy_status.0, StatusCode::NOT_FOUND);
-    assert!(!legacy_status.1.to_string().contains("secret-profile"));
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            &format!("{base}/runs/{}/cancel", legacy.id),
-            json!({})
-        )
+    let legacy_request = OperatorRequest {
+        source_id: source.to_string(),
+        run_id: legacy.id.to_string(),
+        ..Default::default()
+    };
+    let legacy_error = rpc
+        .get_run_status(legacy_request.clone())
         .await
-        .1["error"]["code"],
-        "not_found"
+        .unwrap_err();
+    assert_eq!(legacy_error.code(), Code::NotFound);
+    assert!(!legacy_error.message().contains("secret-profile"));
+    let mut cancel = legacy_request;
+    cancel.payload_json = b"{}".to_vec();
+    assert_eq!(
+        rpc.cancel_run(cancel).await.unwrap_err().code(),
+        Code::NotFound
     );
     assert!(
-        call(
-            &app,
-            "GET",
-            &format!("/api/indexing/sources/{source}/runs"),
-            Value::Null
-        )
-        .await
-        .1["items"]
+        payload(
+            rpc.list_runs(OperatorRequest {
+                source_id: source.to_string(),
+                page: Some(page(100)),
+                ..Default::default()
+            })
+            .await
+        )["items"]
             .as_array()
             .unwrap()
             .is_empty()
     );
     let canonical_source:Uuid=sqlx::query_scalar("INSERT INTO catalog.sources(source_key,provider,configuration) VALUES('canonical-http','jellyfin','{\"adapter\":\"jellyfin\"}') RETURNING id").fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO catalog.libraries(source_id,public_id,external_id,title) VALUES($1,'a','private-a','A')").bind(canonical_source).execute(&pool).await.unwrap();
-    let generic = format!("/api/indexing/sources/{canonical_source}");
     screenroom_backend::indexing::IndexingRepository::new(pool.clone())
         .enroll_locator(canonical_source, &"0".repeat(64))
         .await
@@ -507,71 +313,72 @@ async fn postgres_http_contract() {
     let configuration = json!({"indexing":1,"enabled":true,"cadence_seconds":3600,"mode":"full","components":{"metadata":true,"artwork":false,"embeddings":false},"strategy":"all","scope":{"library_ids":["a"],"item_kinds":["movie","series"]},"limits":{"work_requests":10,"work_records":8,"lifetime_requests":100,"lifetime_records":100,"deadline_seconds":3600,"work_timeout_seconds":30}});
     let configure =
         json!({"request_id":Uuid::new_v4(),"existing":null,"configuration":configuration});
-    let (code, policy) = call(
-        &app,
-        "POST",
-        &format!("{generic}/policies"),
-        configure.clone(),
-    )
-    .await;
-    assert_eq!(code, StatusCode::OK);
+    let scoped = || OperatorRequest {
+        source_id: canonical_source.to_string(),
+        ..Default::default()
+    };
+    let write = |json: &Value| OperatorRequest {
+        payload_json: body(json).payload_json,
+        ..scoped()
+    };
+    let policy = payload(rpc.configure_policy(write(&configure)).await);
     assert_eq!(policy["automatic_runs"], false);
     assert!(!policy.to_string().contains("private-profile-sentinel"));
     assert!(policy.get("selection_json").is_none());
     let mut private_input = configure.clone();
     private_input["configuration"]["operator_profile_id"] = json!("private-profile-sentinel");
-    let (rejected, error) = call(&app, "POST", &format!("{generic}/policies"), private_input).await;
-    assert_eq!(rejected, StatusCode::BAD_REQUEST);
-    assert!(!error.to_string().contains("private-profile-sentinel"));
-    let listed = call(&app, "GET", &format!("{generic}/policies"), Value::Null)
+    let rejected = rpc
+        .configure_policy(write(&private_input))
         .await
-        .1;
+        .unwrap_err();
+    assert_eq!(rejected.code(), Code::InvalidArgument);
+    assert!(!rejected.message().contains("private-profile-sentinel"));
+    let listed = payload(
+        rpc.list_policies(OperatorRequest {
+            page: Some(page(100)),
+            ..scoped()
+        })
+        .await,
+    );
     assert!(!listed.to_string().contains("private-profile-sentinel"));
     assert!(!listed.to_string().contains("selection_json"));
     assert_eq!(
-        call(&app, "POST", &format!("{generic}/policies"), configure)
-            .await
-            .1,
+        payload(rpc.configure_policy(write(&configure)).await),
         policy
     );
-    let (code,run)=call(&app,"POST",&format!("{generic}/start"),json!({"request_id":Uuid::new_v4(),"policy_id":policy["id"],"policy_version":policy["version"],"scope":null})).await;
-    assert_eq!(code, StatusCode::OK);
+    let run = payload(rpc.start_run(write(&json!({"request_id":Uuid::new_v4(),"policy_id":policy["id"],"policy_version":policy["version"],"scope":null}))).await);
     let run_id = run["id"].as_str().unwrap();
+    let for_run = || OperatorRequest {
+        run_id: run_id.into(),
+        ..scoped()
+    };
     assert!(!run.to_string().contains("private-profile-sentinel"));
     assert!(run.get("policy_snapshot").is_none());
     assert!(run.get("trigger").is_none());
-    let history = call(&app, "GET", &format!("{generic}/runs?limit=1"), Value::Null)
-        .await
-        .1;
+    let history = payload(
+        rpc.list_runs(OperatorRequest {
+            page: Some(page(1)),
+            ..scoped()
+        })
+        .await,
+    );
     assert_eq!(history["items"][0]["id"], run_id);
     assert!(history["items"][0].get("trigger").is_none());
-    let detail = call(
-        &app,
-        "GET",
-        &format!("{generic}/runs/{run_id}"),
-        Value::Null,
-    )
-    .await
-    .1;
+    let detail = payload(rpc.get_run_status(for_run()).await);
     assert!(!detail.to_string().contains("private-profile-sentinel"));
-    let jobs = call(
-        &app,
-        "GET",
-        &format!("{generic}/runs/{run_id}/jobs"),
-        Value::Null,
-    )
-    .await
-    .1;
+    let jobs = payload(
+        rpc.list_jobs(OperatorRequest {
+            page: Some(page(100)),
+            ..for_run()
+        })
+        .await,
+    );
     assert_eq!(jobs["items"].as_array().unwrap().len(), 1);
     assert!(jobs["items"][0].get("input").is_none());
-    let diagnostics = call(
-        &app,
-        "POST",
-        "/api/indexing/queue",
-        json!({"run_id":run_id,"capabilities":null}),
-    )
-    .await
-    .1;
+    let diagnostics = payload(
+        rpc.observe_queue(body(&json!({"run_id":run_id,"capabilities":null})))
+            .await,
+    );
     assert!(diagnostics["queue"]["claimable"].is_null());
     assert!(diagnostics["blockers"]["capability"].is_null());
     assert_eq!(diagnostics["worker_liveness"], "unknown");
@@ -598,56 +405,36 @@ async fn postgres_http_contract() {
         )
         .await
         .unwrap();
-    let redrive = json!({"request_id":Uuid::new_v4()});
-    let route = format!("{generic}/runs/{run_id}/jobs/{}/redrive", claim.id);
-    let (code, receipt) = call(&app, "POST", &route, redrive.clone()).await;
-    assert_eq!(code, StatusCode::OK);
+    let for_job = || OperatorRequest {
+        job_id: claim.id.to_string(),
+        ..for_run()
+    };
+    let redrive = OperatorRequest {
+        payload_json: body(&json!({"request_id":Uuid::new_v4()})).payload_json,
+        ..for_job()
+    };
+    let receipt = payload(rpc.redrive_job(redrive.clone()).await);
     assert_eq!(receipt["generation"], 1);
-    assert_eq!(call(&app, "POST", &route, redrive).await.1, receipt);
-    let history = call(
-        &app,
-        "GET",
-        &format!("{generic}/runs/{run_id}/jobs/{}/attempts", claim.id),
-        Value::Null,
-    )
-    .await
-    .1;
+    assert_eq!(payload(rpc.redrive_job(redrive).await), receipt);
+    let history = payload(
+        rpc.list_attempts(OperatorRequest {
+            page: Some(page(100)),
+            ..for_job()
+        })
+        .await,
+    );
     assert_eq!(history["items"][0]["outcome"], "permanent");
     assert!(history["items"][0].get("owner").is_none());
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            &format!("{generic}/runs/{run_id}/pause"),
-            json!({})
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            &format!("{generic}/runs/{run_id}/resume"),
-            json!({})
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        call(
-            &app,
-            "POST",
-            &format!("{generic}/runs/{run_id}/cancel"),
-            json!({})
-        )
-        .await
-        .0,
-        StatusCode::OK
-    );
-    drop(app);
+    let action = OperatorRequest {
+        payload_json: b"{}".to_vec(),
+        ..for_run()
+    };
+    rpc.pause_run(action.clone()).await.unwrap();
+    rpc.resume_run(action.clone()).await.unwrap();
+    rpc.cancel_run(action).await.unwrap();
+    drop(rpc);
+    stop_rpc.send(()).unwrap();
+    rpc_server.await.unwrap().unwrap();
     pool.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))
         .execute(&admin)

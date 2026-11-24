@@ -636,6 +636,10 @@ async fn postgres_watermark_waits_for_successful_followups_and_never_cancel() {
         )
         .await
         .unwrap();
+    assert!(matches!(
+        ingest.cancel_run(run.id).await,
+        Err(screenroom_backend::Error::Stale)
+    ));
     assert!(
         repo.progress(policy.id)
             .await
@@ -702,6 +706,108 @@ async fn postgres_watermark_waits_for_successful_followups_and_never_cancel() {
             .unwrap()
             .settled_at
             .is_none()
+    );
+    let failed = repo.start(&start()).await.unwrap();
+    let parent = ingest
+        .claim_canonical("test", 60, &caps)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let sibling = screenroom_backend::queue::enqueue(
+        &mut tx,
+        &screenroom_backend::queue::Enqueue {
+            queue: "indexing",
+            scope_id: failed.id,
+            kind: "artwork",
+            dedupe_key: "stranded-fixture",
+            input: &json!({}),
+            requirements: &[],
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    ingest
+        .fail(
+            &parent,
+            screenroom_backend::queue::FailureClass::Permanent,
+            "fixture_failure",
+            None,
+        )
+        .await
+        .unwrap();
+    let original = ingest.run(failed.id).await.unwrap().unwrap();
+    assert_eq!(original.state, "failed");
+    ingest.expire_deadlines().await.unwrap();
+    let read_state = || async {
+        sqlx::query_scalar::<_, String>("SELECT state FROM queue.jobs WHERE id=$1")
+            .bind(sibling.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(read_state().await, "ready");
+    sqlx::query(
+        "UPDATE ingest.runs SET started_at=clock_timestamp()-interval '2 hours' WHERE id=$1",
+    )
+    .bind(failed.id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    ingest.expire_deadlines().await.unwrap();
+    assert_eq!(read_state().await, "cancelled");
+    let retained = ingest.run(failed.id).await.unwrap().unwrap();
+    assert_eq!(retained.finished_at, original.finished_at);
+    assert_eq!(retained.coverage, original.coverage);
+    assert_eq!(
+        ingest.job_attempts(parent.id, 0, 10).await.unwrap().len(),
+        1
+    );
+    let mixed = repo.start(&start()).await.unwrap();
+    assert_eq!(
+        repo.execution(mixed.id).await.unwrap().unwrap().mode,
+        "incremental"
+    );
+    let discovered = ingest
+        .claim_canonical("test", 60, &caps)
+        .await
+        .unwrap()
+        .unwrap();
+    ingest
+        .commit_traversal_page(
+            &discovered,
+            &PageCommit {
+                libraries: ["a", "collections"]
+                    .into_iter()
+                    .map(|id| screenroom_backend::ingest::LibraryWrite {
+                        public_id: id.into(),
+                        external_id: id.into(),
+                        title: id.into(),
+                    })
+                    .collect(),
+                items: vec![],
+                artwork_inputs: vec![],
+                artwork_omissions: vec![],
+                followups: vec![],
+                checkpoint: CheckpointWrite {
+                    scope_key: "full-index-v1".into(),
+                    cursor: json!({"roots":[{"id":"a","kind":"movies"},
+                        {"id":"collections","kind":"collections"}]}),
+                    watermark: None,
+                },
+                requests: 0,
+                completion: Completion::Continue,
+            },
+            &TraversalWrites::default(),
+        )
+        .await
+        .unwrap();
+    let execution = repo.execution(mixed.id).await.unwrap().unwrap();
+    assert_eq!(execution.mode, "reconcile");
+    assert_eq!(
+        execution.fallback_reason.as_deref(),
+        Some("mixed_collection_scope")
     );
     pool.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))

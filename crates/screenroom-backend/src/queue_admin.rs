@@ -5,7 +5,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, PgConnection, types::Json};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct QueueSnapshot {
@@ -59,6 +60,75 @@ pub struct RedriveEligibility {
     pub allowed: bool,
     pub reason: Option<String>,
 }
+
+#[derive(FromRow)]
+struct RedriveCheck {
+    id: Uuid,
+    run: Json<Run>,
+    admitted: bool,
+    current_run: bool,
+    kind: String,
+    input: Value,
+    valid_payload: bool,
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl RedriveCheck {
+    fn validate(&self) -> Result<()> {
+        let run = &self.run.0;
+        if !self.admitted || WorkBudget::from_selection(&run.selection_snapshot).is_err() {
+            return Err(Error::Stale);
+        }
+        if crate::indexing::deadline(run)?.is_some_and(|deadline| deadline <= self.observed_at) {
+            return Err(Error::Invalid("indexing deadline expired"));
+        }
+        if !self.current_run {
+            return Err(Error::Stale);
+        }
+        match self.kind.as_str() {
+            "artwork" => {
+                serde_json::from_value::<crate::media::ArtworkJob>(self.input.clone())
+                    .map_err(|_| Error::Invalid("artwork redrive payload"))?;
+            }
+            "embedding" | "ingest" => {}
+            _ => return Err(Error::Invalid("redrive job kind")),
+        }
+        if !self.valid_payload {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
+}
+
+async fn redrive_checks(connection: &mut PgConnection, jobs: &[Uuid]) -> Result<Vec<RedriveCheck>> {
+    Ok(sqlx::query_as(r#"
+        SELECT j.id,to_jsonb(r) AS run,clock_timestamp() AS observed_at,j.kind,j.input,
+            ir.run_id IS NOT NULL AS admitted,
+            COALESCE(p.enabled AND p.version=r.policy_version AND s.state='enabled'
+                AND s.configuration=ir.source_configuration AND j.state='failed'
+                AND r.state IN ('running','complete','failed') AND (r.state<>'failed' OR j.kind='ingest')
+                AND NOT EXISTS(SELECT FROM ingest.runs newer WHERE newer.source_id=r.source_id
+                    AND newer.id<>r.id AND (newer.started_at>r.started_at OR newer.state IN ('running','paused'))),
+                false) AS current_run,
+            CASE j.kind WHEN 'ingest' THEN true WHEN 'embedding' THEN
+                j.input->'model_id'=COALESCE(to_jsonb(r.embedding_model_id),'null'::jsonb)
+                AND EXISTS(SELECT FROM search.documents d JOIN catalog.source_items si ON si.id=d.source_item_id
+                    JOIN search.embedding_models m ON m.id=r.embedding_model_id
+                    WHERE si.source_id=r.source_id AND si.external_id=j.input->>'external_id'
+                    AND si.state='enabled' AND m.state<>'retired' AND encode(d.content_hash,'hex')=j.input->>'input_hash')
+            WHEN 'artwork' THEN EXISTS(SELECT FROM media.artwork a
+                JOIN media.artwork_generations g ON g.artwork_id=a.id AND g.revision=a.current_generation
+                WHERE to_jsonb(a.id)=j.input->'artwork_id' AND a.source_id=r.source_id
+                AND (a.state='enabled' OR (a.state='absent' AND a.revision IS NULL AND g.state='pending'))
+                AND to_jsonb(g.revision)=j.input->'revision' AND g.state IN ('pending','published')
+                AND to_jsonb(ARRAY(SELECT get_byte(g.fingerprint,n) FROM generate_series(0,31) n))=j.input->'fingerprint')
+            ELSE false END IS TRUE AS valid_payload
+        FROM queue.jobs j JOIN ingest.runs r ON r.id=j.scope_id JOIN ingest.policies p ON p.id=r.policy_id
+        JOIN catalog.sources s ON s.id=r.source_id LEFT JOIN ingest.indexing_runs ir ON ir.run_id=r.id
+        WHERE j.queue_name='indexing' AND j.id=ANY($1)
+        "#).bind(jobs).fetch_all(connection).await?)
+}
+
 impl IngestRepository {
     /// Independent observation interval, not an atomic snapshot with blocker diagnostics.
     pub async fn queue_observation(
@@ -80,25 +150,52 @@ impl IngestRepository {
         })
     }
     pub async fn redrive_eligibility(&self, job: Uuid) -> Result<RedriveEligibility> {
-        match self.redrive_job_inner(job, Uuid::new_v4(), true).await {
-            Ok(_) => Ok(RedriveEligibility {
-                allowed: true,
-                reason: None,
-            }),
-            Err(Error::Stale | Error::NotFound) => Ok(RedriveEligibility {
-                allowed: false,
-                reason: Some("not_current_terminal_job".into()),
-            }),
-            Err(Error::Invalid("indexing deadline expired")) => Ok(RedriveEligibility {
-                allowed: false,
-                reason: Some("deadline_expired".into()),
-            }),
-            Err(Error::Invalid(_)) => Ok(RedriveEligibility {
-                allowed: false,
-                reason: Some("unsupported_payload".into()),
-            }),
-            Err(error) => Err(error),
+        Ok(self
+            .redrive_eligibilities(&[job])
+            .await?
+            .remove(&job)
+            .unwrap())
+    }
+    pub async fn redrive_eligibilities(
+        &self,
+        jobs: &[Uuid],
+    ) -> Result<HashMap<Uuid, RedriveEligibility>> {
+        if jobs.len() > 200 {
+            return Err(Error::Invalid("page"));
         }
+        if jobs.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut connection = self.pool.acquire().await?;
+        let checks: HashMap<_, _> = redrive_checks(&mut connection, jobs)
+            .await?
+            .into_iter()
+            .map(|check| (check.id, check))
+            .collect();
+        jobs.iter()
+            .map(|id| {
+                let reason = match checks
+                    .get(id)
+                    .ok_or(Error::NotFound)
+                    .and_then(RedriveCheck::validate)
+                {
+                    Ok(()) => None,
+                    Err(Error::Stale | Error::NotFound) => Some("not_current_terminal_job".into()),
+                    Err(Error::Invalid("indexing deadline expired")) => {
+                        Some("deadline_expired".into())
+                    }
+                    Err(Error::Invalid(_)) => Some("unsupported_payload".into()),
+                    Err(error) => return Err(error),
+                };
+                Ok((
+                    *id,
+                    RedriveEligibility {
+                        allowed: reason.is_none(),
+                        reason,
+                    },
+                ))
+            })
+            .collect()
     }
     /// Reasons may overlap; capability evaluation is unknown without an explicit worker context.
     pub async fn queue_blockers(
@@ -195,77 +292,29 @@ impl IngestRepository {
     /// Failed identities only. No request/window refund. Superseded runs and payloads are rejected.
     /// A failed traversal must be redriven first; its pending followups then become eligible again.
     pub async fn redrive_job(&self, job: Uuid, request: Uuid) -> Result<queue::RedriveResult> {
-        self.redrive_job_inner(job, request, false)
-            .await?
-            .ok_or(Error::Stale)
-    }
-    async fn redrive_job_inner(
-        &self,
-        job: Uuid,
-        request: Uuid,
-        check_only: bool,
-    ) -> Result<Option<queue::RedriveResult>> {
         let mut tx = self.pool.begin().await?;
         if let Some(receipt) = queue::redrive_receipt(&mut tx, job, request).await? {
             tx.commit().await?;
-            return Ok(Some(receipt));
+            return Ok(receipt);
         }
         let policy_id: Uuid=sqlx::query_scalar("SELECT r.policy_id FROM queue.jobs j JOIN ingest.runs r ON r.id=j.scope_id WHERE j.id=$1 AND j.queue_name='indexing'").bind(job).fetch_optional(&mut *tx).await?.ok_or(Error::NotFound)?;
         lock_policy_source(&mut tx, policy_id).await?;
-        let (enabled, version): (bool, i64) =
-            sqlx::query_as("SELECT enabled,version FROM ingest.policies WHERE id=$1 FOR UPDATE")
-                .bind(policy_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let run: Run=sqlx::query_as("SELECT r.* FROM ingest.runs r JOIN queue.jobs j ON j.scope_id=r.id WHERE j.id=$1 FOR UPDATE OF r").bind(job).fetch_one(&mut *tx).await?;
-        let admitted: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT FROM ingest.indexing_runs WHERE run_id=$1)")
-                .bind(run.id)
-                .fetch_one(&mut *tx)
-                .await?;
-        if !admitted || WorkBudget::from_selection(&run.selection_snapshot).is_err() {
-            return Err(Error::Stale);
-        }
-        crate::indexing::check_deadline(&mut tx, &run).await?;
-        let (kind, input, state): (String, Value, String) =
-            sqlx::query_as("SELECT kind,input,state FROM queue.jobs WHERE id=$1 FOR UPDATE")
-                .bind(job)
-                .fetch_one(&mut *tx)
-                .await?;
-        let current: bool=sqlx::query_scalar("SELECT s.state='enabled' AND NOT EXISTS(SELECT FROM ingest.runs newer WHERE newer.source_id=s.id AND newer.id<>$2 AND (newer.started_at>$3 OR newer.state IN ('running','paused'))) FROM catalog.sources s WHERE s.id=$1")
-            .bind(run.source_id).bind(run.id).bind(run.started_at).fetch_one(&mut *tx).await?;
-        let source_current:bool=sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM ingest.indexing_runs ir JOIN catalog.sources s ON s.id=$2 WHERE ir.run_id=$1 AND ir.source_configuration<>s.configuration)").bind(run.id).bind(run.source_id).fetch_one(&mut *tx).await?;
-        if !enabled
-            || !current
-            || !source_current
-            || version != run.policy_version
-            || state != "failed"
-            || !matches!(run.state.as_str(), "running" | "complete" | "failed")
-            || (run.state == "failed" && kind != "ingest")
-        {
-            return Err(Error::Stale);
-        }
-        if kind == "embedding" {
-            let valid: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM search.documents d JOIN catalog.source_items si ON si.id=d.source_item_id JOIN search.embedding_models m ON m.id=$3 WHERE si.source_id=$1 AND si.external_id=$2 AND si.state='enabled' AND m.state<>'retired' AND encode(d.content_hash,'hex')=$4)")
-                .bind(run.source_id).bind(input["external_id"].as_str()).bind(run.embedding_model_id).bind(input["input_hash"].as_str()).fetch_one(&mut *tx).await?;
-            if !valid || input["model_id"] != serde_json::json!(run.embedding_model_id) {
-                return Err(Error::Stale);
-            }
-        } else if kind == "artwork" {
-            let payload: crate::media::ArtworkJob = serde_json::from_value(input)
-                .map_err(|_| Error::Invalid("artwork redrive payload"))?;
-            let valid: bool=sqlx::query_scalar("SELECT EXISTS(SELECT FROM media.artwork a JOIN media.artwork_generations g ON g.artwork_id=a.id AND g.revision=a.current_generation WHERE a.id=$1 AND a.source_id=$2 AND a.state='enabled' AND g.revision=$3 AND g.fingerprint=$4 AND g.state IN ('pending','published'))")
-                .bind(payload.artwork_id).bind(run.source_id).bind(payload.revision).bind(payload.fingerprint.as_slice()).fetch_one(&mut *tx).await?;
-            if !valid {
-                return Err(Error::Stale);
-            }
-        } else if kind != "ingest" {
-            return Err(Error::Invalid("redrive job kind"));
-        }
-        if check_only {
-            tx.rollback().await?;
-            return Ok(None);
-        }
+        sqlx::query("SELECT id FROM ingest.policies WHERE id=$1 FOR UPDATE")
+            .bind(policy_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query("SELECT r.id FROM ingest.runs r JOIN queue.jobs j ON j.scope_id=r.id WHERE j.id=$1 FOR UPDATE OF r")
+            .bind(job).fetch_one(&mut *tx).await?;
+        sqlx::query("SELECT id FROM queue.jobs WHERE id=$1 FOR UPDATE")
+            .bind(job)
+            .fetch_one(&mut *tx)
+            .await?;
+        let check = redrive_checks(&mut tx, &[job])
+            .await?
+            .pop()
+            .ok_or(Error::NotFound)?;
+        check.validate()?;
+        let run = check.run.0;
         // Keep the failed coverage and all request receipts; redrive lineage explains this transition.
         if run.state == "failed" {
             sqlx::query("UPDATE ingest.runs SET state='running',finished_at=NULL WHERE id=$1")
@@ -276,6 +325,6 @@ impl IngestRepository {
         let result = queue::redrive(&mut tx, job, request).await?;
         sqlx::query("INSERT INTO ingest.run_redrives(request_id,run_id,prior_state,prior_finished_at,prior_coverage) VALUES($1,$2,$3,$4,$5)").bind(request).bind(run.id).bind(&run.state).bind(run.finished_at).bind(&run.coverage).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Some(result))
+        Ok(result)
     }
 }

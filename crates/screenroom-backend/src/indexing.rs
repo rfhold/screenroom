@@ -89,6 +89,44 @@ fn default_concurrency() -> u32 {
     1
 }
 impl Configuration {
+    pub(crate) fn managed_initial(library_ids: Vec<String>, operator_profile_id: String) -> Self {
+        Self {
+            indexing: 1,
+            enabled: true,
+            automatic_runs: false,
+            cadence_seconds: 3600,
+            reconcile_seconds: default_reconcile(),
+            overlap_seconds: default_overlap(),
+            source_concurrency: default_concurrency(),
+            mode: Mode::Full,
+            components: Components {
+                metadata: true,
+                artwork: true,
+                embeddings: false,
+            },
+            strategy: Strategy::All,
+            stale_after_seconds: None,
+            scope: Scope {
+                library_ids,
+                item_kinds: vec![
+                    crate::repair::ItemKind::Movie,
+                    crate::repair::ItemKind::Series,
+                ],
+                item_ids: vec![],
+            },
+            operator_profile_id,
+            limits: Limits {
+                work_requests: 100,
+                work_records: 100,
+                lifetime_requests: 10_000_000,
+                lifetime_records: 10_000_000,
+                deadline_seconds: 2_592_000,
+                work_timeout_seconds: 240,
+                retry: RetryPolicy::default(),
+            },
+            artwork: default_skip(),
+        }
+    }
     pub fn from_value(v: &Value) -> Result<Self> {
         let c: Self = serde_json::from_value(v.clone())
             .map_err(|_| Error::Invalid("indexing configuration"))?;
@@ -363,9 +401,22 @@ impl IndexingRepository {
         tx.commit().await?;
         Ok(run)
     }
+    pub async fn start_automatic(&self, request: &StartRequest) -> Result<Run> {
+        let tx = self.pool.begin().await?;
+        let (run, tx) = Self::start_with_admission(tx, request, true).await?;
+        tx.commit().await?;
+        Ok(run)
+    }
     pub(crate) async fn start_in<'a>(
+        tx: Transaction<'a, Postgres>,
+        request: &StartRequest,
+    ) -> Result<(Run, Transaction<'a, Postgres>)> {
+        Self::start_with_admission(tx, request, false).await
+    }
+    async fn start_with_admission<'a>(
         mut tx: Transaction<'a, Postgres>,
         request: &StartRequest,
+        automatic: bool,
     ) -> Result<(Run, Transaction<'a, Postgres>)> {
         let input = json!(request);
         if let Some(run) = receipt(&mut tx, request.request_id, "start", &input).await? {
@@ -379,6 +430,15 @@ impl IndexingRepository {
             .ok_or(Error::NotFound)?;
         if p.version != request.policy_version {
             return Err(Error::Stale);
+        }
+        if automatic {
+            let due: bool = sqlx::query_scalar("SELECT $1::timestamptz<=clock_timestamp()")
+                .bind(p.next_due_at)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !p.enabled || !p.automatic_runs || !due {
+                return Err(Error::Stale);
+            }
         }
         let c = Configuration::from_value(&p.selection_json)?.effective(request.scope.as_ref())?;
         require_locator(&mut tx, p.source_id).await?;

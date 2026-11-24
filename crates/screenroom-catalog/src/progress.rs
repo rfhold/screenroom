@@ -128,13 +128,14 @@ impl Catalog {
         }
         let requested_sources: std::collections::BTreeSet<_> =
             scopes.iter().map(|scope| scope.source_id.clone()).collect();
-        let channel = tonic::transport::Endpoint::from_shared(uri.clone())
+        let endpoint = tonic::transport::Endpoint::from_shared(uri.clone())
             .map_err(|_| Status::unavailable("private progress endpoint"))?
-            .connect_timeout(Duration::from_secs(5).min(deadline.remaining()?))
-            .timeout(Duration::from_secs(10).min(deadline.remaining()?))
-            .connect()
-            .await
-            .map_err(|_| Status::unavailable("private progress unavailable"))?;
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10));
+        let channel = self
+            .progress_channel
+            .get_or_init(|| endpoint.connect_lazy())
+            .clone();
         let mut client =
             PlaybackStateServiceClient::new(channel).max_decoding_message_size(256 * 1024);
         let mut token = String::new();
@@ -173,32 +174,29 @@ impl Catalog {
             if count > 10000 {
                 return Err(Status::resource_exhausted("progress bound"));
             }
-            for entry in response.entries {
-                if !records.insert((entry.source_id.clone(), entry.external_item_id.clone())) {
+            let (references, percentages): (Vec<_>, Vec<_>) = response
+                .entries
+                .into_iter()
+                .filter_map(|entry| {
+                    let key = (entry.source_id, entry.external_item_id);
+                    records
+                        .insert(key.clone())
+                        .then_some((key, entry.progress_percent))
+                })
+                .unzip();
+            for (index, row) in self
+                .catalog
+                .resolve_references(scope, &references)
+                .await
+                .map_err(status)?
+            {
+                if !seen.insert(row.public_id.clone()) {
                     continue;
                 }
-                let Some(reference) = self
-                    .catalog
-                    .resolve_reference(scope, &entry.source_id, &entry.external_item_id)
-                    .await
-                    .map_err(status)?
-                else {
-                    continue;
-                };
-                if !seen.insert(reference.public_id.clone()) {
-                    continue;
-                }
-                if let Some(row) = self
-                    .catalog
-                    .get(scope, &reference.public_id)
-                    .await
-                    .map_err(status)?
-                {
-                    items.push(row);
-                    progress.push(entry.progress_percent);
-                    if items.len() == 50 {
-                        break;
-                    }
+                items.push(row);
+                progress.push(percentages[index]);
+                if items.len() == 50 {
+                    break;
                 }
             }
             if items.len() == 50 || response.next_page_token.is_empty() {

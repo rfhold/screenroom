@@ -266,6 +266,47 @@ async fn bounded_scheduler_continuation_admits_compatible_policy_after_101_incom
 
 #[tokio::test]
 #[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
+async fn invalid_due_policy_is_deferred_without_skipping_the_next_policy() {
+    let http = Http::new().await;
+    let f = Fixture::new(&http).await;
+    let worker = http.worker(f.pool.clone(), false, "unused").await;
+    let compatible = automatic_policies(&f, true).await.unwrap();
+    let invalid: Uuid = sqlx::query_scalar(
+        "UPDATE ingest.policies SET selection_json=jsonb_set(selection_json,'{mode}','\"invalid\"'),next_due_at=clock_timestamp()-interval '3 hours'
+         WHERE id=(SELECT id FROM ingest.policies WHERE automatic_runs AND id<>$1 ORDER BY id LIMIT 1) RETURNING id",
+    )
+    .bind(compatible.id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(worker.start_due().await.unwrap(), (0, false));
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT next_due_at>clock_timestamp() FROM ingest.policies WHERE id=$1"
+        )
+        .bind(invalid)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap()
+    );
+    assert_eq!(worker.start_due().await.unwrap(), (1, true));
+    let request = screenroom_backend::indexing::StartRequest {
+        request_id: Uuid::new_v4(),
+        policy_id: compatible.id,
+        policy_version: compatible.version,
+        scope: None,
+    };
+    assert!(matches!(
+        IndexingRepository::new(f.pool.clone())
+            .start_automatic(&request)
+            .await,
+        Err(screenroom_backend::Error::Stale)
+    ));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires task-owned SCREENROOM_W_TEST_DATABASE_URL"]
 async fn automatic_embedding_policy_without_model_does_not_stop_compatible_work() {
     let http = Http::new().await;
     let f = Fixture::new(&http).await;

@@ -5,13 +5,42 @@ use crate::{Error, Result, Uuid, catalog::Scope};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{Connection, FromRow, PgConnection, PgPool, Postgres, Transaction};
 
 pub const LEASE_SECONDS: i32 = 90;
 pub const ABSOLUTE_SECONDS: i32 = 12 * 60 * 60;
 pub const PAUSED_SECONDS: i32 = 30 * 60;
 const RESOURCE_CAPACITY: usize = 8192;
 const ACTIVE: &[&str] = &["preparing", "ready", "playing", "paused", "stopping"];
+
+pub async fn try_gateway_lock(
+    connection: &mut PgConnection,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_try_advisory_lock(1935897197,1)")
+        .fetch_one(connection)
+        .await
+}
+
+pub async fn holds_gateway_lock(
+    connection: &mut PgConnection,
+) -> std::result::Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT FROM pg_locks WHERE locktype='advisory' AND pid=pg_backend_pid() AND classid=1935897197 AND objid=1 AND objsubid=2 AND granted)")
+        .fetch_one(connection)
+        .await
+}
+
+async fn begin_gateway(connection: &mut PgConnection) -> Result<Transaction<'_, Postgres>> {
+    let mut tx = connection.begin().await?;
+    sqlx::query(
+        "SELECT set_config('lock_timeout','2s',true),set_config('statement_timeout','10s',true)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    if !holds_gateway_lock(&mut tx).await? {
+        return Err(Error::Stale);
+    }
+    Ok(tx)
+}
 
 fn resources_fit(current: usize, additional: usize) -> bool {
     current
@@ -354,9 +383,39 @@ fn constant_eq(a: &[u8], b: &[u8]) -> bool {
         == 0
 }
 
+#[derive(sqlx::FromRow)]
+pub struct PlaybackTelemetry {
+    pub active: i64,
+    pub pending: i64,
+    pub claimed: i64,
+    pub failed: i64,
+    pub blocked_device: i64,
+    pub oldest_failed_seconds: f64,
+    pub identity_changed: i64,
+    pub attempts_exhausted: i64,
+    pub upstream_unavailable: i64,
+}
+
 impl PlaybackRepository {
-    pub async fn telemetry_counts(&self) -> Result<(i64, i64, i64, i64)> {
-        sqlx::query_as("SELECT (SELECT count(*) FROM playback.sessions WHERE state IN ('preparing','ready','playing','paused') AND lease_until>clock_timestamp() AND absolute_until>clock_timestamp()),count(*) FILTER(WHERE c.state='pending' AND (NOT c.revoke_device OR s.state NOT IN ('preparing','ready','playing','paused'))),count(*) FILTER(WHERE c.state='claimed'),count(*) FILTER(WHERE c.state='failed') FROM playback.cleanup c JOIN playback.sessions s ON s.id=c.session_id")
+    pub async fn telemetry_counts(&self) -> Result<PlaybackTelemetry> {
+        sqlx::query_as(r#"
+            SELECT (SELECT count(*) FROM playback.sessions
+                WHERE state IN ('preparing','ready','playing','paused')
+                AND lease_until>statement_timestamp() AND absolute_until>statement_timestamp()) AS active,
+                count(*) FILTER(WHERE c.state='pending' AND
+                    (NOT c.revoke_device OR s.state NOT IN ('preparing','ready','playing','paused'))) AS pending,
+                count(*) FILTER(WHERE c.state='claimed') AS claimed,
+                count(*) FILTER(WHERE c.state='failed') AS failed,
+                count(*) FILTER(WHERE c.state='pending' AND c.revoke_device AND EXISTS(
+                    SELECT FROM playback.cleanup older WHERE older.session_id=c.session_id
+                        AND NOT older.revoke_device AND older.state='failed')) AS blocked_device,
+                COALESCE(EXTRACT(epoch FROM statement_timestamp()-min(c.created_at)
+                    FILTER(WHERE c.state='failed')),0)::float8 AS oldest_failed_seconds,
+                count(*) FILTER(WHERE c.state='failed' AND c.error_code='identity_changed') AS identity_changed,
+                count(*) FILTER(WHERE c.state='failed' AND c.error_code='attempts_exhausted') AS attempts_exhausted,
+                count(*) FILTER(WHERE c.state='failed' AND c.error_code='upstream_unavailable') AS upstream_unavailable
+            FROM playback.cleanup c JOIN playback.sessions s ON s.id=c.session_id
+        "#)
             .fetch_one(&self.pool).await.map_err(Into::into)
     }
 
@@ -530,6 +589,23 @@ impl PlaybackRepository {
     /// Commit the random device identity, private references and cleanup intent first.
     /// Only then publish replay material / Quick Connect secret or authorize the device.
     pub async fn create(&self, input: Create<'_>) -> Result<Created> {
+        self.create_in(self.pool.begin().await?, input).await
+    }
+
+    pub async fn create_owned(
+        &self,
+        connection: &mut PgConnection,
+        input: Create<'_>,
+    ) -> Result<Created> {
+        self.create_in(begin_gateway(connection).await?, input)
+            .await
+    }
+
+    async fn create_in(
+        &self,
+        mut tx: Transaction<'_, Postgres>,
+        input: Create<'_>,
+    ) -> Result<Created> {
         input.scope.validate()?;
         bounded_json(input.normalized_body, 65536)?;
         bounded_json(input.capabilities, 16384)?;
@@ -548,7 +624,6 @@ impl PlaybackRepository {
         }
         let body = serde_json::json!({"item_id":input.public_item_id,"scope":scope,"capabilities":input.capabilities,"request":input.normalized_body});
         bounded_json(&body, 65536)?;
-        let mut tx = self.pool.begin().await?;
         let revision = lock_user(&mut tx, input.user_id).await?;
         if let Some(operation) = sqlx::query_as::<_, Operation>("SELECT * FROM playback.operations WHERE user_id=$1 AND binding_revision=$2 AND kind='create' AND request_id=$3")
             .bind(input.user_id).bind(&revision).bind(input.request_id).fetch_optional(&mut *tx).await? {
@@ -898,8 +973,49 @@ impl PlaybackRepository {
             .await
     }
 
+    pub async fn reject_unpublished_create(
+        &self,
+        connection: Option<&mut PgConnection>,
+        operation: &Operation,
+        result: &Value,
+    ) -> Result<()> {
+        let tx = match connection {
+            Some(connection) => begin_gateway(connection).await?,
+            None => self.pool.begin().await?,
+        };
+        self.finish_in(
+            tx,
+            operation,
+            Outcome::NotSent(result),
+            "failed",
+            true,
+            None,
+        )
+        .await
+    }
+
     async fn finish_internal(
         &self,
+        operation: &Operation,
+        outcome: Outcome<'_>,
+        state: &str,
+        recorded: bool,
+        uncertain_metadata: Option<&Value>,
+    ) -> Result<()> {
+        self.finish_in(
+            self.pool.begin().await?,
+            operation,
+            outcome,
+            state,
+            recorded,
+            uncertain_metadata,
+        )
+        .await
+    }
+
+    async fn finish_in(
+        &self,
+        mut tx: Transaction<'_, Postgres>,
         operation: &Operation,
         outcome: Outcome<'_>,
         state: &str,
@@ -919,7 +1035,6 @@ impl PlaybackRepository {
         {
             return Err(Error::Invalid("playback state"));
         }
-        let mut tx = self.pool.begin().await?;
         // Disabled users still need uncertainty and cleanup evidence recorded.
         let revision: Option<String> = sqlx::query_scalar("SELECT playback.lock_user($1)")
             .bind(operation.user_id)
@@ -1141,10 +1256,10 @@ impl PlaybackRepository {
         Ok((session, resource))
     }
 
-    /// Process-local gateway restart must revoke all transports before readiness.
+    /// Recover on the lock holder itself. Losing that connection aborts the transaction.
     /// It never resumes provider reports or playback from durable receipts.
-    pub async fn recover_abandoned(&self) -> Result<u64> {
-        let mut tx = self.pool.begin().await?;
+    pub async fn recover_abandoned(connection: &mut PgConnection) -> Result<u64> {
+        let mut tx = begin_gateway(connection).await?;
         let sessions: Vec<(Uuid,Uuid)> = sqlx::query_as("SELECT s.id,s.user_id FROM playback.sessions s WHERE s.state IN ('preparing','ready','playing','paused','stopping') OR EXISTS(SELECT FROM playback.operations o WHERE o.session_id=s.id AND o.status='pending') ORDER BY s.user_id,s.id")
             .fetch_all(&mut *tx).await?;
         let mut count = 0;
@@ -1164,6 +1279,11 @@ impl PlaybackRepository {
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(count)
+    }
+
+    pub async fn transport_retired(&self, session_id: Uuid, revision: u32) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT NOT EXISTS(SELECT FROM playback.sessions WHERE id=$1 AND transport_revision<=$2 AND state IN ('preparing','ready','playing','paused'))")
+            .bind(session_id).bind(i64::from(revision)).fetch_one(&self.pool).await?)
     }
 
     pub async fn expire(&self) -> Result<u64> {
@@ -1198,8 +1318,15 @@ impl PlaybackRepository {
     }
 
     pub async fn claim_cleanup(&self) -> Result<Option<Cleanup>> {
+        Self::claim_cleanup_in(self.pool.begin().await?).await
+    }
+
+    pub async fn claim_cleanup_owned(connection: &mut PgConnection) -> Result<Option<Cleanup>> {
+        Self::claim_cleanup_in(begin_gateway(connection).await?).await
+    }
+
+    async fn claim_cleanup_in(mut tx: Transaction<'_, Postgres>) -> Result<Option<Cleanup>> {
         let claim = Uuid::new_v4();
-        let mut tx = self.pool.begin().await?;
         sqlx::query("UPDATE playback.cleanup SET state='failed',error_code='attempts_exhausted',finished_at=clock_timestamp() WHERE attempts>=5 AND (state='pending' OR (state='claimed' AND claim_until<=clock_timestamp()))")
             .execute(&mut *tx).await?;
         // A device revoke follows every old-encoding cleanup; never revoke a live token.

@@ -47,8 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let storage=if std::env::var_os("SCREENROOM_S3_ENDPOINT").is_some() {Some(ObjectStorage::new(StorageConfig::from_env()?)?)} else {None};
         let user_uri=std::env::var("SCREENROOM_USER_PRIVATE_URI").ok();
         let mut catalog=screenroom_catalog::Catalog::new(pool.clone(),required("SCREENROOM_CATALOG_PUBLIC_ORIGIN")?,storage,user_uri)?;
-        if std::env::var_os("SCREENROOM_EMBEDDING_BASE_URL").is_some() {
-            catalog=catalog.with_embedding(screenroom_backend::embedding::EmbeddingClient::new(screenroom_backend::embedding::EmbeddingConfig::from_env()?)?);
+        if let Some(config) = screenroom_backend::embedding::EmbeddingConfig::optional_from_env()? {
+            catalog=catalog.with_embedding(screenroom_backend::embedding::EmbeddingClient::new(config)?);
         }
         let listener = tokio::net::TcpListener::bind(address).await?;
         tracing::info!(service.name = "screenroom-catalog", address = %listener.local_addr()?, "RPC server listening");

@@ -83,6 +83,10 @@ Redrive preserves attempt history, prior run coverage, request charges, work-win
 An identical redrive request UUID returns its original receipt; reuse for another job conflicts.
 Cancelled, obsolete, superseded, expired, and incompatible work does not qualify.
 If traversal failed, its ingest job requires redrive before follow-ups regain eligibility.
+If the failed run expires or a newer run supersedes it, worker maintenance cancels its stranded follow-ups.
+The run keeps its prior outcome and attempt history.
+A first artwork generation can qualify for redrive before any artwork becomes visible.
+Status reports eligibility without reserving mutation locks; redrive checks again under the source lock.
 The [canonical operator API](#canonical-operator-api) exposes job eligibility and redrive history independently of run resume actions.
 
 ## Policy model
@@ -260,6 +264,8 @@ Unknown or incompatible capability must produce explicit fallback, not silent in
 An incremental policy starts with reconciliation when its watermark is absent or periodic reconciliation is due.
 The worker persists timestamp windows, page checkpoints, fallback state, ancestry, and bounded changed-series/season descendant refresh progress.
 Collections use complete traversal rather than timestamp delta filters.
+When discovery finds a mixed collection and media scope, that traversal reads the media roots in full.
+Collection membership then has same-run observations for unchanged media.
 Normalized metadata and document hashes avoid redundant writes; unchanged items still refresh observations and consume record budget.
 Successful artwork reuse and hash/model-matched embeddings avoid unnecessary follow-up effects.
 

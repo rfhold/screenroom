@@ -6,7 +6,11 @@
 | [generate-client-models.py](generate-client-models.py) | Ordinary Rust and TypeScript domain records. |
 | [patch-swift-cancellation.py](patch-swift-cancellation.py) | Generated Swift cancellation and ownership corrections. |
 | [check-client-boundary.mjs](check-client-boundary.mjs) | Public client boundary checks. |
-| [backend-lifecycle.py](backend-lifecycle.py) | Persistent local instance lifecycle and descriptor identity. |
+| [backend.sh](backend.sh) | Persistent local instance lifecycle and descriptor identity. |
+| [backend-contract.sh](backend-contract.sh) | Native gRPC and gRPC-Web checks for an explicitly selected local instance. |
+| [backend.sh](backend.sh) | Stable local backend command entry point. |
+| [backend-status.sh](backend-status.sh) | Read-only live status for the selected local project. |
+| [backend-persistence.sh](backend-persistence.sh) | Restart check for an explicitly owned disposable project. |
 | [e2e.sh](e2e.sh) | E2E orchestration entry point. |
 | [../docs/backend.md](../docs/backend.md) | Persistent instance operations and recovery. |
 

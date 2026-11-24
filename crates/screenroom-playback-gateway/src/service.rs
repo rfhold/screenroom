@@ -30,7 +30,6 @@ pub(crate) struct TransportRuntime {
     pub tracks: Vec<(String, provider::Track)>,
     pub track_resources: HashMap<String, Uuid>,
     pub root: Uuid,
-    pub media_capability: String,
     pub resources: RwLock<crate::signed_resources::ResourceGraph>,
     pub signing_key: crate::signed_resources::SigningKey,
     pub playlists: Mutex<crate::signed_resources::PlaylistState>,
@@ -382,7 +381,6 @@ impl PlaybackService {
         intent: provider::AuthorizationIntent,
         auth: Arc<provider::SessionAuth>,
         negotiated: provider::NegotiatedPlayback,
-        media_capability: String,
     ) -> Result<Arc<TransportRuntime>, Status> {
         let signing_key =
             crate::signed_resources::SigningKey::generate().map_err(|_| records::unavailable())?;
@@ -410,7 +408,6 @@ impl PlaybackService {
             tracks,
             track_resources,
             root,
-            media_capability,
             resources: RwLock::new(resources),
             signing_key,
             playlists: Default::default(),
@@ -428,19 +425,23 @@ impl PlaybackService {
         let normalized = json!({"start_policy":request.start_policy,"position_ms":request.position_ms.as_deref().map(v::position).transpose()?.map(|p|p.decimal())});
         let control = Capability::generate().map_err(records::database)?;
         let media = Capability::generate().map_err(records::database)?;
-        let created = self
-            .repository
-            .create(db::Create {
-                user_id: user,
-                public_item_id: &request.item_id,
-                scope: &scope,
-                request_id: v::uuid(&request.request_id)?,
-                normalized_body: &normalized,
-                capabilities: &capabilities,
-                control_hash: &control.hash(),
-            })
-            .await
-            .map_err(records::database)?;
+        let input = db::Create {
+            user_id: user,
+            public_item_id: &request.item_id,
+            scope: &scope,
+            request_id: v::uuid(&request.request_id)?,
+            normalized_body: &normalized,
+            capabilities: &capabilities,
+            control_hash: &control.hash(),
+        };
+        let created = match &self.ownership {
+            Some(owner) => {
+                let mut connection = owner.connection().await.map_err(records::database)?;
+                self.repository.create_owned(&mut connection, input).await
+            }
+            None => self.repository.create(input).await,
+        }
+        .map_err(records::database)?;
         if created.replay {
             let lock = self.lock(created.session.id).await;
             let _locked = lock.lock().await;
@@ -456,12 +457,18 @@ impl PlaybackService {
                     // No replacement authority: an unpublished, never-dispatched
                     // Create can only become a terminal failed receipt.
                     if created.operation.status == "pending" {
+                        let mut connection = match &self.ownership {
+                            Some(owner) => {
+                                Some(owner.connection().await.map_err(records::database)?)
+                            }
+                            None => None,
+                        };
                         let _ = self
                             .repository
-                            .finish_recorded(
+                            .reject_unpublished_create(
+                                connection.as_mut().map(|c| &mut ***c),
                                 &created.operation,
-                                Outcome::NotSent(&json!({"failure":12})),
-                                "failed",
+                                &json!({"failure":12}),
                             )
                             .await;
                     }
@@ -556,8 +563,8 @@ impl PlaybackService {
                 )
                 .await
                 .map_err(|e| (records::provider_code(&e), records::unavailable()))?;
-            let runtime = Self::runtime(provider, intent, auth, negotiated, replay.media.clone())
-                .map_err(|error| (12, error))?;
+            let runtime =
+                Self::runtime(provider, intent, auth, negotiated).map_err(|error| (12, error))?;
             self.publish(session, operation, runtime, &replay, false, "ready")
                 .await
                 .map_err(|e| (12, e))
@@ -746,13 +753,7 @@ impl PlaybackService {
                 );
                 records::unavailable()
             })?;
-            let replacement = Self::runtime(
-                provider,
-                intent,
-                runtime.auth.clone(),
-                negotiated,
-                replay.media.clone(),
-            )?;
+            let replacement = Self::runtime(provider, intent, runtime.auth.clone(), negotiated)?;
             let descriptor: Descriptor =
                 serde_json::from_value(session.transport.clone().ok_or_else(records::unavailable)?)
                     .map_err(|_| records::unavailable())?;

@@ -1758,6 +1758,17 @@ async fn postgres_runtime_contract() {
             .is_empty()
     );
     assert_eq!(catalog.libraries(&Scope::default()).await.unwrap().len(), 2);
+    let libraries = catalog
+        .library_page(&Scope::default(), None, 1)
+        .await
+        .unwrap();
+    assert_eq!(libraries[0].public_id, "movies");
+    let next = catalog
+        .library_page(&Scope::default(), Some("movies"), 2)
+        .await
+        .unwrap();
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].public_id, "tv");
     assert!(
         catalog
             .children(&Scope::default(), "alpha", None, 10)
@@ -1774,6 +1785,30 @@ async fn postgres_runtime_contract() {
             .public_id,
         "alpha"
     );
+    let ranked = catalog
+        .get_ranked(&movie_scope, &["beta".into(), "alpha".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        ranked
+            .iter()
+            .map(|row| row.public_id.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+    let references = catalog
+        .resolve_references(
+            &movie_scope,
+            &[
+                ("synthetic-jellyfin".into(), "beta".into()),
+                ("synthetic-jellyfin".into(), "alpha".into()),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].0, 1);
+    assert_eq!(references[0].1.source_item_id, ranked[0].source_item_id);
 
     let model = search
         .register_model("synthetic-model", "operator-r1", 1024)

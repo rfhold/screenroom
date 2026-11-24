@@ -374,24 +374,11 @@ async fn contract(configuration: ClientConfig, started: Instant) {
             .saturating_sub(Duration::from_secs(1))
             .min(Duration::from_secs(60));
         assert!(!budget.is_zero(), "no remaining subprocess contract budget");
-        let port = configuration
-            .endpoint
-            .strip_prefix("http://127.0.0.1:")
-            .unwrap();
-        let mut command = std::process::Command::new("python3");
+        let mut command = std::process::Command::new("bash");
         command
             .args([
-                "-c",
-                r#"
-import json, os, runpy, sys
-os.environ['SCREENROOM_BACKEND_PORT'] = sys.argv[1]
-os.environ['SCREENROOM_API_ENDPOINT'] = 'http://127.0.0.1:' + sys.argv[1]
-os.environ['SCREENROOM_E2E_API_ENDPOINT'] = os.environ['SCREENROOM_API_ENDPOINT']
-contract = runpy.run_path('scripts/backend-contract.py')
-contract['backend'].installation_user = lambda: sys.argv[2]
-print(json.dumps(contract['check']()))
-"#,
-                port,
+                "scripts/backend-contract.sh",
+                &configuration.endpoint,
                 &configuration.user_id,
             ])
             .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."));

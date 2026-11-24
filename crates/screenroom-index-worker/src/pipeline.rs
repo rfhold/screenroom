@@ -127,8 +127,16 @@ impl Worker {
             if policy.selection_json.get("indexing").is_none() {
                 continue;
             }
-            let configuration =
-                screenroom_backend::indexing::Configuration::from_value(&policy.selection_json)?;
+            let configuration = match screenroom_backend::indexing::Configuration::from_value(
+                &policy.selection_json,
+            ) {
+                Ok(configuration) => configuration,
+                Err(Error::Invalid(_)) => {
+                    self.defer_invalid_policy(&policy).await?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if configuration.components.embeddings && self.model.is_none() {
                 continue;
             }
@@ -139,11 +147,12 @@ impl Worker {
                 scope: None,
             };
             match screenroom_backend::indexing::IndexingRepository::new(self.pool.clone())
-                .start(&request)
+                .start_automatic(&request)
                 .await
             {
                 Ok(_) => started += 1,
                 Err(Error::SourceBusy { .. } | Error::Stale) => {}
+                Err(Error::Invalid(_)) => self.defer_invalid_policy(&policy).await?,
                 Err(e) => return Err(e),
             }
         }
@@ -151,6 +160,17 @@ impl Worker {
             *cursor = None;
         }
         Ok((started, page_complete))
+    }
+    async fn defer_invalid_policy(
+        &self,
+        policy: &screenroom_backend::ingest::Policy,
+    ) -> Result<()> {
+        self.ingest.defer_invalid_automatic_policy(policy).await?;
+        tracing::warn!(
+            code = "automatic_policy_invalid",
+            "automatic index start deferred"
+        );
+        Ok(())
     }
     pub async fn activate_model(&self) -> Result<()> {
         self.search

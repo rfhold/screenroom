@@ -2831,19 +2831,16 @@ dependencies = [
 name = "screenroom-index-operator"
 version = "0.1.0"
 dependencies = [
- "axum",
- "http-body-util",
+ "http",
  "screenroom-backend",
  "screenroom-observability",
  "screenroom-proto",
  "serde",
  "serde_json",
- "serde_urlencoded",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-web",
- "tower",
  "tower-http",
  "uuid",
 ]

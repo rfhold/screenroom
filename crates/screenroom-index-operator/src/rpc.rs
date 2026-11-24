@@ -1,5 +1,5 @@
-use super::{BODY_LIMIT, Error, Operator, api, id};
-use axum::http::Method;
+use super::{BODY_LIMIT, Command, Error, Operator, Page, default_limit, execute, id};
+use http::{HeaderName, HeaderValue, Method};
 use screenroom_proto::operator::v1::{
     OperatorRequest, OperatorResponse,
     operator_service_server::{OperatorService, OperatorServiceServer},
@@ -11,15 +11,17 @@ const RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 async fn call(
     op: &Operator,
     input: OperatorRequest,
-    method: Method,
-    path: &str,
+    command: Command,
+    read_only: bool,
     paginated: bool,
     pending: bool,
 ) -> Result<Response<OperatorResponse>, Status> {
     if input.payload_json.len() > BODY_LIMIT
+        || read_only && !input.payload_json.is_empty()
         || input.page.is_some() != paginated
         || input.page.as_ref().is_some_and(|p| {
             p.pending_only.is_some() != pending
+                || !(1..=1000).contains(&p.limit)
                 || p.after
                     .as_ref()
                     .is_some_and(|a| a.is_empty() || a.len() > 200)
@@ -27,19 +29,19 @@ async fn call(
     {
         return Err(Status::invalid_argument("invalid"));
     }
-    let mut query = Vec::new();
-    if let Some(page) = input.page {
-        query.push(("limit", page.limit.to_string()));
-        if let Some(after) = page.after {
-            query.push(("after", after));
-        }
-        if let Some(pending_only) = page.pending_only {
-            query.push(("pending_only", pending_only.to_string()));
-        }
-    }
-    let query =
-        serde_urlencoded::to_string(query).map_err(|_| Status::invalid_argument("invalid"))?;
-    let result = api(op, &method, path, &query, &input.payload_json)
+    let page = input.page.map_or(
+        Page {
+            limit: default_limit(),
+            after: None,
+            pending_only: false,
+        },
+        |page| Page {
+            limit: page.limit,
+            after: page.after,
+            pending_only: page.pending_only.unwrap_or_default(),
+        },
+    );
+    let result = execute(op, command, page, &input.payload_json)
         .await
         .map_err(status)?;
     let payload_json =
@@ -90,7 +92,7 @@ fn status(error: Error) -> Status {
 }
 
 macro_rules! operator_service {
-    ($($name:ident($($field:ident),*) => ($method:ident, $path:literal, $page:literal, $pending:literal);)+) => {
+    ($($name:ident($($field:ident),*) => ($command:expr, $read:literal, $page:literal, $pending:literal);)+) => {
         #[tonic::async_trait]
         impl OperatorService for Operator {
             $(async fn $name(&self, request: Request<OperatorRequest>)
@@ -99,45 +101,43 @@ macro_rules! operator_service {
                 let input = request.into_inner();
                 // Parse before using any caller-supplied selector in the domain dispatcher.
                 $(let $field = id(&input.$field).map_err(status)?;)*
-                let path = format!($path $(, $field)*);
-                call(self, input, Method::$method, &path, $page, $pending).await
+                call(self, input, $command, $read, $page, $pending).await
             })+
         }
     };
 }
 
 operator_service! {
-    health() => (GET, "/api/health", false, false);
-    discover_connection() => (POST, "/api/connections/jellyfin/discover", false, false);
-    save_connection() => (POST, "/api/connections/jellyfin", false, false);
-    list_connections() => (GET, "/api/connections/jellyfin", true, false);
-    list_sources() => (GET, "/api/sources", true, false);
-    list_libraries(source_id) => (GET, "/api/sources/{}/libraries", true, false);
-    list_runs(source_id) => (GET, "/api/indexing/sources/{}/runs", true, false);
-    list_candidates(source_id, run_id) => (GET, "/api/indexing/sources/{}/runs/{}/candidates", true, true);
-    list_policies(source_id) => (GET, "/api/indexing/sources/{}/policies", true, false);
-    configure_policy(source_id) => (POST, "/api/indexing/sources/{}/policies", false, false);
-    get_progress(source_id, policy_id) => (GET, "/api/indexing/sources/{}/policies/{}/progress", false, false);
-    start_run(source_id) => (POST, "/api/indexing/sources/{}/start", false, false);
-    get_run_status(source_id, run_id) => (GET, "/api/indexing/sources/{}/runs/{}", false, false);
-    get_execution(source_id, run_id) => (GET, "/api/indexing/sources/{}/runs/{}/execution", false, false);
-    pause_run(source_id, run_id) => (POST, "/api/indexing/sources/{}/runs/{}/pause", false, false);
-    resume_run(source_id, run_id) => (POST, "/api/indexing/sources/{}/runs/{}/resume", false, false);
-    cancel_run(source_id, run_id) => (POST, "/api/indexing/sources/{}/runs/{}/cancel", false, false);
-    list_jobs(source_id, run_id) => (GET, "/api/indexing/sources/{}/runs/{}/jobs", true, false);
-    list_attempts(source_id, run_id, job_id) => (GET, "/api/indexing/sources/{}/runs/{}/jobs/{}/attempts", true, false);
-    list_redrives(source_id, run_id, job_id) => (GET, "/api/indexing/sources/{}/runs/{}/jobs/{}/redrives", true, false);
-    redrive_job(source_id, run_id, job_id) => (POST, "/api/indexing/sources/{}/runs/{}/jobs/{}/redrive", false, false);
-    observe_queue() => (POST, "/api/indexing/queue", false, false);
+    health() => (Command::Health, true, false, false);
+    discover_connection() => (Command::DiscoverConnection, false, false, false);
+    save_connection() => (Command::SaveConnection, false, false, false);
+    list_connections() => (Command::ListConnections, true, true, false);
+    list_sources() => (Command::ListSources, true, true, false);
+    list_libraries(source_id) => (Command::ListLibraries(source_id), true, true, false);
+    list_runs(source_id) => (Command::ListRuns(source_id), true, true, false);
+    list_candidates(source_id, run_id) => (Command::ListCandidates(source_id, run_id), true, true, true);
+    list_policies(source_id) => (Command::ListPolicies(source_id), true, true, false);
+    configure_policy(source_id) => (Command::ConfigurePolicy(source_id), false, false, false);
+    get_progress(source_id, policy_id) => (Command::GetProgress(source_id, policy_id), true, false, false);
+    start_run(source_id) => (Command::StartRun(source_id), false, false, false);
+    get_run_status(source_id, run_id) => (Command::GetRunStatus(source_id, run_id), true, false, false);
+    get_execution(source_id, run_id) => (Command::GetExecution(source_id, run_id), true, false, false);
+    pause_run(source_id, run_id) => (Command::PauseRun(source_id, run_id), false, false, false);
+    resume_run(source_id, run_id) => (Command::ResumeRun(source_id, run_id), false, false, false);
+    cancel_run(source_id, run_id) => (Command::CancelRun(source_id, run_id), false, false, false);
+    list_jobs(source_id, run_id) => (Command::ListJobs(source_id, run_id), true, true, false);
+    list_attempts(source_id, run_id, job_id) => (Command::ListAttempts(source_id, run_id, job_id), true, true, false);
+    list_redrives(source_id, run_id, job_id) => (Command::ListRedrives(source_id, run_id, job_id), true, true, false);
+    redrive_job(source_id, run_id, job_id) => (Command::RedriveJob(source_id, run_id, job_id), false, false, false);
+    observe_queue() => (Command::ObserveQueue, false, false, false);
 }
 
 pub async fn serve(
     service: Operator,
     listener: tokio::net::TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
-    origins: Vec<axum::http::HeaderValue>,
+    origins: Vec<HeaderValue>,
 ) -> Result<(), tonic::transport::Error> {
-    use axum::http::HeaderName;
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::POST])
@@ -177,7 +177,23 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use screenroom_proto::operator::v1::operator_service_client::OperatorServiceClient;
+    use screenroom_proto::operator::v1::{
+        OperatorPage, operator_service_client::OperatorServiceClient,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn http(address: std::net::SocketAddr, headers: &str, body: &[u8]) -> String {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            String::from_utf8_lossy(&response).to_ascii_lowercase()
+        })
+        .await
+        .unwrap()
+    }
 
     #[tokio::test]
     async fn shared_rpc_listener_rejects_invalid_requests_before_database_access() {
@@ -186,7 +202,8 @@ mod tests {
                 .socket("/nonexistent-screenroom-operator-test"),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("http://{address}");
         let (stop, shutdown) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(serve(
             Operator::new_rpc(pool),
@@ -194,7 +211,7 @@ mod tests {
             async {
                 let _ = shutdown.await;
             },
-            vec![],
+            vec!["http://127.0.0.1:4173".parse().unwrap()],
         ));
         let channel = tonic::transport::Endpoint::from_shared(endpoint)
             .unwrap()
@@ -219,6 +236,59 @@ mod tests {
             .unwrap_err();
         assert_eq!(oversized.code(), tonic::Code::InvalidArgument);
         assert_eq!(oversized.message(), "invalid");
+        for limit in [0, 1001] {
+            let invalid = client
+                .list_sources(OperatorRequest {
+                    page: Some(OperatorPage {
+                        limit,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })
+                .await
+                .unwrap_err();
+            assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        }
+        let invalid = client
+            .start_run(OperatorRequest {
+                source_id: "00000000-0000-0000-0000-000000000001".into(),
+                payload_json: br#"{"trigger":"scheduled"}"#.to_vec(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+        let legacy = http(
+            address,
+            "POST /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/grpc-web+proto\r\nX-Grpc-Web: 1\r\nContent-Length: 5\r\n\r\n",
+            &[0; 5],
+        )
+        .await;
+        assert!(
+            legacy.starts_with("http/1.1 404") || legacy.contains("grpc-status: 12"),
+            "{legacy:?}"
+        );
+        assert!(!legacy.contains("application/json"));
+
+        // An empty ListSources request lacks the required page.
+        for origin in ["http://127.0.0.1:4173", "http://127.0.0.1:4174"] {
+            let web = http(
+                address,
+                &format!(
+                    "POST /screenroom.operator.v1.OperatorService/ListSources HTTP/1.1\r\n\
+                    Host: localhost\r\nConnection: close\r\nOrigin: {origin}\r\n\
+                    Content-Type: application/grpc-web+proto\r\nX-Grpc-Web: 1\r\nContent-Length: 5\r\n\r\n"
+                ),
+                &[0; 5],
+            )
+            .await;
+            assert!(web.contains("grpc-status: 3"), "{web:?}");
+            assert_eq!(
+                web.contains("access-control-allow-origin: http://127.0.0.1:4173"),
+                origin.ends_with(":4173"),
+            );
+        }
         drop(client);
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();

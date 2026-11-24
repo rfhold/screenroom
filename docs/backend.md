@@ -41,6 +41,9 @@ bash scripts/backend.sh down
 These commands mutate local runtime state; they are not prose-validation commands.
 `up` initializes missing installation files, private Garage keys, private credential volumes, and a local user before service startup.
 Its create-only user initialization preserves operator names, disabled users, cleared links, and remapped links.
+Local setup omits legacy empty `links` arrays from the initializer input without changing `users.json`.
+If a legacy file has any other `links` value, preserve a copy and remove the field explicitly before retrying setup.
+Use the supported user service to manage profile links; setup never imports file-based links.
 The explicit user initializer supports ordinary local user updates, not provider-link imports; service startup itself does not create users.
 `wait` compares native/browser catalog information and user RPCs with persisted installation identity.
 It also checks the private playback `/ready` endpoint before it writes `checks.playback=true` in the descriptor.
@@ -48,6 +51,15 @@ Readiness does not require provider content, artwork, complete semantic coverage
 HTTP 200 alone does not establish readiness. `status` checks the live instance identity against its descriptor.
 `down` preserves named volumes, Garage keys, and the instance UUID; it removes the readiness descriptor.
 Never delete volumes or regenerate missing keys as a routine restart procedure.
+
+The `just backend` recipe forwards the same commands and arguments to `scripts/backend.sh`.
+With `jq` installed, `just backend status --live` reports the last verified attachment separately from current probes and the worker process state.
+A worker process does not prove that its loop makes progress. The command reports loop liveness as unknown.
+The live view does not write runtime files or contact Jellyfin.
+Use `just backend-contract` only for an approved attached instance.
+Use `just backend-persistence OWNER_FILE` only for a dedicated disposable project.
+The persistence drill restarts the same volumes; it does not prove a restore onto empty storage.
+See [backup and restore](deployment.md#backup-and-restore) for the complete restore set.
 
 The default project is `screenroom-local`; `SCREENROOM_BACKEND_PROJECT` accepts an explicit `screenroom-<name>` project.
 `SCREENROOM_BACKEND_PROFILE` is retired and fails validation.
@@ -214,6 +226,8 @@ An uncertain personal effect keeps watched freshness unknown even after credenti
 
 Cleanup uses durable bounded claims and at most five attempts; exhausted or identity-change failures remain visible through safe diagnostics.
 Retention preserves incomplete cleanup evidence and deletes private files only after durable retirement proof.
+Private gateway telemetry reports the count of device cleanups blocked by failed encoding cleanup, the age of the oldest failed job, and counts by fixed failure reason.
+These metrics carry no session or provider identifiers. They do not retry quarantined work.
 Shutdown closes control admission, drains owned tasks, and classifies durable dispatch outcomes before cleanup.
 If classification fails, shutdown defers cleanup rather than assume that cancelled provider work stopped.
 The shutdown budget is 61 seconds; Compose and lifecycle teardown allow 75 seconds.
@@ -298,6 +312,10 @@ The revision is an operator declaration, not proof of an immutable upstream mode
 Unavailable, incompatible, or incomplete semantic coverage returns explicit lexical degradation when a lexical method remains active.
 `effective_methods.semantic` becomes false and `degradation_reason` explains the fallback; semantic-only requests fail instead of fabricated success.
 See the [client search contract](client-api.md#search-limits) for query, filter, and pagination rules.
+Current catalog binaries accept compact and legacy search tokens. They emit legacy tokens by default.
+After all replicas accept compact tokens, set `SCREENROOM_SEARCH_COMPACT_CURSOR=1` for Compose or `searchCompactCursor=true` for Pulumi.
+Legacy mode rejects a continuation that cannot fit in its token budget.
+For rollback, remove the setting first. Keep dual readers for 900 seconds after the last compact token.
 
 ### Artwork storage and publication
 
@@ -425,7 +443,9 @@ Those fields still require a privacy review before production use; this setup as
 
 The [testing guide](testing.md) separates isolated fault tests, disposable PostgreSQL checks, and real-provider acceptance.
 No broad test command grants database, provider, Docker lifecycle, or GUI authority.
-The [backend contract helper](../scripts/backend-contract.py) checks an approved live local instance through real RPC and artwork paths.
+The [backend contract helper](../scripts/backend-contract.sh) checks an approved live local instance through native gRPC and gRPC-Web.
+The Bash driver uses `jq`, `grpcurl` and `buf` for structured data and RPCs.
+It keeps small Python helpers for file locks, atomic writes and bounded subprocesses.
 Its use does not authorize backend startup, teardown, provider imports, or volume removal.
 
 ## Protobuf generation

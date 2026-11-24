@@ -345,6 +345,7 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   const listen = (name: string, value: number) => env(name, `0.0.0.0:${value}`);
   const catalog = backend("catalog", ["screenroom-catalog"], [
     listen("SCREENROOM_CATALOG_LISTEN", 50052), env("SCREENROOM_CATALOG_PUBLIC_ORIGIN", origin),
+    env("SCREENROOM_SEARCH_COMPACT_CURSOR", config.getBoolean("searchCompactCursor") ? "1" : "0"),
     env("SCREENROOM_USER_PRIVATE_URI", "http://user:50063"), ...s3Env(artworkReader.metadata.name), ...embeddingEnv,
   ], [{ name: "grpc", containerPort: 50052 }], [s3, embedding, { to: [pod("user")], ports: port(50063) }],
   [fromGateway(50052)]);

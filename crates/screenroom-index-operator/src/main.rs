@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .split(',')
         .filter(|origin| !origin.is_empty())
         .map(str::parse)
-        .collect::<Result<Vec<axum::http::HeaderValue>, _>>()?;
+        .collect::<Result<Vec<http::HeaderValue>, _>>()?;
     let telemetry = Telemetry::init("screenroom-index-operator", TelemetryConfig::from_env()?)?;
     let result = async {
         let pool = db::connect_service(&ServiceDatabaseConfig::from_env()?).await?;

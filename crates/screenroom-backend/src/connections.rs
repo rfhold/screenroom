@@ -391,7 +391,10 @@ impl ConnectionRepository {
         sqlx::query("INSERT INTO identity.jellyfin_user_links(user_id,source_id,jellyfin_user_id) VALUES($1,$2,$3) ON CONFLICT(user_id,source_id) DO UPDATE SET jellyfin_user_id=EXCLUDED.jellyfin_user_id,updated_at=clock_timestamp()")
             .bind(request.local_user_id).bind(&source_key).bind(&request.profile_id).execute(&mut *tx).await?;
         sqlx::query("UPDATE identity.users SET updated_at=GREATEST(clock_timestamp(),updated_at+interval '1 microsecond') WHERE id=$1").bind(request.local_user_id).execute(&mut *tx).await?;
-        let configuration:indexing::Configuration=serde_json::from_value(json!({"indexing":1,"enabled":true,"automatic_runs":false,"cadence_seconds":3600,"mode":"full","components":{"metadata":true,"artwork":true,"embeddings":false},"strategy":"all","scope":{"library_ids":selected.iter().map(|l|l.id.clone()).collect::<Vec<_>>(),"item_kinds":["movie","series"]},"operator_profile_id":request.profile_id,"limits":{"work_requests":100,"work_records":100,"lifetime_requests":10000000,"lifetime_records":10000000,"deadline_seconds":2592000,"work_timeout_seconds":240}})).map_err(|_|Error::Connection("invalid_selection"))?;
+        let configuration = indexing::Configuration::managed_initial(
+            selected.iter().map(|library| library.id.clone()).collect(),
+            request.profile_id.clone(),
+        );
         let (policy, next_tx) = IndexingRepository::configure_in(
             tx,
             source_id,

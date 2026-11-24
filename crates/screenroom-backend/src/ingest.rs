@@ -313,7 +313,12 @@ impl IngestRepository {
         if !(1..=100).contains(&limit) {
             return Err(Error::Invalid("limit"));
         }
-        Ok(sqlx::query_as("SELECT p.* FROM ingest.policies p JOIN catalog.sources s ON s.id=p.source_id WHERE p.enabled AND p.automatic_runs AND s.state='enabled' AND ($2::timestamptz IS NULL OR (p.next_due_at,p.id)>($2,$3)) AND (p.next_due_at<=now() OR (p.selection_json->>'mode'='incremental' AND EXISTS(SELECT FROM ingest.indexing_progress ip WHERE ip.policy_id=p.id AND ip.policy_version=p.version AND ip.next_reconcile_at<=now()))) AND NOT EXISTS(SELECT FROM ingest.runs r WHERE r.source_id=p.source_id AND (r.state IN ('running','paused') OR EXISTS(SELECT FROM queue.jobs j WHERE j.scope_id=r.id AND j.state IN ('ready','leased')))) ORDER BY p.next_due_at,p.id LIMIT $1").bind(i64::from(limit)).bind(after.map(|cursor|cursor.0)).bind(after.map(|cursor|cursor.1)).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT p.* FROM ingest.policies p JOIN catalog.sources s ON s.id=p.source_id WHERE p.enabled AND p.automatic_runs AND s.state='enabled' AND ($2::timestamptz IS NULL OR (p.next_due_at,p.id)>($2,$3)) AND p.next_due_at<=now() AND NOT EXISTS(SELECT FROM ingest.runs r WHERE r.source_id=p.source_id AND (r.state IN ('running','paused') OR EXISTS(SELECT FROM queue.jobs j WHERE j.scope_id=r.id AND j.state IN ('ready','leased')))) ORDER BY p.next_due_at,p.id LIMIT $1").bind(i64::from(limit)).bind(after.map(|cursor|cursor.0)).bind(after.map(|cursor|cursor.1)).fetch_all(&self.pool).await?)
+    }
+    pub async fn defer_invalid_automatic_policy(&self, policy: &Policy) -> Result<()> {
+        sqlx::query("UPDATE ingest.policies SET next_due_at=clock_timestamp()+make_interval(secs=>incremental_seconds) WHERE id=$1 AND version=$2 AND enabled AND automatic_runs AND next_due_at=$3 AND next_due_at<=clock_timestamp()")
+            .bind(policy.id).bind(policy.version).bind(policy.next_due_at).execute(&self.pool).await?;
+        Ok(())
     }
     pub async fn run(&self, id: Uuid) -> Result<Option<Run>> {
         Ok(sqlx::query_as("SELECT * FROM ingest.runs WHERE id=$1")
@@ -329,7 +334,10 @@ impl IngestRepository {
             .await?
             .ok_or(Error::NotFound)?;
         lock_policy_source(&mut tx, policy).await?;
-        sqlx::query("UPDATE ingest.runs SET state='cancelled',finished_at=now() WHERE id=$1 AND state IN ('running','paused')").bind(id).execute(&mut *tx).await?;
+        let changed = sqlx::query("UPDATE ingest.runs SET state='cancelled',finished_at=now() WHERE id=$1 AND state IN ('running','paused')").bind(id).execute(&mut *tx).await?.rows_affected();
+        if changed != 1 {
+            return Err(Error::Stale);
+        }
         crate::queue::cancel_scope(&mut tx, "indexing", id, false).await?;
         tx.commit().await?;
         Ok(())
@@ -409,8 +417,9 @@ impl IngestRepository {
         Ok(claim.map(Into::into))
     }
     pub async fn expire_deadlines(&self) -> Result<()> {
+        const STRANDED: &str = "r.state='failed' AND EXISTS(SELECT FROM queue.jobs j WHERE j.scope_id=r.id AND j.queue_name='indexing' AND j.state IN ('ready','leased')) AND (NOT ingest.indexing_deadline_valid(r.id) OR EXISTS(SELECT FROM ingest.runs newer WHERE newer.source_id=r.source_id AND newer.id<>r.id AND (newer.started_at>r.started_at OR newer.state IN ('running','paused'))))";
         let eligible = format!(
-            "({EXECUTION_BUDGET_SQL}) AND r.state IN ('running','paused','complete') AND (r.state<>'complete' OR ir.candidate_watermark IS NOT NULL OR EXISTS(SELECT FROM queue.jobs j WHERE j.scope_id=r.id AND j.state IN ('ready','leased'))) AND ir.settled_at IS NULL AND r.started_at+make_interval(secs=>(r.policy_snapshot->'selection_json'->'limits'->>'deadline_seconds')::integer)<=clock_timestamp()"
+            "({EXECUTION_BUDGET_SQL}) AND (({STRANDED}) OR (r.state IN ('running','paused','complete') AND (r.state<>'complete' OR ir.candidate_watermark IS NOT NULL OR EXISTS(SELECT FROM queue.jobs j WHERE j.scope_id=r.id AND j.state IN ('ready','leased'))) AND ir.settled_at IS NULL AND NOT ingest.indexing_deadline_valid(r.id)))"
         );
         let runs: Vec<Run> = sqlx::query_as(&format!("SELECT r.* FROM ingest.runs r JOIN ingest.indexing_runs ir ON ir.run_id=r.id WHERE {eligible} ORDER BY r.source_id,r.policy_id,r.id LIMIT 32")).fetch_all(&self.pool).await?;
         for run in runs {
@@ -428,7 +437,9 @@ impl IngestRepository {
                 .bind(run.id).fetch_one(&mut *tx).await?;
             if expired {
                 crate::queue::cancel_scope(&mut tx, "indexing", run.id, false).await?;
-                sqlx::query("UPDATE ingest.runs SET state='failed',finished_at=clock_timestamp(),coverage=coverage||'{\"terminal_reason\":\"deadline_expired\"}'::jsonb WHERE id=$1").bind(run.id).execute(&mut *tx).await?;
+                if run.state != "failed" {
+                    sqlx::query("UPDATE ingest.runs SET state='failed',finished_at=clock_timestamp(),coverage=coverage||'{\"terminal_reason\":\"deadline_expired\"}'::jsonb WHERE id=$1").bind(run.id).execute(&mut *tx).await?;
+                }
             }
             tx.commit().await?;
         }
@@ -975,6 +986,23 @@ impl IngestRepository {
                     .execute(&mut *tx)
                     .await?;
             }
+        }
+        // Root types first become authoritative at discovery. Change execution mode
+        // in the same commit, without adding a new cursor field for older workers.
+        if page.checkpoint.scope_key == "full-index-v1"
+            && !page.libraries.is_empty()
+            && let Some(roots) = page
+                .checkpoint
+                .cursor
+                .get("roots")
+                .and_then(Value::as_array)
+            && roots.iter().any(|r| r["kind"] == "collections")
+            && roots
+                .iter()
+                .any(|r| matches!(r["kind"].as_str(), Some("movies" | "television")))
+        {
+            sqlx::query("UPDATE ingest.indexing_runs SET mode='reconcile',fallback_reason='mixed_collection_scope' WHERE run_id=$1 AND mode='incremental' AND NOT EXISTS(SELECT FROM ingest.checkpoints WHERE source_id=$2 AND scope_key=$3 AND policy_version=$4 AND observed_run_id=$1 AND jsonb_typeof(cursor->'roots')='array')")
+                .bind(run.id).bind(p.source_id).bind(checkpoint_scope(p.id,&page.checkpoint.scope_key)).bind(p.version).execute(&mut *tx).await?;
         }
         if let Some(reason) = page
             .checkpoint

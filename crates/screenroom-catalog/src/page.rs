@@ -37,6 +37,14 @@ pub(crate) fn decode<T: DeserializeOwned>(
     page: Option<&Page>,
     binding: &str,
 ) -> Result<(u32, Option<T>), Status> {
+    decode_with_legacy(page, binding, None)
+}
+
+pub(crate) fn decode_with_legacy<T: DeserializeOwned>(
+    page: Option<&Page>,
+    binding: &str,
+    legacy: Option<&str>,
+) -> Result<(u32, Option<T>), Status> {
     let size = page.map_or(0, |p| p.size);
     let size = if size == 0 { 50 } else { size };
     if size > 200 {
@@ -53,7 +61,7 @@ pub(crate) fn decode<T: DeserializeOwned>(
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .ok_or_else(|| Status::invalid_argument("page token"))?;
-    if token.binding != binding {
+    if token.binding != binding && legacy != Some(token.binding.as_str()) {
         return Err(Status::invalid_argument("page token scope"));
     }
     Ok((size, Some(token.cursor)))

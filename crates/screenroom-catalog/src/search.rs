@@ -63,9 +63,11 @@ impl search_service_server::SearchService for Catalog {
                 "select at least one search method",
             ));
         }
-        let binding = page::binding("search", &query, &scope)
+        let legacy = page::binding("search", &query, &scope)
             + &serde_json::to_string(&choices).map_err(|_| Status::internal("methods"))?;
-        let (size, cursor) = page::decode::<Cursor>(r.page.as_ref(), &binding)?;
+        let binding = compact_binding(&query, &scope, &choices)?;
+        let (size, cursor) =
+            page::decode_with_legacy::<Cursor>(r.page.as_ref(), &binding, Some(&legacy))?;
         let cursor = if let Some(cursor) = cursor {
             if cursor.index != INDEX_REVISION {
                 return Err(Status::invalid_argument("search index token"));
@@ -167,19 +169,27 @@ impl search_service_server::SearchService for Catalog {
             .snapshot_page(cursor.id, &digest, &scope, cursor.offset, size)
             .await
             .map_err(status)?;
-        let mut items = vec![];
-        for hit in saved.results {
-            if let Some(row) = self
-                .catalog
-                .get(&scope, &hit.public_id)
-                .await
-                .map_err(status)?
-            {
-                items.push(row);
-            }
-        }
+        let ids: Vec<_> = saved.results.into_iter().map(|hit| hit.public_id).collect();
+        let items = self
+            .catalog
+            .get_ranked(&scope, &ids)
+            .await
+            .map_err(status)?;
         let next_page_token = match saved.next_offset {
-            Some(offset) => page::encode(&binding, &Cursor { offset, ..cursor })?,
+            Some(offset) => {
+                let cursor = Cursor { offset, ..cursor };
+                if !compact_encoding_enabled() {
+                    let token = page::encode(&legacy, &cursor)?;
+                    if token.len() > 8192 {
+                        return Err(Status::invalid_argument(
+                            "query exceeds legacy page token budget",
+                        ));
+                    }
+                    token
+                } else {
+                    page::encode(&binding, &cursor)?
+                }
+            }
             None => String::new(),
         };
         let methods = &saved.effective_methods;
@@ -200,6 +210,68 @@ impl search_service_server::SearchService for Catalog {
         _: Request<GetSearchCapabilitiesRequest>,
     ) -> Result<Response<GetSearchCapabilitiesResponse>, Status> {
         Ok(Response::new(GetSearchCapabilitiesResponse {methods:vec!["title_only".into(),"text".into(),"fuzzy".into(),"semantic".into()],types:vec!["movie".into(),"series".into(),"episode".into()],sources:vec!["all".into(),"jellyfin".into()],semantic_description:"Exact eligible-set cosine retrieval and reciprocal-rank fusion; explicit lexical degradation when embeddings are unavailable, incompatible, or incomplete. No reranking.".into(),maximum_query_length:8000}))
+    }
+}
+
+fn compact_binding(
+    query: &str,
+    scope: &screenroom_backend::catalog::Scope,
+    methods: &[String],
+) -> Result<String, Status> {
+    let digest = snapshot_digest(query, scope, methods).map_err(status)?;
+    let mut binding = String::from("search-v2:");
+    use std::fmt::Write;
+    for byte in digest {
+        write!(&mut binding, "{byte:02x}").expect("String writes are infallible");
+    }
+    Ok(binding)
+}
+
+fn compact_encoding_enabled() -> bool {
+    std::env::var_os("SCREENROOM_SEARCH_COMPACT_CURSOR").is_some_and(|value| value == "1")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_cursor_is_bounded_for_maximum_multibyte_query() {
+        let query = "猫".repeat(8000);
+        let scope = page::scope("source", "library").unwrap();
+        let methods = vec!["text".into()];
+        let binding = compact_binding(&query, &scope, &methods).unwrap();
+        let cursor = Cursor {
+            id: Uuid::new_v4(),
+            offset: 1,
+            model: None,
+            index: INDEX_REVISION.into(),
+        };
+        let token = page::encode(&binding, &cursor).unwrap();
+        assert!(token.len() < 512);
+        let next = Page { size: 1, token };
+        assert_eq!(
+            page::decode::<Cursor>(Some(&next), &binding)
+                .unwrap()
+                .1
+                .unwrap()
+                .id,
+            cursor.id
+        );
+        let other = page::scope("other", "library").unwrap();
+        assert!(
+            page::decode::<Cursor>(
+                Some(&next),
+                &compact_binding(&query, &other, &methods).unwrap()
+            )
+            .is_err()
+        );
+        let legacy = page::binding("search", "short", &scope) + "[\"text\"]";
+        let old = Page {
+            size: 1,
+            token: page::encode(&legacy, &cursor).unwrap(),
+        };
+        assert!(page::decode_with_legacy::<Cursor>(Some(&old), &binding, Some(&legacy)).is_ok());
     }
 }
 fn digest(

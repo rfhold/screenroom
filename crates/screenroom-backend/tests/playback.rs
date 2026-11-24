@@ -25,6 +25,13 @@ struct Fixture {
 }
 
 impl Fixture {
+    async fn recover_abandoned(&self) -> screenroom_backend::Result<u64> {
+        let mut connection = self.runtime.acquire().await?;
+        connection.close_on_drop();
+        assert!(try_gateway_lock(&mut connection).await?);
+        PlaybackRepository::recover_abandoned(&mut connection).await
+    }
+
     async fn new(upgrade: bool) -> Self {
         let url = std::env::var("SCREENROOM_PLAYBACK_TEST_DATABASE_URL")
             .expect("explicit disposable SCREENROOM_PLAYBACK_TEST_DATABASE_URL required");
@@ -623,7 +630,7 @@ async fn abandonment_distinguishes_unsent_and_dispatched_for_restart_expiry_and_
             }
             match cause {
                 "restart" => {
-                    f.repo.recover_abandoned().await.unwrap();
+                    f.recover_abandoned().await.unwrap();
                 }
                 "expiry" => {
                     sqlx::query("UPDATE playback.sessions SET lease_until=clock_timestamp()-interval '1 second' WHERE id=$1")
@@ -697,7 +704,7 @@ async fn dispatch_claim_racing_recovery_cannot_be_classified_unsent_after_author
             .await
             .unwrap());
         let (dispatch, recovery) =
-            tokio::join!(f.repo.before_io(&operation), f.repo.recover_abandoned());
+            tokio::join!(f.repo.before_io(&operation), f.recover_abandoned());
         recovery.unwrap();
         let state = effect_state(&f, &operation).await;
         if dispatch.is_ok() {
@@ -1186,7 +1193,7 @@ async fn acquisition_before_during_after_and_late_timed_out_effect() {
         .await
         .unwrap();
     f.repo.expire().await.unwrap();
-    f.repo.recover_abandoned().await.unwrap();
+    f.recover_abandoned().await.unwrap();
     assert!(
         watched
             .publish(&before, &snapshot(false), Utc::now())
@@ -1383,7 +1390,7 @@ async fn lost_authorization_crash_and_restart_resume_exact_cleanup_only() {
     );
     f.repo.before_io(&created.operation).await.unwrap();
     // Token creation response was lost or process crashed before private publication.
-    f.repo.recover_abandoned().await.unwrap();
+    f.recover_abandoned().await.unwrap();
     assert!(f.repo.before_io(&created.operation).await.is_err());
     let claim = f.repo.claim_cleanup().await.unwrap().unwrap();
     assert_eq!(claim.device_id, created.session.device_id);
@@ -1404,6 +1411,11 @@ async fn lost_authorization_crash_and_restart_resume_exact_cleanup_only() {
         .await
         .unwrap();
     assert_eq!(state, "failed", "failure evidence survives retention");
+    let counts = f.repo.telemetry_counts().await.unwrap();
+    assert_eq!(counts.failed, 1);
+    assert_eq!(counts.identity_changed, 1);
+    assert_eq!(counts.blocked_device, 0);
+    assert!(counts.oldest_failed_seconds >= 0.0);
     assert!(
         f.repo
             .retain(Utc::now() - screenroom_backend::chrono::Duration::days(2))

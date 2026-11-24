@@ -8,6 +8,7 @@
 | `prod` | `screenroom` | `screenroom.holdenitdown.net` | Signed `vMAJOR.MINOR.PATCH` tag |
 
 The [Tekton pipelines](../.tekton/) use the shared BuildKit, manifest, promotion, and Pulumi tasks. Preview builds six images in parallel for `amd64` and `arm64`, then deploys their digests together. Production promotes the same revision digests without a rebuild. The tag must name an ancestor of `main` and match the workspace version.
+Run behavioral checks on the candidate revision before merge or release. Keep those checks outside the deployment pipelines.
 
 Use the shared Pulumi backend and deployment task. The task expects the stack state record to exist, as it does for sibling projects. For a manual preview, pass `--config` for each immutable image: `catalogImage`, `userImage`, `workerImage`, `playbackGatewayImage`, `indexOperatorImage`, and `webImage`.
 
@@ -23,6 +24,17 @@ The same host serves the [Web SPA](../apps/web/) at `/` and supports direct navi
 - Verify the Gateway listener, DNS, certificate, trusted-network boundary, and Gateway log settings. The backend accepts public-port traffic from the `ingress` namespace, like sibling apps. Verify native gRPC, gRPC-Web, artwork, and media range requests. No Authentik or application authentication protects the route. Do not expose it to an untrusted network.
 - Confirm Pipelines as Code registration, signer custody, registry authorization, and Pulumi state privileges. The release verifier uses Homelab's General CI image and expects a `screenroom-release-trusted-signers` Secret with `signing-key.asc` in the CI namespace. Confirm serialized stack updates and stale-run handling. The shared Pulumi task skips preview, so inspect a manual stack preview before the first push or tag that triggers a deployment.
 - Both stacks use the shared Homelab deploy task and its `tekton-cluster-kubeconfig`, like the sibling repositories.
+
+## Backup and restore
+
+The database backup is one part of the restore set. Keep artwork objects and storage metadata, the Jellyfin credential volume, the playback secret volume, and the installation configuration with it.
+
+1. Before activation, record the approved recovery point, acceptable data loss, recovery time, and backup owner for each store.
+2. Restore the set to an isolated target. Disable provider access. Do not start the worker or gateway yet.
+3. Check the database revision and restricted roles. Check the installation and user selectors. Verify that the private files retain their owner and mode.
+4. Check that saved credential references and published artwork resolve. Compare representative artwork bytes with their stored hashes.
+5. On the isolated target, verify that pending jobs retain their identities and that playback recovery does not replay personal writes.
+6. Record the data age, elapsed time, and any missing check. Do not treat a restart on the original volumes as restore evidence.
 
 ## Automatic setup
 

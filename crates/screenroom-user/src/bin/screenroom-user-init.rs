@@ -8,7 +8,7 @@ const CONFIG_LIMIT: u64 = 1024 * 1024;
 fn arguments(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<(bool, std::path::PathBuf), &'static str> {
-    let usage = "usage: screenroom-user-init [--create-missing] <users.json>";
+    let usage = "usage: screenroom-user-init [--create-missing] <users.json|->";
     let mut args = args.into_iter();
     let first = args.next().ok_or(usage)?;
     let create_missing = first == "--create-missing";
@@ -17,7 +17,7 @@ fn arguments(
     } else {
         first
     };
-    if path.to_string_lossy().starts_with('-') || args.next().is_some() {
+    if (path != "-" && path.to_string_lossy().starts_with('-')) || args.next().is_some() {
         return Err(usage);
     }
     Ok((create_missing, path.into()))
@@ -50,7 +50,11 @@ fn unsupported_links<'de, D: serde::Deserializer<'de>>(_: D) -> Result<(), D::Er
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (create_missing, path) = arguments(std::env::args_os().skip(1))?;
-    let bytes = read_config(std::fs::File::open(path)?)?;
+    let bytes = if path == std::path::Path::new("-") {
+        read_config(std::io::stdin().lock())?
+    } else {
+        read_config(std::fs::File::open(path)?)?
+    };
     let users: Vec<User> = serde_json::from_slice(&bytes)?;
     if users.len() > 1000 {
         return Err("too many bootstrap users".into());
@@ -91,6 +95,10 @@ mod tests {
         assert_eq!(
             parse(&["--create-missing", "users.json"]).unwrap(),
             (true, "users.json".into())
+        );
+        assert_eq!(
+            parse(&["--create-missing", "-"]).unwrap(),
+            (true, "-".into())
         );
         for args in [
             &[][..],

@@ -50,10 +50,11 @@ impl browse_service_server::BrowseService for Catalog {
         let scope = page::scope(&r.source_id, "")?;
         let binding = page::binding("libraries", "", &scope);
         let (size, after) = page::decode::<String>(r.page.as_ref(), &binding)?;
-        let mut rows = self.catalog.libraries(&scope).await.map_err(status)?;
-        rows.sort_by(|a, b| a.public_id.cmp(&b.public_id));
-        rows.dedup_by(|a, b| a.public_id == b.public_id);
-        rows.retain(|r| after.as_ref().is_none_or(|a| r.public_id > *a));
+        let mut rows = self
+            .catalog
+            .library_page(&scope, after.as_deref(), size + 1)
+            .await
+            .map_err(status)?;
         let more = rows.len() > size as usize;
         rows.truncate(size as usize);
         let next_page_token = if more {
