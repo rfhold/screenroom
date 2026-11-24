@@ -2757,6 +2757,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -2811,8 +2812,10 @@ dependencies = [
  "futures",
  "gloo-timers",
  "js-sys",
+ "opentelemetry",
  "prost-types",
  "reqwest 0.12.28",
+ "screenroom-observability",
  "screenroom-proto",
  "serde",
  "serde-wasm-bindgen",
@@ -2821,6 +2824,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-web-wasm-client",
+ "tracing",
  "uniffi",
  "url",
  "wasm-bindgen",
@@ -2872,6 +2876,8 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pyroscope",
+ "reqwest 0.13.5",
+ "rustls",
  "tokio",
  "tokio-stream",
  "tonic-tracing-opentelemetry",
@@ -2879,6 +2885,8 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "uuid",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]

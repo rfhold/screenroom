@@ -6,6 +6,28 @@ const config = new pulumi.Config();
 const namespaceName = config.require("namespace");
 const hostname = config.require("hostname");
 const protectData = config.requireBoolean("protectData");
+const deploymentEnvironment = pulumi.getStack() === "prod" ? "production" : pulumi.getStack();
+const telemetryEnabled = config.getBoolean("telemetryEnabled") ?? true;
+const telemetryEndpoint = config.get("telemetryEndpoint") ?? "https://telemetry.holdenitdown.net:4318";
+const telemetryMetricsUrl = config.get("browserTelemetryMetricsUrl");
+const telemetryTraceSampleRate = config.getNumber("telemetryTraceSampleRate") ?? 0.1;
+const telemetryCidr = config.get("telemetryEgressCidr");
+if (!(telemetryTraceSampleRate >= 0 && telemetryTraceSampleRate <= 1)) {
+  throw new Error("telemetryTraceSampleRate must be between 0 and 1");
+}
+const telemetryOrigin = new URL(telemetryEndpoint);
+if (telemetryOrigin.protocol !== "https:" || telemetryOrigin.username || telemetryOrigin.password ||
+    telemetryOrigin.search || telemetryOrigin.hash || telemetryOrigin.pathname !== "/") {
+  throw new Error("telemetryEndpoint must be an HTTPS origin");
+}
+if (telemetryMetricsUrl) {
+  const metrics = new URL(telemetryMetricsUrl);
+  if (metrics.protocol !== "https:" || metrics.pathname !== "/v1/metrics" ||
+      metrics.username || metrics.password || metrics.search || metrics.hash) {
+    throw new Error("browserTelemetryMetricsUrl must be an HTTPS /v1/metrics endpoint");
+  }
+}
+const telemetryPort = Number(telemetryOrigin.port || "443");
 
 const origin = `https://${hostname}`;
 const databaseImage = config.require("databaseImage");
@@ -306,7 +328,20 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
         volumeMounts: [volumeMounts[0], { name: "users", mountPath: "/bootstrap", readOnly: true }],
       });
     }
-    const policy = network(name, ingress, [postgres, ...egress]);
+    const telemetryEgress: Rule = {
+      ...(telemetryCidr ? { to: [{ ipBlock: { cidr: telemetryCidr } }] } : {}),
+      ports: port(telemetryPort),
+    };
+    const telemetry: Env[] = telemetryEnabled ? [
+      env("OTEL_EXPORTER_OTLP_ENDPOINT", telemetryEndpoint),
+      env("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"),
+      env("OTEL_TRACES_SAMPLER", "parentbased_traceidratio"),
+      env("OTEL_TRACES_SAMPLER_ARG", String(telemetryTraceSampleRate)),
+      env("OTEL_SERVICE_NAME", `screenroom-${name === "worker" ? "index-worker" : name}`),
+      env("OTEL_RESOURCE_ATTRIBUTES", `service.namespace=screenroom,deployment.environment.name=${deploymentEnvironment},service.version=${images[name].split("@")[1] ?? "unknown"}`),
+      { name: "SCREENROOM_SERVICE_INSTANCE_ID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
+    ] : [env("SCREENROOM_TELEMETRY_DISABLED", "1")];
+    const policy = network(name, ingress, [postgres, ...egress, ...(telemetryEnabled ? [telemetryEgress] : [])]);
     const playback = !!mounts.playback;
     new k8s.apps.v1.Deployment(name, {
       metadata: metadata(name),
@@ -321,7 +356,7 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
           volumes,
           initContainers,
           containers: [{
-            name, image: images[name], command, ports, env: [...dbEnv(name), ...vars], volumeMounts,
+             name, image: images[name], command, ports, env: [...dbEnv(name), ...vars, ...telemetry], volumeMounts,
             securityContext: appSecurity,
             resources: { requests: { cpu: "100m", memory: "128Mi" }, limits: { memory: "1Gi" } },
             readinessProbe: playback ? { httpGet: { path: "/ready", port: 50054 } }
@@ -370,7 +405,13 @@ test "$(stat -c %u:%g:%a "$1")" = 10001:10001:700
   const webPort = { name: "http", containerPort: 8080 };
   const webConfig = new k8s.core.v1.ConfigMap("screenroom-web-config", {
     metadata: metadata("screenroom-web-config"),
-    data: { "screenroom-config.js": initialUser.apply(id => `window.__SCREENROOM_USER_ID__ = ${JSON.stringify(id)};\n`) },
+    data: { "screenroom-config.js": initialUser.apply(id =>
+      `window.__SCREENROOM_USER_ID__ = ${JSON.stringify(id)};\n` +
+      `window.__SCREENROOM_TELEMETRY__ = ${JSON.stringify({
+        enabled: telemetryEnabled, environment: deploymentEnvironment, metricsUrl: telemetryMetricsUrl,
+        sampleRate: telemetryTraceSampleRate,
+        version: webImage.split("@")[1] ?? "unknown",
+      })};\n`) },
   });
   const webPolicy = network("web", [{
     from: [gatewayPod],

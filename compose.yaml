@@ -6,6 +6,9 @@ x-backend: &backend
     postgres: {condition: service_healthy}
     garage: {condition: service_started}
   environment: &common
+    OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-https://telemetry.holdenitdown.net:4318}
+    OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-service.namespace=screenroom,deployment.environment.name=local}
+    SCREENROOM_TELEMETRY_DISABLED: ${SCREENROOM_TELEMETRY_DISABLED:-0}
     SCREENROOM_MIGRATION_DATABASE_URL: postgres://screenroom:screenroom-local-only@postgres/screenroom
     SCREENROOM_S3_ENDPOINT: http://garage:3900
     SCREENROOM_S3_REGION: garage

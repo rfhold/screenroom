@@ -8,7 +8,7 @@ stamp="$root/apps/apple/build/client-core-inputs.sha"
 compiler=${RUSTC:-${CARGO_BUILD_RUSTC:-rustc}}
 export SCREENROOM_APPLE_BUILD_STD_TARGETS=${SCREENROOM_APPLE_BUILD_STD_TARGETS:-aarch64-apple-ios-sim x86_64-apple-ios x86_64-apple-tvos}
 inputs=$({
-    find crates/screenroom-client-core crates/screenroom-proto proto -type f | LC_ALL=C sort | while IFS= read -r file; do shasum -a 256 "$file"; done
+    find crates/screenroom-client-core crates/screenroom-proto crates/screenroom-observability proto -type f | LC_ALL=C sort | while IFS= read -r file; do shasum -a 256 "$file"; done
     for file in Cargo.toml Cargo.lock rust-toolchain.toml rust-toolchain .cargo/config .cargo/config.toml scripts/build-client-core.sh scripts/patch-swift-cancellation.py apps/apple/scripts/prepare-core.sh; do
         if [ -f "$file" ]; then shasum -a 256 "$file"; fi
     done

@@ -29,8 +29,9 @@ impl MetricsConfig {
     fn from_lookup(
         mut read: impl FnMut(&str) -> Result<Option<String>, TelemetryError>,
     ) -> Result<Self, TelemetryError> {
-        let metrics_endpoint = if let Some(endpoint) = read("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")?
-        {
+        let metrics_endpoint = if read("SCREENROOM_TELEMETRY_DISABLED")?.as_deref() == Some("1") {
+            None
+        } else if let Some(endpoint) = read("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")? {
             Some(endpoint)
         } else {
             read("OTEL_EXPORTER_OTLP_ENDPOINT")?
@@ -40,11 +41,14 @@ impl MetricsConfig {
     }
 
     pub fn build_provider(&self, service_name: &str) -> Result<SdkMeterProvider, TelemetryError> {
-        let mut builder = SdkMeterProvider::builder().with_resource(
-            Resource::builder()
-                .with_service_name(service_name.to_owned())
-                .build(),
-        );
+        self.build_with_resource(crate::telemetry::resource(service_name))
+    }
+
+    pub(crate) fn build_with_resource(
+        &self,
+        resource: Resource,
+    ) -> Result<SdkMeterProvider, TelemetryError> {
+        let mut builder = SdkMeterProvider::builder().with_resource(resource);
         if let Some(endpoint) = &self.metrics_endpoint {
             let uri = endpoint
                 .parse::<http::Uri>()
@@ -60,6 +64,13 @@ impl MetricsConfig {
                 .with_http()
                 .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
                 .with_endpoint(endpoint)
+                .with_timeout(Duration::from_secs(3));
+            #[cfg(target_os = "android")]
+            let exporter = {
+                use opentelemetry_otlp::WithHttpConfig as _;
+                exporter.with_http_client(crate::telemetry::android_http_client()?)
+            };
+            let exporter = exporter
                 .build()
                 .map_err(|_| TelemetryError("could not configure OTLP metric exporter"))?;
             builder = builder.with_periodic_exporter(exporter);
@@ -316,6 +327,7 @@ mod tests {
         provider.shutdown().unwrap();
         let config = MetricsConfig::from_lookup(|name| {
             Ok(match name {
+                "SCREENROOM_TELEMETRY_DISABLED" => None,
                 "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT" => Some("https://collector/custom".into()),
                 _ => panic!("signal-specific endpoint must take precedence"),
             })

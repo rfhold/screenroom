@@ -13,6 +13,14 @@ mod settings;
 use screenroom_linux::{catalog, paging, playback_state, presentation, state};
 
 fn main() -> gtk::glib::ExitCode {
+    if !cfg!(debug_assertions) {
+        screenroom_client_core::initialize_client_telemetry(
+            "linux".into(),
+            option_env!("SCREENROOM_TELEMETRY_ENVIRONMENT")
+                .unwrap_or("production")
+                .into(),
+        );
+    }
     let app = adw::Application::builder()
         .application_id("tv.screenroom")
         .build();

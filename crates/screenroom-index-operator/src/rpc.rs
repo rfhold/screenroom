@@ -161,6 +161,7 @@ pub async fn serve(
         .timeout(std::time::Duration::from_secs(30))
         .layer(cors)
         .layer(tonic_web::GrpcWebLayer::new())
+        .layer(screenroom_observability::telemetry::RpcStatusLayer)
         .layer(screenroom_observability::telemetry::rpc_layer())
         .add_service(
             OperatorServiceServer::new(service)

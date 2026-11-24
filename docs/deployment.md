@@ -53,6 +53,16 @@ The deployment sets no cross-origin browser allowlist. If a separate Web origin 
 
 Both stacks configure catalog and the index worker to use Agent Gateway's `local-embedding` alias over HTTPS. They share the `qwen3-embedding-0.6b-local-v1` revision and the database's 1024 dimensions. Only those services gain egress on TCP 443 to the private Gateway VIP or its pods. The stacks do not set an embedding API key. See the [search contract](backend.md#search) for lexical fallback and model revision rules.
 
+## Telemetry
+
+Preview and production enable backend OTLP and Web Faro by default. Set Pulumi `telemetryEnabled=false` to disable both. `telemetryEndpoint` overrides the backend HTTPS collector origin; set `telemetryEgressCidr` if the collector IP range is known. Without a CIDR, the rule permits TCP on the configured collector port without a destination IP restriction.
+
+`telemetryTraceSampleRate` defaults to `0.1` for backend root traces and Faro sessions. Backend spans honor the parent sampling decision when a client supplies trace context. Application metrics are not trace-sampled.
+
+Web sends traces to `https://faro.holdenitdown.net/collect`. Direct Web metrics require `browserTelemetryMetricsUrl` and a collector that allows the deployment origin on that exact HTTPS `/v1/metrics` route. Faro does not ingest metrics. Do not set the metrics URL until the collector route is approved and ready.
+
+Use a request's W3C trace ID to find the trace in Tempo. Use `service.name` and `deployment.environment.name` to distinguish the app roles and environment on raw signals. Do not assume the same attributes survive collector-derived metrics.
+
 ## Local verification
 
 From `infra/pulumi/`, run `bun install --frozen-lockfile` and `bun run build`. The build type-checks the Pulumi program without contacting Kubernetes. It does not validate backup compatibility, media transport, or provider acceptance on Pantheon.

@@ -240,6 +240,7 @@ final class NativePlayback {
     private var stopRequest: StopPlaybackSessionRequest?
     private var stopAttempted = false
     private var presented = false
+    private var startupTime: TimeInterval?
     private var sequence: UInt32 = 0
     private var offset: Int64 = 0
     private var installedRevision: UInt32 = 0
@@ -324,7 +325,16 @@ final class NativePlayback {
     func prepareOnPresentation() async {
         guard !presented else { return }
         presented = true
+        startupTime = ProcessInfo.processInfo.systemUptime
         await start()
+    }
+
+    func firstFrameReady() {
+        guard !closed, let startupTime, session?.transport != nil else { return }
+        self.startupTime = nil
+        #if !DEBUG
+        recordPlaybackFirstFrame(elapsedMs: UInt64((ProcessInfo.processInfo.systemUptime - startupTime) * 1000))
+        #endif
     }
 
     func start() async {
@@ -1304,7 +1314,7 @@ private struct NativePlaybackContent: View {
             ZStack {
                 Color.black
                 Group {
-                    if renderMedia { NativeVideoSurface(player: playback.player) }
+                    if renderMedia { NativeVideoSurface(player: playback.player, firstFrame: playback.firstFrameReady) }
                     else { Color.black }
                 }
                 .frame(width: geometry.size.width, height: geometry.size.height)
@@ -2257,6 +2267,13 @@ private final class PlaybackFullscreenHost: UIViewController {
 }
 #endif
 
+@MainActor
+private final class NativeVideoObservation {
+    let firstFrame: @MainActor () -> Void
+    var observation: NSKeyValueObservation?
+    init(_ firstFrame: @escaping @MainActor () -> Void) { self.firstFrame = firstFrame }
+}
+
 #if os(macOS)
 private struct PlaybackWindowAttachment: NSViewRepresentable {
     let presentation: NativePlaybackPresentation
@@ -2297,29 +2314,49 @@ private final class PlaybackWindowObserver: NSView {
 
 private struct NativeVideoSurface: NSViewRepresentable {
     let player: AVPlayer
+    let firstFrame: @MainActor () -> Void
+    func makeCoordinator() -> NativeVideoObservation { NativeVideoObservation(firstFrame) }
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
         view.controlsStyle = .none
         view.videoGravity = .resizeAspect
         view.allowsPictureInPicturePlayback = false
         view.player = player
+        let coordinator = context.coordinator
+        coordinator.observation = view.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak coordinator] _, change in
+            guard change.newValue == true else { return }
+            Task { @MainActor [weak coordinator] in coordinator?.firstFrame() }
+        }
         return view
     }
     func updateNSView(_ view: AVPlayerView, context: Context) { view.player = player }
-    static func dismantleNSView(_ view: AVPlayerView, coordinator: ()) { view.player = nil }
+    static func dismantleNSView(_ view: AVPlayerView, coordinator: NativeVideoObservation) {
+        coordinator.observation = nil
+        view.player = nil
+    }
 }
 #else
 private struct NativeVideoSurface: UIViewControllerRepresentable {
     let player: AVPlayer
+    let firstFrame: @MainActor () -> Void
+    func makeCoordinator() -> NativeVideoObservation { NativeVideoObservation(firstFrame) }
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.showsPlaybackControls = false
         controller.videoGravity = .resizeAspect
         controller.allowsPictureInPicturePlayback = false
         controller.player = player
+        let coordinator = context.coordinator
+        coordinator.observation = controller.observe(\.isReadyForDisplay, options: [.initial, .new]) { [weak coordinator] _, change in
+            guard change.newValue == true else { return }
+            Task { @MainActor [weak coordinator] in coordinator?.firstFrame() }
+        }
         return controller
     }
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) { controller.player = player }
-    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: ()) { controller.player = nil }
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: NativeVideoObservation) {
+        coordinator.observation = nil
+        controller.player = nil
+    }
 }
 #endif

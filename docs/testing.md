@@ -48,6 +48,8 @@ Some database setup resets schemas. Never substitute the persistent development 
 Live embedding tests require separate approval for the exact endpoint, model, and credential boundary.
 Ordinary test success does not establish live provider or exporter-to-collector behavior.
 
+For telemetry tests, use a local or intercepted collector. The Web `telemetry.spec.ts` fixture checks that Faro emits the span carried on the real WASM Home request. The observability crate checks the backend's `rpc.server.call.duration` histogram against final trailers. Keep Compose export off for isolated tests with `SCREENROOM_TELEMETRY_DISABLED=1`.
+
 ## Playback checks
 
 The [playback contract](playback.md) owns product behavior; these checks use isolated support rather than a product provider or catalog.

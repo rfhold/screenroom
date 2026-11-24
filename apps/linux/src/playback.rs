@@ -1120,6 +1120,7 @@ impl Player {
         on_close: impl Fn(&str) + 'static,
     ) -> Result<Rc<Self>, &'static str> {
         let _diagnostic = diagnostic_span("open.begin", "open.end");
+        let startup = Instant::now();
         gst::init().map_err(|_| "GStreamer could not be initialized.")?;
         // Disable native diagnostic output: media URIs carry bearer capabilities.
         gst::log::set_active(false);
@@ -1129,6 +1130,12 @@ impl Player {
                 |_| "Install the GStreamer GTK4 paintable sink (gtk4paintablesink) to play video.",
             )?;
         let paintable = sink.property::<gtk::gdk::Paintable>("paintable");
+        let first_frame = Cell::new(false);
+        paintable.connect_invalidate_contents(move |frame| {
+            if frame.intrinsic_width() > 0 && !first_frame.replace(true) {
+                core::record_playback_first_frame(startup.elapsed().as_millis() as u64);
+            }
+        });
         let pipeline = gst::ElementFactory::make("playbin")
             .build()
             .map_err(|_| "Install the GStreamer playback plugin (playbin).")?;

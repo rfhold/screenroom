@@ -3,6 +3,8 @@
 !Cargo.lock
 !crates
 !crates/**
+!proto/
+!proto/**
 !apps
 !apps/linux
 !apps/linux/Cargo.toml

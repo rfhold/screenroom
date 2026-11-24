@@ -44,6 +44,9 @@ wasm() {
 }
 apple() {
   [ "$HOST_OS" = Darwin ] || { echo "Apple builds require a macOS host" >&2; exit 2; }
+  export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-14.0}
+  export IPHONEOS_DEPLOYMENT_TARGET=${IPHONEOS_DEPLOYMENT_TARGET:-17.0}
+  export TVOS_DEPLOYMENT_TARGET=${TVOS_DEPLOYMENT_TARGET:-17.0}
   bindings
   local targets=${SCREENROOM_APPLE_TARGETS:-"aarch64-apple-darwin x86_64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-tvos aarch64-apple-tvos-sim x86_64-apple-tvos"}
   for target in $targets; do

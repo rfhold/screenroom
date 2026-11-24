@@ -415,6 +415,7 @@ impl MediaRepository {
         revision: i64,
         variant: &str,
     ) -> Result<Option<ArtworkObject>> {
+        use tracing::Instrument as _;
         scope.validate()?;
         if !matches!(variant, "original" | "native") || revision < 1 {
             return Err(Error::Invalid("artwork variant"));
@@ -422,6 +423,14 @@ impl MediaRepository {
         let sql = format!(
             "{ELIGIBLE} SELECT o.bucket,o.object_key,o.sha256,o.mime,o.byte_length,o.width,o.height FROM media.artwork a JOIN catalog.sources s ON s.id=a.source_id JOIN media.variants v ON v.artwork_id=a.id JOIN media.artwork_generations g ON g.artwork_id=v.artwork_id AND g.revision=v.revision AND g.state='published' JOIN media.objects o ON o.id=v.object_id WHERE a.id=$5 AND v.revision=$6 AND v.variant=$7 AND a.state='enabled' AND s.state='enabled' AND o.state='ready' AND (cardinality($1::text[])=0 OR s.source_key=ANY($1)) AND (cardinality($3::text[])=0 OR s.provider=ANY($3)) AND {FULL_GENERATION_READY} AND {ARTWORK_AVAILABLE}"
         );
+        let mut connection = self
+            .pool
+            .acquire()
+            .instrument(tracing::info_span!(
+                "db.pool.acquire",
+                db.system.name = "postgresql"
+            ))
+            .await?;
         let row: Option<ObjectRow> = sqlx::query_as(&sql)
             .bind(&scope.source_keys)
             .bind(&scope.library_ids)
@@ -430,7 +439,14 @@ impl MediaRepository {
             .bind(artwork)
             .bind(revision)
             .bind(variant)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *connection)
+            .instrument(tracing::info_span!(
+                "SELECT media.artwork",
+                otel.kind = "client",
+                db.system.name = "postgresql",
+                db.operation.name = "SELECT",
+                db.collection.name = "media.artwork"
+            ))
             .await?;
         Ok(row.map(|row| ArtworkObject {
             artwork_id: artwork,

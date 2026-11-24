@@ -233,6 +233,7 @@ impl LiveJellyfin {
         Ok(url)
     }
     async fn bytes(&self, segments: &[&str], query: &[(&str, String)]) -> Result<Vec<u8>> {
+        use tracing::Instrument as _;
         let url = self.url(segments)?;
         use screenroom_observability::transport::{BodyDirection, RequestKind, RequestOutcome};
         let mut observation = self.transport_observer.start(RequestKind::Provider);
@@ -243,6 +244,12 @@ impl LiveJellyfin {
                 .query(query)
                 .header(header::AUTHORIZATION, self.authorization.clone())
                 .send()
+                .instrument(tracing::info_span!(
+                    "GET",
+                    otel.kind = "client",
+                    http.request.method = "GET",
+                    screenroom.dependency = "jellyfin"
+                ))
                 .await
                 .map_err(transport)?;
             let status = response.status().as_u16();

@@ -12,6 +12,9 @@ android {
         minSdk = 26
         targetSdk = 37
         versionCode = providers.gradleProperty("screenroomBuild").orElse("1").get().toInt()
+        val telemetryEnvironment = providers.gradleProperty("screenroomTelemetryEnvironment").orElse("production").get()
+        require(telemetryEnvironment in setOf("local", "preview", "production"))
+        buildConfigField("String", "TELEMETRY_ENVIRONMENT", "\"$telemetryEnvironment\"")
         versionName = providers.gradleProperty("screenroomVersion").orElse("0.1.0").get()
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }

@@ -166,6 +166,7 @@ impl ObjectStorage {
         body: Option<Vec<u8>>,
         mime: Option<&str>,
     ) -> Result<(reqwest::Response, RequestObservation)> {
+        use tracing::Instrument as _;
         let url = self.url(key)?;
         let bytes = body.as_deref().unwrap_or_default();
         let identity = aws_credential_types::Credentials::new(
@@ -205,6 +206,10 @@ impl ObjectStorage {
             _ => RequestKind::StorageUpload,
         };
         let mut observation = self.transport_observer.start(kind);
+        let span = tracing::info_span!(
+            "storage request", otel.kind = "client", otel.name = %method,
+            http.request.method = %method, screenroom.dependency = "artwork_store"
+        );
         let mut request = self.client.request(method, url);
         for (name, value) in instructions.headers() {
             request = request.header(name, value);
@@ -217,7 +222,7 @@ impl ObjectStorage {
                 .header(reqwest::header::CONTENT_LENGTH, body.len())
                 .body(crate::embedding::observed_upload(body, &observation));
         }
-        let response = match request.send().await {
+        let response = match request.send().instrument(span).await {
             Ok(response) => response,
             Err(_) => {
                 observation.finish(RequestOutcome::Failed);

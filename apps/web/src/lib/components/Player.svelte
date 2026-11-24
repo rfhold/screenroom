@@ -5,6 +5,7 @@
   import { webConfig } from '../core/config';
   import { Playback, mediaURL, seconds } from '../core/playback';
   import { registerPlayback } from '../core/playback-lifecycle';
+  import { observeFirstFrame } from '../core/telemetry';
   import PlayerIcon from './PlayerIcon.svelte';
   import type { SourceLibraryScope, PlaybackTransport, PlaybackSession } from '../../../../../target/client-core/wasm/screenroom_client_core';
   let { itemId, title, context, onClose, fullscreen = false, fullscreenSupported = false, onFullscreen }: { itemId: string; title: string; context: SourceLibraryScope; onClose: () => void; fullscreen?: boolean; fullscreenSupported?: boolean; onFullscreen?: () => void } = $props();
@@ -189,8 +190,10 @@
   onMount(() => {
     let disposed = false;
     let owned: Awaited<ReturnType<typeof newClient>> | undefined;
+    const frameObservation = observeFirstFrame(video);
     const unregister = registerPlayback(() => {
       disposed = true;
+      frameObservation.cancel();
       if (playback) playback.exit('profile_changed');
       else { status = 'Profile changed. Close and reopen the player.'; busy = false; }
     });
@@ -205,13 +208,15 @@
       }, updateView, () => {
         records.clear();
         void client().then(c => c.invalidate_reads());
-      });
+      }, frameObservation.parent);
       const mp4 = !!video.canPlayType('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
       void playback.create(itemId, context, { mp4, h264: mp4, aac: mp4, native_hls: !!video.canPlayType('application/vnd.apple.mpegurl'), mse_hls: Hls.isSupported(), webvtt: 'textTracks' in video });
     }).catch(() => {
+      frameObservation.cancel();
       if (!disposed) { status = 'Playback client unavailable. Close and reopen the player.'; busy = false; }
     });
     return () => {
+      frameObservation.cancel();
       disposed = true; unregister(); playback?.exit(); detach();
       if (playback) void playback.settled().finally(() => owned?.free());
       else owned?.free();

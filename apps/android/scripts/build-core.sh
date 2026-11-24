@@ -13,7 +13,7 @@ NDK=$(cd "${ANDROID_NDK_HOME:-$SDK/ndk/29.0.14206865}" && pwd -P)
 RUST_COMPILER=${RUSTC:-${CARGO_BUILD_RUSTC:-rustc}}
 HASH=$(
   set -e
-  find "$ROOT/crates/screenroom-client-core" "$ROOT/crates/screenroom-proto" "$ROOT/proto" -type f ! -path '*/target/*' -print | sort | while IFS= read -r file; do shasum -a 256 "$file"; done
+  find "$ROOT/crates/screenroom-client-core" "$ROOT/crates/screenroom-proto" "$ROOT/crates/screenroom-observability" "$ROOT/proto" -type f ! -path '*/target/*' -print | sort | while IFS= read -r file; do shasum -a 256 "$file"; done
   shasum -a 256 "$ROOT/Cargo.lock" "$ROOT/Cargo.toml" "$ROOT/scripts/build-client-core.sh" "$ROOT/apps/android/scripts/build-core.sh"
   for file in rust-toolchain rust-toolchain.toml .cargo/config .cargo/config.toml; do
     if [ -f "$file" ]; then shasum -a 256 "$file"; fi

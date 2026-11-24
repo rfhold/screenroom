@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { observeOperation } from '../core/telemetry';
   import { page } from '$app/state';
   import { beforeNavigate, goto } from '$app/navigation';
   import { onDestroy, onMount, tick } from 'svelte';
@@ -132,7 +133,7 @@
         operation.check();
         next.title.cast = cast; next.title.crew = crew;
       } else if (next.screen === 'home') {
-        const response = await operation.read(() => c.get_home(context));
+        const response = await observeOperation('home', traceParent => operation.read(() => c.get_home(context, traceParent)));
         operation.check();
         rows = response.map(row => ({ title: row.title, readError: row.read_error ? progressError(row.read_error) : '', items: row.items.map(record => { operation.check(); return item(record); }) }));
       } else if (next.screen === 'browse' && (next.library.id !== 'all' || next.path.length)) {
@@ -141,7 +142,7 @@
         const reads = new OwnedReads(owned);
         const isCurrent = () => current === generation && operation.active() && !operation.stopped;
         const pages = new IncrementalPages(async page => {
-          const response = await reads.read(() => next.path.length ? owned.list_children(next.path.at(-1)!.id, page, context) : owned.list_library_items(context, page));
+          const response = await observeOperation('catalog', traceParent => reads.read(() => next.path.length ? owned.list_children(next.path.at(-1)!.id, page, context, traceParent) : owned.list_library_items(context, page, traceParent)));
           return { entries: response.items, next_page_token: response.next_page_token };
         }, isCurrent);
         const viewKey = url.pathname + url.search;

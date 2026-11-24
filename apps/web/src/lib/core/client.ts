@@ -6,6 +6,7 @@ import { writable } from 'svelte/store';
 import { MetadataOperation } from './operation.mjs';
 import { createArtworkLoader } from './artwork';
 import { webConfig } from './config';
+import { observeOperation } from './telemetry';
 
 let initialized: Promise<unknown> | undefined;
 let instance: Promise<Client> | undefined;
@@ -36,10 +37,10 @@ export function item(record: CoreItem): Item {
 export const scope = (library = 'all', source_id = ''): SourceLibraryScope => ({ source_id, library_id: library === 'all' ? '' : library });
 export async function getItem(id: string, context = scope(), operation = new MetadataOperation()): Promise<Item | undefined> {
   const c = await operation.read(client);
-  const record = await operation.read(() => c.get_item(id, context).catch(error => {
+  const record = await observeOperation('details', traceParent => operation.read(() => c.get_item(id, context, traceParent).catch(error => {
     if ((error as ClientFailure).code === 'not_found' || (error as ClientFailure).code === 'invalid_argument') return;
     throw error;
-  }));
+  })));
   operation.check();
   return record ? item(record) : undefined;
 }

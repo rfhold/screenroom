@@ -2,8 +2,12 @@ mod models;
 mod operator;
 mod operator_models;
 mod playback;
+#[cfg(not(target_arch = "wasm32"))]
+mod telemetry;
 pub use operator::*;
 pub use operator_models::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use telemetry::{initialize_client_telemetry, record_playback_first_frame};
 #[cfg(target_arch = "wasm32")]
 mod operator_wasm;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -680,6 +684,12 @@ impl Client {
     }
     fn request<T>(&self, body: T) -> Result<tonic::Request<T>, ClientError> {
         let mut r = tonic::Request::new(body);
+        #[cfg(not(target_arch = "wasm32"))]
+        telemetry::inject(&mut r);
+        #[cfg(target_arch = "wasm32")]
+        if let Some(parent) = wasm::trace_parent().and_then(|value| value.parse().ok()) {
+            r.metadata_mut().insert("traceparent", parent);
+        }
         if !self.config.user_id.is_empty() {
             r.metadata_mut().insert(
                 "x-screenroom-user-id",
@@ -757,6 +767,8 @@ impl Client {
                         .await
                         .map_err(|_| ClientError::Cancelled)?
                 };
+                #[cfg(target_arch = "wasm32")]
+                let f = wasm::with_trace_parent(wasm::trace_parent(), f);
                 #[cfg(not(target_arch = "wasm32"))]
                 let f = f.boxed().shared();
                 #[cfg(target_arch = "wasm32")]
@@ -795,7 +807,15 @@ impl Client {
     }
     async fn call(&self, op: &str, value: Value) -> Result<Value, ClientError> {
         let budget = playback::budget(op).unwrap_or(self.config.timeout_ms);
-        timeout(budget, self.network(op, value)).await
+        let operation = timeout(budget, self.network(op, value));
+        #[cfg(not(target_arch = "wasm32"))]
+        let operation = telemetry::observe(op, operation, |error| match error {
+            ClientError::DeadlineExceeded => "deadline_exceeded",
+            ClientError::Cancelled => "cancelled",
+            ClientError::PlaybackUncertain => "uncertain",
+            _ => "error",
+        });
+        operation.await
     }
     async fn network(&self, op: &str, value: Value) -> Result<Value, ClientError> {
         if op.starts_with("playback_") {
@@ -809,14 +829,23 @@ impl Client {
             ));
             #[cfg(not(target_arch = "wasm32"))]
             {
-                let response =
-                    self.http
-                        .get(url)
-                        .send()
-                        .await
-                        .map_err(|e| ClientError::Unavailable {
-                            reason: e.to_string(),
-                        })?;
+                let mut headers = reqwest::header::HeaderMap::new();
+                screenroom_observability::telemetry::inject_trace_context(|key, value| {
+                    if let (Ok(key), Ok(value)) =
+                        (key.parse::<reqwest::header::HeaderName>(), value.parse())
+                    {
+                        headers.insert(key, value);
+                    }
+                });
+                let response = self
+                    .http
+                    .get(url)
+                    .headers(headers)
+                    .send()
+                    .await
+                    .map_err(|e| ClientError::Unavailable {
+                        reason: e.to_string(),
+                    })?;
                 if response.status() == reqwest::StatusCode::NOT_FOUND {
                     return Err(ClientError::NotFound {
                         reason: "artwork not found".into(),

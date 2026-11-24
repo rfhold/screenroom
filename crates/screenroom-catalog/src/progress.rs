@@ -9,6 +9,7 @@ use screenroom_proto::{
 };
 use std::time::{Duration, Instant};
 use tonic::{Status, metadata::MetadataMap};
+use tracing::Instrument as _;
 
 pub(crate) struct Deadline(Instant);
 fn source_scopes(source_id: String, libraries: &[String]) -> Vec<SourceLibraryScope> {
@@ -153,11 +154,28 @@ impl Catalog {
                 page_token: token,
             });
             request.set_timeout(Duration::from_secs(10).min(deadline.remaining()?));
-            let response = client
-                .get_continue_watching(request)
-                .await
-                .map_err(|error| Status::new(error.code(), "private progress request failed"))?
-                .into_inner();
+            let span = tracing::info_span!(
+                "GetContinueWatching",
+                otel.name = "screenroom.user.internal.v1.PlaybackStateService/GetContinueWatching",
+                otel.kind = "client",
+                rpc.system.name = "grpc",
+                rpc.method = "screenroom.user.internal.v1.PlaybackStateService/GetContinueWatching"
+            );
+            let response = async {
+                screenroom_observability::telemetry::inject_trace_context(|key, value| {
+                    if let (Ok(key), Ok(value)) = (
+                        key.parse::<tonic::metadata::MetadataKey<_>>(),
+                        value.parse(),
+                    ) {
+                        request.metadata_mut().insert(key, value);
+                    }
+                });
+                client.get_continue_watching(request).await
+            }
+            .instrument(span)
+            .await
+            .map_err(|error| Status::new(error.code(), "private progress request failed"))?
+            .into_inner();
             if response.entries.len() > 50
                 || response.entries.iter().any(|entry| {
                     entry.progress_percent > 100

@@ -120,6 +120,7 @@ pub async fn serve(
         .timeout(std::time::Duration::from_secs(10))
         .layer(cors)
         .layer(tonic_web::GrpcWebLayer::new())
+        .layer(screenroom_observability::telemetry::RpcStatusLayer)
         .layer(rpc_layer())
         .add_service(user_service_server::UserServiceServer::new(service))
         .serve_with_incoming_shutdown(
@@ -136,6 +137,7 @@ pub async fn serve_private(
 ) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .layer(screenroom_observability::telemetry::RpcStatusLayer)
         .layer(rpc_layer())
         .add_service(
             internal::playback_state_service_server::PlaybackStateServiceServer::new(service),

@@ -393,7 +393,9 @@ The `telemetry` feature in [screenroom-observability](../crates/screenroom-obser
 - `rpc_layer()` for the community `tonic-tracing-opentelemetry` server middleware, re-exported as `OtelGrpcLayer`.
 - `shutdown_signal()` for process shutdown signals and `Telemetry::shutdown()` for provider shutdown.
 
-Each executable supplies its package name as the OpenTelemetry `service.name` resource attribute.
+Each executable supplies its package name as the default OpenTelemetry `service.name`.
+Both signals use the same resource. The namespace is `screenroom`, with `deployment.environment.name`, `service.version`, and `service.instance.id` alongside the service name.
+Pulumi uses the Pod UID as the instance ID and the image digest as the version. Local processes use a fresh instance ID at startup.
 The shared crate configures SDK/exporter setup; it does not define a custom RPC telemetry framework.
 The workspace selects community `tonic-tracing-opentelemetry` 0.42.1 with `tracing_level_info`, Tonic 0.14, OpenTelemetry 0.33.1, and tracing-opentelemetry 0.34.
 The middleware is not an official OpenTelemetry component; the SDK and OTLP exporter use official OpenTelemetry crates.
@@ -401,9 +403,12 @@ The middleware is not an official OpenTelemetry component; the SDK and OTLP expo
 | Environment variable | Behavior |
 | --- | --- |
 | `RUST_LOG` | Tracing filter; defaults to `info`. |
+| `SCREENROOM_TELEMETRY_DISABLED` | Set to `1` to disable OTLP traces and metrics while keeping local logs. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Override service name and resource fields. Use a stable role name, not an instance ID, as the service name. |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Explicit HTTP(S) traces endpoint, including its path; takes precedence over the general endpoint. |
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | Explicit HTTP(S) metrics endpoint, including its path; takes precedence over the general endpoint. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | HTTP(S) collector base endpoint; setup appends `/v1/traces` and `/v1/metrics` for each signal without an explicit override. |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Override parent-based trace sampling. Without an override, the exporter samples 10% of root traces. |
 
 Even with `RUST_LOG=trace`, shared setup suppresses DEBUG and TRACE output for targets with these prefixes:
 `opentelemetry-otlp`, `opentelemetry_otlp`, `opentelemetry-http`, `opentelemetry_http`, `reqwest`, `hyper`, and `h2`.
@@ -413,8 +418,10 @@ Setup also excludes unsafe `HttpTraceClient.PartialSuccess` and `HttpMetricsClie
 This locked-dependency protection does not establish general redaction.
 
 With all endpoint variables unset, startup needs no collector and exports neither OTLP traces nor OTLP metrics.
+Compose and Pulumi supply `https://telemetry.holdenitdown.net:4318` by default; a direct binary invocation does not.
 An explicit endpoint enables the corresponding official OTLP HTTP/protobuf exporter, not OTLP gRPC.
 Metrics use a periodic exporter; setup does not export logs through OTLP.
+`rpc.server.call.duration` follows the [OpenTelemetry 1.42.0 conventions](https://opentelemetry.io/docs/specs/semconv/rpc/rpc-metrics/) and records seconds with `rpc.method`, `rpc.system.name`, and `rpc.response.status_code`. It reads the terminal gRPC status inside the gRPC-Web conversion, so HTTP 200 does not imply RPC success.
 The [metric definitions](../crates/screenroom-observability/src/metrics.rs) accept bounded enum labels, not UUIDs, arbitrary source keys, locators, or raw errors.
 Queue counts represent observations, not worker health; reserved-request counters do not represent exact wire traffic.
 The worker attaches per-operation transport observers to provider JSON, capabilities, delta, artwork, embeddings, and storage PUT/HEAD/verification GET.
@@ -435,7 +442,8 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces \
 
 The middleware creates RPC spans, extracts remote trace context, and records basic RPC fields and response-header status.
 It does not inspect final gRPC trailers or cover the full response-stream lifetime.
-Do not treat its status fields as complete final gRPC outcomes.
+Use the separate `rpc.server.call.duration` metric for terminal outcomes, including gRPC-Web errors returned with HTTP 200. Its `rpc.response.status_code` is the final gRPC result, not the HTTP status.
+For Home latency, compare the catalog span with its private Continue Watching call. Artwork spans distinguish time waiting for the PostgreSQL pool from time running the query.
 The middleware records User-Agent and Host values; it does not capture arbitrary headers or message bodies.
 Those fields still require a privacy review before production use; this setup asserts no universal privacy guarantee.
 

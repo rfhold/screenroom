@@ -480,6 +480,12 @@ The [guard tests](../scripts/test-client-boundary.mjs) exercise those detection 
 This guard does not prove complete data flow or inspect runtime network traffic and packaged artifacts.
 Platform integration tests and resource audits remain necessary.
 
+## Client telemetry
+
+Shipped native apps initialize OpenTelemetry once per process, not once per client or profile. Release builds default to `production`; set the app build environment explicitly when shipping a preview build. The label describes the app build, not its configured backend. Debug apps and tests that use only the library do not start native exporters.
+
+On Web, deployment runtime configuration enables Faro. Home, catalog, details, and playback creation pass explicit W3C context through WASM, without a global fetch patch. The server uses that context as the parent of its RPC span. Native RPCs attach context through the shared client. Callers do not need to add headers to media URLs.
+
 ## Development security boundary
 
 The default public endpoint uses loopback and cleartext HTTP. The local stack provides no authentication or per-user catalog ACL.

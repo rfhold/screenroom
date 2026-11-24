@@ -17,6 +17,12 @@ telemetry = [
     "dep:tonic-tracing-opentelemetry",
     "dep:tokio",
     "dep:http",
+    "dep:uuid",
+    "dep:http-body",
+    "dep:tower",
+    "dep:reqwest",
+    "dep:rustls",
+    "dep:webpki-roots",
 ]
 profiling = ["dep:pyroscope"]
 
@@ -32,6 +38,14 @@ tracing-subscriber = { workspace = true, optional = true }
 tonic-tracing-opentelemetry = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 http = { version = "1", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+http-body = { version = "1", optional = true }
+tower = { version = "0.5", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
 
 [dev-dependencies]
 opentelemetry_sdk = { workspace = true, features = ["testing"] }

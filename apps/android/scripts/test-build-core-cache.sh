@@ -4,7 +4,7 @@ ANDROID_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$ANDROID_ROOT/build"
 WORK=$(mktemp -d "$ANDROID_ROOT/build/cache-key-test.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
-mkdir -p "$WORK/apps/android/scripts" "$WORK/scripts" "$WORK/crates/screenroom-client-core" "$WORK/crates/screenroom-proto" "$WORK/proto" "$WORK/bin" "$WORK/sdk" "$WORK/sdk-other"
+mkdir -p "$WORK/apps/android/scripts" "$WORK/scripts" "$WORK/crates/screenroom-client-core" "$WORK/crates/screenroom-proto" "$WORK/crates/screenroom-observability" "$WORK/proto" "$WORK/bin" "$WORK/sdk" "$WORK/sdk-other"
 cp "$ANDROID_ROOT/scripts/build-core.sh" "$WORK/apps/android/scripts/"
 touch "$WORK/Cargo.toml" "$WORK/Cargo.lock"
 cat > "$WORK/bin/rustc" <<'EOF'

@@ -982,8 +982,18 @@ impl OperatorClient {
             macro_rules! send {
                 ($method:ident $(, $field:ident = $value:expr)*) => {{
                     $(input.$field = (*$value).to_owned();)*
-                    let request = self.client.request(input).map_err(|_| OperatorError::Invalid)?;
-                    rpc.$method(request).await
+                    let request = async {
+                        let request = self.client.request(input)
+                            .map_err(|_| tonic::Status::invalid_argument("invalid"))?;
+                        rpc.$method(request).await
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let request = crate::telemetry::observe(concat!("operator.", stringify!($method)), request, |error| match error.code() {
+                        tonic::Code::DeadlineExceeded => "deadline_exceeded",
+                        tonic::Code::Cancelled => "cancelled",
+                        _ => "error",
+                    });
+                    request.await
                 }};
             }
             let response = match (parts.as_slice(), write) {

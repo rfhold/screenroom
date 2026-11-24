@@ -111,6 +111,7 @@ impl EmbeddingClient {
         &self.config
     }
     pub async fn embed(&self, inputs: &[String]) -> Result<EmbeddingBatch> {
+        use tracing::Instrument as _;
         if inputs.is_empty() || inputs.len() > MAX_BATCH {
             return Err(Error::Invalid("embedding batch"));
         }
@@ -140,6 +141,12 @@ impl EmbeddingClient {
             let response = self
                 .client
                 .execute(request)
+                .instrument(tracing::info_span!(
+                    "POST",
+                    otel.kind = "client",
+                    http.request.method = "POST",
+                    screenroom.dependency = "embedding"
+                ))
                 .await
                 .map_err(|_| Error::Unavailable)?;
             if !response.status().is_success() {

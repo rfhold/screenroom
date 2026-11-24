@@ -414,6 +414,11 @@ impl PlaybackAdapter {
                     .as_str()
                     .map(str::to_owned)
             });
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(
+            "provider playback", otel.kind = "client", otel.name = %method,
+            http.request.method = %method, screenroom.dependency = "jellyfin"
+        );
         let mut request = self
             .client
             .request(method, url)
@@ -425,7 +430,11 @@ impl PlaybackAdapter {
         self.check_dispatch(purpose, effect, play_session.as_deref())
             .await?;
         let run = async {
-            let mut response = request.send().await.map_err(|e| remote_error(e, effect))?;
+            let mut response = request
+                .send()
+                .instrument(span)
+                .await
+                .map_err(|e| remote_error(e, effect))?;
             let status = response.status().as_u16();
             if !(200..300).contains(&status) {
                 return Err(PlaybackError {

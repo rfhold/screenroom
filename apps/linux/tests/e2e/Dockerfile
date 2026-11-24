@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /repo
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY proto ./proto
 COPY apps/linux/Cargo.toml apps/linux/Cargo.lock ./apps/linux/
 COPY apps/linux/src ./apps/linux/src
 WORKDIR /repo/apps/linux

@@ -243,6 +243,7 @@ pub fn router(service: PlaybackService, origins: Vec<HeaderValue>) -> Router {
     .into_axum_router()
     .layer(screenroom_observability::telemetry::rpc_layer())
     .layer(middleware::from_fn(control_deadline))
+    .layer(screenroom_observability::telemetry::RpcStatusLayer)
     .layer(tonic_web::GrpcWebLayer::new())
     .layer(control_cors)
     .layer(middleware::from_fn(control_boundary));
@@ -279,6 +280,32 @@ async fn media(
     State(service): State<PlaybackService>,
     Path((session, revision, resource)): Path<(String, String, String)>,
     RawQuery(query): RawQuery,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    screenroom_observability::telemetry::observe_http_headers(
+        &method,
+        "/playback/v1/media/{session}/{revision}/{resource}",
+        &headers,
+        media_response(
+            service,
+            session,
+            revision,
+            resource,
+            query,
+            method.clone(),
+            headers.clone(),
+        ),
+    )
+    .await
+}
+
+async fn media_response(
+    service: PlaybackService,
+    session: String,
+    revision: String,
+    resource: String,
+    query: Option<String>,
     method: Method,
     headers: HeaderMap,
 ) -> Response {
@@ -372,6 +399,9 @@ async fn media_inner(
     if record.play_session_id.as_deref() != Some(runtime.negotiated.private_play_session_id()) {
         media_failure(&diagnostic, "play_session_match", "mismatch");
         return Err(StatusCode::NOT_FOUND);
+    }
+    if let Some(context) = &runtime.trace_context {
+        screenroom_observability::telemetry::link_current_span(context);
     }
     let fence = Arc::new(MediaFence {
         repository: service.repository.clone(),

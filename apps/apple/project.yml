@@ -8,6 +8,8 @@ settings:
     GENERATE_INFOPLIST_FILE: YES
     MARKETING_VERSION: 0.1.0
     CURRENT_PROJECT_VERSION: 1
+    SCREENROOM_TELEMETRY_ENVIRONMENT: production
+    INFOPLIST_KEY_ScreenroomTelemetryEnvironment: $(SCREENROOM_TELEMETRY_ENVIRONMENT)
     PRODUCT_NAME: Screenroom
     INFOPLIST_KEY_CFBundleDisplayName: Screenroom
 targetTemplates:

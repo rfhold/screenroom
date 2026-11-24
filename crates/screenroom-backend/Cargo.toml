@@ -6,6 +6,7 @@ publish.workspace = true
 
 [dependencies]
 screenroom-observability = { path = "../screenroom-observability" }
+tracing.workspace = true
 screenroom-queue = { path = "../screenroom-queue" }
 screenroom-catalog-adapter = { path = "../screenroom-catalog-adapter" }
 aws-credential-types = "1"

@@ -2,6 +2,7 @@ FROM rust:1.98-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY proto ./proto
 COPY migrations ./migrations
 ENV CARGO_BUILD_JOBS=2 CARGO_PROFILE_DEV_DEBUG=0
 FROM source AS build-catalog

@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use tonic::{Request, Response, Status};
 
 pub(crate) struct TransportRuntime {
+    pub trace_context: Option<opentelemetry::trace::SpanContext>,
     pub provider: LiveJellyfin,
     pub intent: provider::AuthorizationIntent,
     pub auth: Arc<provider::SessionAuth>,
@@ -401,6 +402,7 @@ impl PlaybackService {
         let resources = crate::signed_resources::ResourceGraph::new(resources)
             .map_err(|_| records::unavailable())?;
         Ok(Arc::new(TransportRuntime {
+            trace_context: screenroom_observability::telemetry::current_span_context(),
             provider,
             intent,
             auth,
@@ -1024,6 +1026,7 @@ impl PlaybackService {
         F: Future<Output = Result<T, Status>> + Send + 'static,
         Work: FnOnce(Self) -> F + Send + 'static,
     {
+        use tracing::Instrument as _;
         if self.stopping.load(Ordering::Acquire) {
             return Err(Status::unavailable("gateway_stopping"));
         }
@@ -1037,27 +1040,31 @@ impl PlaybackService {
         service.owned_operation = Some(owned.clone());
         let repository = self.repository.clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let work_span = tracing::info_span!("screenroom.playback.control");
         // Registration and shutdown admission are atomic across every service clone.
         self.owned_tasks
-            .spawn(owned.clone(), move || async move {
-                let _permit = permit;
-                use futures_util::FutureExt;
-                let work = std::panic::AssertUnwindSafe(task(service)).catch_unwind();
-                let result = match tokio::time::timeout(duration, work).await {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(records::unavailable()),
-                    Err(_) => Err(Status::deadline_exceeded("upstream_unavailable")),
-                };
-                let operation = owned.lock().expect("operation slot").clone();
-                if let Some(operation) = operation
-                    && repository.finalize_abandoned(&operation).await.is_err()
-                {
-                    tracing::warn!(
-                        error_code = "operation_finalize_failed",
-                        "playback operation finalization failed"
-                    );
+            .spawn(owned.clone(), move || {
+                async move {
+                    let _permit = permit;
+                    use futures_util::FutureExt;
+                    let work = std::panic::AssertUnwindSafe(task(service)).catch_unwind();
+                    let result = match tokio::time::timeout(duration, work).await {
+                        Ok(Ok(result)) => result,
+                        Ok(Err(_)) => Err(records::unavailable()),
+                        Err(_) => Err(Status::deadline_exceeded("upstream_unavailable")),
+                    };
+                    let operation = owned.lock().expect("operation slot").clone();
+                    if let Some(operation) = operation
+                        && repository.finalize_abandoned(&operation).await.is_err()
+                    {
+                        tracing::warn!(
+                            error_code = "operation_finalize_failed",
+                            "playback operation finalization failed"
+                        );
+                    }
+                    let _ = result_tx.send(result);
                 }
-                let _ = result_tx.send(result);
+                .instrument(work_span)
             })
             .await?;
         tokio::time::timeout(duration, result_rx)

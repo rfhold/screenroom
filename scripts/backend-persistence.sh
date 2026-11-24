@@ -99,7 +99,7 @@ SQL
 before=$(snapshot)
 bash scripts/backend.sh down --owner-file "$owner" >&2
 owned || fail 'teardown owner mismatch'
-SCREENROOM_BACKEND_BUILD=0 bash scripts/backend.sh up --owner-file "$owner" >&2
+SCREENROOM_BACKEND_BUILD=0 SCREENROOM_TELEMETRY_DISABLED=1 bash scripts/backend.sh up --owner-file "$owner" >&2
 owned || fail 'teardown owner mismatch'
 [[ $(snapshot) == "$before" ]] || fail 'database snapshot changed across restart'
 [[ $(files) == "$bootstrap" ]] || fail 'installation identity changed across restart'

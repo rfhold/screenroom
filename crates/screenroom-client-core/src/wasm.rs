@@ -52,6 +52,46 @@ fn to_js<T: Serialize>(value: T) -> Result<JsValue, JsValue> {
 pub struct WasmClient {
     inner: Arc<Client>,
 }
+
+thread_local! {
+    static TRACE_PARENT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn trace_parent() -> Option<String> {
+    TRACE_PARENT.with(|slot| slot.borrow().clone())
+}
+
+pub(crate) async fn with_trace_parent<T>(
+    value: Option<String>,
+    future: impl Future<Output = T>,
+) -> T {
+    let value = value.filter(|value| {
+        let bytes = value.as_bytes();
+        bytes.len() == 55
+            && bytes.starts_with(b"00-")
+            && bytes[35] == b'-'
+            && bytes[52] == b'-'
+            && [&bytes[3..35], &bytes[36..52]].iter().all(|id| {
+                id.iter()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    && id.iter().any(|b| *b != b'0')
+            })
+            && matches!(&bytes[53..], b"00" | b"01")
+    });
+    let mut future = std::pin::pin!(future);
+    std::future::poll_fn(|cx| {
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TRACE_PARENT.with(|slot| slot.replace(self.0.take()));
+            }
+        }
+        let _restore = Restore(TRACE_PARENT.with(|slot| slot.replace(value.clone())));
+        future.as_mut().poll(cx)
+    })
+    .await
+}
+
 #[wasm_bindgen(js_class=Client)]
 impl WasmClient {
     pub fn operator(&self) -> crate::operator_wasm::WasmOperatorClient {
@@ -62,13 +102,17 @@ impl WasmClient {
     pub async fn create_playback_session(
         &self,
         #[wasm_bindgen(unchecked_param_type = "CreatePlaybackSessionRequest")] request: JsValue,
+        trace_parent: Option<String>,
     ) -> Result<JsValue, JsValue> {
         to_js(
-            self.inner
-                .clone()
-                .create_playback_session(from_js(request)?)
-                .await
-                .map_err(js_error)?,
+            with_trace_parent(
+                trace_parent,
+                self.inner
+                    .clone()
+                    .create_playback_session(from_js(request)?),
+            )
+            .await
+            .map_err(js_error)?,
         )
     }
     #[wasm_bindgen(unchecked_return_type = "GetPlaybackSessionResponse")]
@@ -199,11 +243,10 @@ impl WasmClient {
     pub async fn get_home(
         &self,
         #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+        trace_parent: Option<String>,
     ) -> Result<JsValue, JsValue> {
         to_js(
-            self.inner
-                .clone()
-                .get_home(from_js(scope)?)
+            with_trace_parent(trace_parent, self.inner.clone().get_home(from_js(scope)?))
                 .await
                 .map_err(js_error)?,
         )
@@ -227,13 +270,17 @@ impl WasmClient {
         &self,
         #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
         #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
+        trace_parent: Option<String>,
     ) -> Result<JsValue, JsValue> {
         to_js(
-            self.inner
-                .clone()
-                .list_library_items(from_js(scope)?, from_js(page)?)
-                .await
-                .map_err(js_error)?,
+            with_trace_parent(
+                trace_parent,
+                self.inner
+                    .clone()
+                    .list_library_items(from_js(scope)?, from_js(page)?),
+            )
+            .await
+            .map_err(js_error)?,
         )
     }
     #[wasm_bindgen(unchecked_return_type = "Item")]
@@ -241,13 +288,15 @@ impl WasmClient {
         &self,
         id: String,
         #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+        trace_parent: Option<String>,
     ) -> Result<JsValue, JsValue> {
         to_js(
-            self.inner
-                .clone()
-                .get_item(id, from_js(scope)?)
-                .await
-                .map_err(js_error)?,
+            with_trace_parent(
+                trace_parent,
+                self.inner.clone().get_item(id, from_js(scope)?),
+            )
+            .await
+            .map_err(js_error)?,
         )
     }
     #[wasm_bindgen(unchecked_return_type = "CatalogInfo")]
@@ -266,13 +315,17 @@ impl WasmClient {
         parent_id: String,
         #[wasm_bindgen(unchecked_param_type = "Page")] page: JsValue,
         #[wasm_bindgen(unchecked_param_type = "SourceLibraryScope")] scope: JsValue,
+        trace_parent: Option<String>,
     ) -> Result<JsValue, JsValue> {
         to_js(
-            self.inner
-                .clone()
-                .list_children(parent_id, from_js(page)?, from_js(scope)?)
-                .await
-                .map_err(js_error)?,
+            with_trace_parent(
+                trace_parent,
+                self.inner
+                    .clone()
+                    .list_children(parent_id, from_js(page)?, from_js(scope)?),
+            )
+            .await
+            .map_err(js_error)?,
         )
     }
     #[wasm_bindgen(unchecked_return_type = "CreditPage")]

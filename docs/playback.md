@@ -331,6 +331,12 @@ The platform guides own reproducible prerequisites and checks:
 Bindings, isolated controller tests, and toolchain builds do not establish native decode, subtitle synchronization, focus, or live-provider acceptance.
 The [testing guide](testing.md#native-playback-checks) keeps these evidence boundaries separate.
 
+## Playback telemetry
+
+The gateway links an authorized media request span to the in-memory playback control trace when it has that context. The media span uses a route template and measures time to response headers, not full playback. The link is not stored in media URLs or carried across a gateway restart.
+
+`screenroom.playback.startup.duration` measures seconds until the first frame is reported by the player surface. Web uses the video frame callback; Android uses Media3's rendered-frame callback. AVKit and the GTK paintable report when the first frame is ready to display. Web exports the histogram only when the [browser metrics route](deployment.md#telemetry) is configured.
+
 ## Jellyfin identity and personal state
 
 The gateway creates a distinct managed Jellyfin device session for each logical playback session.

@@ -11,7 +11,7 @@ async function put(name, contents) {
   await writeFile(file, contents);
 }
 await put('apps/apple/scripts/prepare-core.sh', await readFile('apps/apple/scripts/prepare-core.sh'));
-for (const dir of ['crates/screenroom-client-core', 'crates/screenroom-proto', 'proto']) await mkdir(path.join(base, dir), { recursive: true });
+for (const dir of ['crates/screenroom-client-core', 'crates/screenroom-proto', 'crates/screenroom-observability', 'proto']) await mkdir(path.join(base, dir), { recursive: true });
 for (const file of ['Cargo.toml', 'Cargo.lock', 'scripts/patch-swift-cancellation.py']) await put(file, 'fixture');
 await put('scripts/build-client-core.sh', `#!/bin/bash
 set -eu

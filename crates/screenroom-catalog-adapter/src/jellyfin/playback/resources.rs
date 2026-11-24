@@ -365,6 +365,11 @@ impl PlaybackAdapter {
         } else {
             Method::GET
         };
+        use tracing::Instrument as _;
+        let span = tracing::info_span!(
+            "provider media", otel.kind = "client", otel.name = %method,
+            http.request.method = %method, screenroom.dependency = "jellyfin"
+        );
         let mut outbound = self
             .client
             .request(method, resource.url.clone())
@@ -385,7 +390,7 @@ impl PlaybackAdapter {
             Some(&resource.scope.play_session),
         )
         .await?;
-        let response = tokio::time::timeout(self.header_timeout, outbound.send())
+        let response = tokio::time::timeout(self.header_timeout, outbound.send().instrument(span))
             .await
             .map_err(|_| fail(Failure::Deadline))?
             .map_err(|e| remote_error(e, false))?;

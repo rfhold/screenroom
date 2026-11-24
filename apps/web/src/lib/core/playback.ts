@@ -3,6 +3,7 @@ import type {
   CreatePlaybackSessionRequest, UpdatePlaybackSessionRequest, SourceLibraryScope,
   PlaybackClientCapabilities, StopPlaybackSessionRequest,
 } from '../../../../../target/client-core/wasm/screenroom_client_core';
+import { observeOperation, type Context } from './telemetry';
 
 export function milliseconds(value: string): bigint {
   if (!/^\d{1,20}$/.test(value)) throw new Error('Invalid playback timeline.');
@@ -67,7 +68,7 @@ export class Playback {
   private lastMediaState: { revision: number; position_ms: string; paused: boolean } | null = null;
   private exitPosition: string | null = null;
   private exitReason: string | null = null;
-  constructor(private client: PlaybackClient, private media: Media, private changed: () => void, private personalChanged: () => void = () => {}) {}
+  constructor(private client: PlaybackClient, private media: Media, private changed: () => void, private personalChanged: () => void = () => {}, private traceContext?: Context) {}
   private notify() { this.changed(); }
   settled() { return this.chain; }
   get canRetryTransport() { return !!this.pendingUpdate && !this.closed && !this.blocked && !this.busy; }
@@ -147,7 +148,7 @@ export class Playback {
       if (this.session || this.closed) return;
       this.busy = true; this.status = 'Preparing playback…'; this.notify();
       try {
-        const response = await this.client.create_playback_session(this.creation!);
+        const response = await observeOperation('playback.create', traceParent => this.client.create_playback_session(this.creation!, traceParent), this.traceContext);
         await this.accept(response.session, true);
         if (!this.closed && !this.blocked && response.session?.transport) this.heartbeat = setInterval(() => { void this.event('heartbeat'); }, 15_000);
       } catch (error) {

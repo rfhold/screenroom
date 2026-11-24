@@ -10,11 +10,13 @@ import androidx.activity.enableEdgeToEdge
 import org.screenroom.ui.DEFAULT_API_ENDPOINT
 import org.screenroom.ui.HomeScreen
 import org.screenroom.ui.ScreenroomTheme
+import org.screenroom.ui.initializeAppTelemetry
 
 class MainActivity : ComponentActivity() {
     private var navigateBack: () -> Boolean = { false }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!BuildConfig.DEBUG) initializeAppTelemetry("android", BuildConfig.TELEMETRY_ENVIRONMENT)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),

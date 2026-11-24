@@ -239,7 +239,7 @@ case "${SCREENROOM_BACKEND_ATTACH:-0}" in
       exit 2
     fi
     backend_owned=1
-    prepare backend bash scripts/backend.sh up --owner-file "$run/backend-owned" ;;
+    SCREENROOM_TELEMETRY_DISABLED=1 prepare backend bash scripts/backend.sh up --owner-file "$run/backend-owned" ;;
   *) echo 'SCREENROOM_BACKEND_ATTACH must be 0 or 1.' >&2; exit 2 ;;
 esac
 export SCREENROOM_BACKEND_DESCRIPTOR="$PWD/build/backend-runtime/${SCREENROOM_BACKEND_PROJECT:-screenroom-local}/descriptor.json"

@@ -60,6 +60,7 @@ pub async fn serve(
     ))
     .into_axum_router()
     .layer(rpc_layer())
+    .layer(screenroom_observability::telemetry::RpcStatusLayer)
     .layer(axum::middleware::from_fn(move |request, next: axum::middleware::Next| {
         let mut cancelled = cancelled.clone();
         async move {
@@ -128,6 +129,23 @@ async fn artwork(
     Path((id, revision, variant)): Path<(String, String, String)>,
     method: Method,
     headers: HeaderMap,
+) -> Response {
+    screenroom_observability::telemetry::observe_http_headers(
+        &method,
+        "/artwork/{id}/revisions/{revision}/{variant}",
+        &headers,
+        artwork_inner(catalog, id, revision, variant, &method, &headers),
+    )
+    .await
+}
+
+async fn artwork_inner(
+    catalog: Catalog,
+    id: String,
+    revision: String,
+    variant: String,
+    method: &Method,
+    headers: &HeaderMap,
 ) -> Response {
     let Ok(id) = Uuid::parse_str(&id) else {
         return StatusCode::NOT_FOUND.into_response();

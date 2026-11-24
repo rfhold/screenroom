@@ -35,6 +35,8 @@ internal class NativePlayback(val player: Player, private val gateway: PlaybackG
     private var listener: Player.Listener? = null
     private var sequence = 0u
     private var started = false
+    private val startupTime = System.nanoTime()
+    private var renderedFirstFrame = false
     private var applying = false
     private var fallbackUsed = false
     private var reportBlocked = false
@@ -77,6 +79,11 @@ internal class NativePlayback(val player: Player, private val gateway: PlaybackG
 
     private inner class PlaybackListener(private val revisionGeneration: Int) : Player.Listener {
         private val current get() = active && generation == revisionGeneration
+        override fun onRenderedFirstFrame() {
+            if (!current || renderedFirstFrame || session?.transport == null) return
+            renderedFirstFrame = true
+            recordAppFirstFrame(System.nanoTime() - startupTime)
+        }
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (!current) return
             playing = isPlaying
