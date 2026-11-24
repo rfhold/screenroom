@@ -13,82 +13,26 @@ use tonic::{Request, Response, Status};
 
 const ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 
-#[test]
-#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright Maintenance suite"]
-fn wasm_transport() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
-    let output = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", r#"
-import assert from 'node:assert/strict';
-import {readFile} from 'node:fs/promises';
-import {createServer} from 'node:http';
-import {pathToFileURL} from 'node:url';
-const wasmDir=process.env.SCREENROOM_OPERATOR_WASM_DIR ?? 'target/client-core/wasm';
-const {default:init,OperatorClient}=await import(pathToFileURL(`${wasmDir}/screenroom_client_core.js`));
-await init({module_or_path:await readFile(`${wasmDir}/screenroom_client_core_bg.wasm`)});
-const id='01234567-89ab-cdef-0123-456789abcdef';
-const requests=[];
-let mode='health';
-const server=createServer(async(req,res)=>{
-  const chunks=[]; for await(const chunk of req)chunks.push(chunk);
-  requests.push({path:req.url,headers:req.headers,body:Buffer.concat(chunks).toString()});
-  res.setHeader('Content-Type','application/json');
-  if(mode==='disconnect'){req.socket.destroy();return;}
-  if(mode==='slow'){await new Promise(r=>setTimeout(r,100));res.end('{"ready":true}');return;}
-  if(mode==='busy'){res.statusCode=409;res.end(`{"error":{"code":"source_busy","run_id":"${id}"}}`);return;}
-  if(mode==='large'){res.end('x'.repeat(2*1024*1024+1));return;}
-  res.end('{"ready":true}');
-});
-await new Promise(r=>server.listen(0,'127.0.0.1',r));
-const origin=`http://127.0.0.1:${server.address().port}`;
-globalThis.location={origin};
-const originalFetch=globalThis.fetch;
-let calls=0;
-globalThis.fetch=(url,options)=>{calls++;assert.equal(options.mode,'same-origin');assert.equal(options.redirect,'error');assert.equal(options.cache,'no-store');assert.equal(options.credentials,'omit');assert.ok(!('origin' in options.headers));return originalFetch(url,options);};
-try{
-  for(const endpoint of ['http://remote.test/__operator/api',`${origin}/api`,`${origin}/__operator/api/`,`${origin}/x/../__operator/api`]) assert.throws(()=>new OperatorClient({endpoint,timeout_ms:1000}),e=>e.code==='invalid');
-  const config={endpoint:`${origin}/__operator/api`,timeout_ms:1000};
-  const client=new OperatorClient(config);
-  assert.deepEqual(client.configuration(),config);
-  assert.equal(client.configuration_namespace(),config.endpoint);
-  assert.equal((await client.health()).ready,true);
-  assert.equal((await client.health()).ready,true);
-  assert.equal(calls,2);
-  mode='busy';
-   await assert.rejects(client.indexing_start(id,{request_id:id,policy_id:id,policy_version:9007199254740993n,scope:{library_ids:['b','a'],item_kinds:['series','movie'],item_ids:['item:2','item:1']}}),e=>e.code==='source_busy'&&e.run_id===id&&!e.ambiguous);
-  const request=requests.at(-1);
-  assert.equal(request.headers['content-type'],'application/json');
-  assert.ok(request.body.includes('"policy_version":9007199254740993'));
-  assert.ok(request.body.includes('"library_ids":["b","a"]'));
-  mode='disconnect';const before=calls;
-   await assert.rejects(client.indexing_start(id,{request_id:id,policy_id:id,policy_version:1n,scope:null}),e=>e.code==='unavailable'&&e.ambiguous);
-  assert.equal(calls,before+1);
-  mode='large';await assert.rejects(client.health(),e=>e.code==='invalid_response'&&!e.ambiguous);
-  mode='slow';const slow=client.health();setTimeout(()=>client.cancel_all(),10);await assert.rejects(slow,e=>e.code==='cancelled'&&!e.ambiguous);
-  const short=new OperatorClient({...config,timeout_ms:10});await assert.rejects(short.health(),e=>e.code==='deadline'&&!e.ambiguous);
-}finally{globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(r=>server.close(r));}
-"#])
-        .current_dir(root).output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
 struct Server {
     endpoint: String,
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<Call>>>,
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
+#[derive(Clone)]
+struct Call {
+    rpc: &'static str,
+    request: OperatorRequest,
+}
+
+impl Call {
+    fn body(&self) -> &str {
+        std::str::from_utf8(&self.request.payload_json).unwrap()
+    }
+}
+
 struct Fixture {
-    requests: Arc<Mutex<Vec<String>>>,
+    requests: Arc<Mutex<Vec<Call>>>,
     status: u16,
     body: String,
     delay: u64,
@@ -97,27 +41,10 @@ struct Fixture {
 impl Fixture {
     async fn respond(
         &self,
-        method: &str,
-        mut path: String,
+        rpc: &'static str,
         request: OperatorRequest,
     ) -> Result<Response<OperatorResponse>, Status> {
-        if let Some(page) = request.page {
-            let mut query = url::form_urlencoded::Serializer::new(String::new());
-            query.append_pair("limit", &page.limit.to_string());
-            if let Some(after) = page.after {
-                query.append_pair("after", &after);
-            }
-            if let Some(pending) = page.pending_only {
-                query.append_pair("pending_only", &pending.to_string());
-            }
-            path.push('?');
-            path.push_str(&query.finish());
-        }
-        let body = String::from_utf8(request.payload_json).unwrap();
-        // Render the captured fields in the original fixture notation.
-        self.requests.lock().unwrap().push(format!(
-            "{method} {path} HTTP/1.1\r\ncontent-type: application/json\r\n\r\n{body}"
-        ));
+        self.requests.lock().unwrap().push(Call { rpc, request });
         tokio::time::sleep(Duration::from_millis(self.delay)).await;
         if self.disconnect {
             return Err(Status::unavailable("unavailable"));
@@ -150,39 +77,39 @@ impl Fixture {
 }
 
 macro_rules! fixture_methods {
-    ($($name:ident($($field:ident),*) => ($method:literal, $path:literal);)+) => {
+    ($($name:ident => $rpc:literal;)+) => {
         #[tonic::async_trait]
         impl OperatorService for Fixture {
             $(async fn $name(&self, request: Request<OperatorRequest>) -> Result<Response<OperatorResponse>, Status> {
                 let input = request.into_inner();
-                self.respond($method, format!($path $(, input.$field)*), input).await
+                self.respond($rpc, input).await
             })+
         }
     };
 }
 fixture_methods! {
-    health() => ("GET", "/api/health");
-    discover_connection() => ("POST", "/api/connections/jellyfin/discover");
-    save_connection() => ("POST", "/api/connections/jellyfin");
-    list_connections() => ("GET", "/api/connections/jellyfin");
-    list_sources() => ("GET", "/api/sources");
-    list_libraries(source_id) => ("GET", "/api/sources/{}/libraries");
-    list_runs(source_id) => ("GET", "/api/indexing/sources/{}/runs");
-    list_candidates(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/candidates");
-    list_policies(source_id) => ("GET", "/api/indexing/sources/{}/policies");
-    configure_policy(source_id) => ("POST", "/api/indexing/sources/{}/policies");
-    get_progress(source_id, policy_id) => ("GET", "/api/indexing/sources/{}/policies/{}/progress");
-    start_run(source_id) => ("POST", "/api/indexing/sources/{}/start");
-    get_run_status(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}");
-    get_execution(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/execution");
-    pause_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/pause");
-    resume_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/resume");
-    cancel_run(source_id, run_id) => ("POST", "/api/indexing/sources/{}/runs/{}/cancel");
-    list_jobs(source_id, run_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs");
-    list_attempts(source_id, run_id, job_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs/{}/attempts");
-    list_redrives(source_id, run_id, job_id) => ("GET", "/api/indexing/sources/{}/runs/{}/jobs/{}/redrives");
-    redrive_job(source_id, run_id, job_id) => ("POST", "/api/indexing/sources/{}/runs/{}/jobs/{}/redrive");
-    observe_queue() => ("POST", "/api/indexing/queue");
+    health => "Health";
+    discover_connection => "DiscoverConnection";
+    save_connection => "SaveConnection";
+    list_connections => "ListConnections";
+    list_sources => "ListSources";
+    list_libraries => "ListLibraries";
+    list_runs => "ListRuns";
+    list_candidates => "ListCandidates";
+    list_policies => "ListPolicies";
+    configure_policy => "ConfigurePolicy";
+    get_progress => "GetProgress";
+    start_run => "StartRun";
+    get_run_status => "GetRunStatus";
+    get_execution => "GetExecution";
+    pause_run => "PauseRun";
+    resume_run => "ResumeRun";
+    cancel_run => "CancelRun";
+    list_jobs => "ListJobs";
+    list_attempts => "ListAttempts";
+    list_redrives => "ListRedrives";
+    redrive_job => "RedriveJob";
+    observe_queue => "ObserveQueue";
 }
 
 impl Server {
@@ -264,92 +191,6 @@ fn save_request(refresh: bool) -> OperatorSaveConnectionRequest {
     }
 }
 
-#[test]
-#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright connections suite"]
-fn connections_wasm_transport() {
-    let fixtures = serde_json::json!({"id":ID,"discovery":discovery_fixture().to_string(),"saved":saved_fixture(false).to_string(),"refreshed":saved_fixture(true).to_string(),"connection":saved_fixture(false)["connection"].to_string()});
-    let script = r#"
-import assert from 'node:assert/strict';
-import http from 'node:http';
-import {readFile} from 'node:fs/promises';
-import {pathToFileURL} from 'node:url';
-const dir=process.env.SCREENROOM_OPERATOR_WASM_DIR;
-assert.ok(dir,'explicit isolated WASM output required');
-const {default:init,OperatorClient}=await import(pathToFileURL(`${dir}/screenroom_client_core.js`));
-await init({module_or_path:await readFile(`${dir}/screenroom_client_core_bg.wasm`)});
-const f=JSON.parse(process.env.OPERATOR_CONNECTION_FIXTURES),id=f.id;
-const calls=[],dispatches=[];let mode='normal';
-const server=http.createServer(async(req,res)=>{
- const chunks=[];for await(const c of req)chunks.push(c);
- const body=Buffer.concat(chunks).toString();calls.push({url:req.url,body,headers:req.headers});
- if(mode==='disconnect'){req.socket.destroy();return;}
- if(mode==='hang')return;
- res.setHeader('content-type','application/json');
- if(mode==='error'){res.statusCode=409;res.end('{"error":{"code":"request_conflict","message":"synthetic-secret"}}');return;}
- if(req.url.endsWith('/discover')){res.end(f.discovery);return;}
- if(req.method==='GET'){res.end(`{"items":[${f.connection}],"next_after":null}`);return;}
- res.end(JSON.parse(body).refresh?f.refreshed:f.saved);
-});
-await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-const origin=`http://127.0.0.1:${server.address().port}`;globalThis.location={origin};
-const originalFetch=globalThis.fetch;
-globalThis.fetch=(url,options)=>{
- assert.ok(url.startsWith(origin+'/__operator/api/connections/jellyfin'));
- assert.equal(options.redirect,'error');assert.equal(options.mode,'same-origin');assert.equal(options.credentials,'omit');assert.equal(options.cache,'no-store');
- assert.equal(new Headers(options.headers).has('origin'),false);
- if(options.method==='POST')assert.equal(new Headers(options.headers).get('content-type'),'application/json');
- dispatches.push({url,body:options.body==null?null:new TextDecoder().decode(options.body)});
- return originalFetch(url,options);
-};
-const config={endpoint:origin+'/__operator/api',timeout_ms:1000},client=new OperatorClient(config);
-const input={request_id:id,base_url:'http://provider.test/jellyfin',api_key:'synthetic-secret',server_id:'server',profile_id:'profile',library_ids:['shows','movies'],local_user_id:id,refresh:false};
-try{
- for(const name of ['policies','runs','run_status','candidates','status','configure','preview','start','pause','resume','cancel'])assert.equal(typeof client[name],'undefined',name);
- const discovery=await client.discover_connection({base_url:input.base_url,api_key:input.api_key});
- assert.equal(discovery.server.name,'Synthetic');assert.equal(discovery.profiles[0].hidden,true);
- assert.deepEqual(discovery.libraries.map(l=>l.kind),['movies','television','collections','unsupported']);
- assert.equal('api_key' in discovery,false);assert.equal('credential_ref' in discovery,false);
- for(let i=0;i<2;i++){
-  const saved=await client.save_connection(input);assert.equal(saved.policy_version,9007199254740993n);assert.equal(saved.run_id,null);
-  assert.equal('api_key' in saved,false);assert.equal('base_url' in saved,false);assert.equal('credential_ref' in saved.connection,false);
-  assert.deepEqual(JSON.parse(calls.at(-1).body),input);
- }
- assert.equal(calls[1].body,calls[2].body);
- assert.equal((await client.save_connection({...input,refresh:true})).run_id,id);
- assert.equal((await client.connections({after:id,limit:200})).items[0].id,id);
- assert.match(calls.at(-1).url,/limit=200&after=/);
- assert.deepEqual(client.configuration(),config);
- const before=calls.length;
- await assert.rejects(client.save_connection({...input,library_ids:Array.from({length:33},(_,i)=>`library${i}`)}),e=>e.code==='selection_capacity'&&!e.ambiguous);
- await assert.rejects(client.discover_connection({base_url:input.base_url,api_key:''}),e=>e.code==='invalid_credentials'&&!e.ambiguous);
-  assert.equal(calls.length,before);
-  assert.equal((await client.discover_connection(input)).server.name,'Synthetic');
-  assert.deepEqual(JSON.parse(calls.at(-1).body),{base_url:input.base_url,api_key:input.api_key});
- mode='error';await assert.rejects(client.save_connection(input),e=>e.code==='request_conflict'&&!e.ambiguous&&!e.message.includes(input.api_key));
- mode='disconnect';const attempts=calls.length;
- await assert.rejects(client.save_connection(input),e=>e.code==='unavailable'&&e.ambiguous);assert.equal(calls.length,attempts+1);
- mode='hang';const pending=client.save_connection(input);const checked=assert.rejects(pending,e=>e.code==='cancelled'&&e.ambiguous);setTimeout(()=>client.cancel_all(),10);await checked;
- const beforeDeadline=dispatches.length,short=new OperatorClient({...config,timeout_ms:10});
- await assert.rejects(short.discover_connection({base_url:input.base_url,api_key:input.api_key}),e=>e.code==='deadline'&&!e.ambiguous);
- assert.equal(dispatches.length,beforeDeadline+1);
- assert.equal(dispatches.at(-1).url,origin+'/__operator/api/connections/jellyfin/discover');
- assert.deepEqual(JSON.parse(dispatches.at(-1).body),{base_url:input.base_url,api_key:input.api_key});short.free();
-}finally{client.free();globalThis.fetch=originalFetch;server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
-"#;
-    let result = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", script])
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .env("OPERATOR_CONNECTION_FIXTURES", fixtures.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-}
-
 #[tokio::test]
 async fn connection_records_are_redacted_and_transported_only_to_typed_operator_routes() {
     let input = save_request(false);
@@ -375,10 +216,10 @@ async fn connection_records_are_redacted_and_transported_only_to_typed_operator_
             .unwrap()
             .contains("not-public")
     );
-    assert!(
-        server.requests.lock().unwrap()[0]
-            .starts_with("POST /api/connections/jellyfin/discover HTTP/1.1")
-    );
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "DiscoverConnection");
+    }
     for refresh in [false, true] {
         let server = Server::new(200, saved_fixture(refresh).to_string(), 0, false);
         let client = server.client(1000);
@@ -393,13 +234,13 @@ async fn connection_records_are_redacted_and_transported_only_to_typed_operator_
         client.save_connection(save_request(refresh)).await.unwrap();
         let requests = server.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
-        let bodies: Vec<_> = requests
-            .iter()
-            .map(|r| r.split_once("\r\n\r\n").unwrap().1)
-            .collect();
+        let bodies: Vec<_> = requests.iter().map(|r| r.body()).collect();
         assert_eq!(bodies[0], bodies[1]);
-        assert!(requests[0].starts_with("POST /api/connections/jellyfin HTTP/1.1"));
-        assert!(requests[0].contains("content-type: application/json\r\n"));
+        {
+            let call = &requests[0];
+            assert_eq!(call.rpc, "SaveConnection");
+        }
+
         let wire: serde_json::Value = serde_json::from_str(bodies[0]).unwrap();
         assert_eq!(
             wire,
@@ -427,9 +268,13 @@ async fn connection_records_are_redacted_and_transported_only_to_typed_operator_
             .unwrap()
             .contains("not-public")
     );
-    assert!(server.requests.lock().unwrap()[0].starts_with(&format!(
-        "GET /api/connections/jellyfin?limit=200&after={ID}"
-    )));
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "ListConnections");
+        let page = call.request.page.as_ref().unwrap();
+        assert_eq!(page.limit, 200);
+        assert_eq!(page.after.as_deref(), Some(ID));
+    }
 }
 
 #[test]
@@ -634,115 +479,6 @@ fn indexing_configuration_fixture() -> serde_json::Value {
     serde_json::json!({"indexing":1,"enabled":true,"cadence_seconds":60,"mode":"full","components":{"metadata":true,"artwork":true,"embeddings":false},"strategy":"all","scope":{"library_ids":["library:b","library:a"],"item_kinds":["series","movie"],"item_ids":[]},"limits":{"work_requests":10,"work_records":20,"lifetime_requests":1000,"lifetime_records":1000,"deadline_seconds":600,"work_timeout_seconds":30}})
 }
 
-#[test]
-#[ignore = "legacy HTTP fixture; use the gRPC-Web Playwright indexing suite"]
-fn indexing_wasm_transport() {
-    let mut status: serde_json::Value = serde_json::from_str(&run_status_body()).unwrap();
-    status["run"]["policy_version"] = serde_json::json!(9007199254740993_i64);
-    status["observed_records"] = serde_json::json!(9007199254740993_i64);
-    status["terminal_reason"] = serde_json::json!("deadline_expired");
-    status["coverage"]["unresolved_attempts"] = serde_json::json!(1);
-    status["enumeration_complete"] = serde_json::json!(true);
-    status["work_settled"] = serde_json::json!(true);
-    status["work_succeeded"] = serde_json::json!(false);
-    let fixtures = serde_json::json!({
-        "id":ID,"policy":indexing_policy_fixture().to_string(),"status":status.to_string(),"run":status["run"].to_string(),
-        "unknown":diagnostics_fixture(None).to_string(),"empty":diagnostics_fixture(Some(vec![])).to_string(),
-        "attempts":serde_json::json!({"items":[{"job_id":ID,"fence":9007199254740993_i64,"generation":2,"started_at":"2026-11-12T00:00:00Z","finished_at":null,"outcome":"running","error_code":null}],"next_after":"9007199254740993"}).to_string()
-    });
-    let script = r#"
-import assert from 'node:assert/strict';
-import http from 'node:http';
-import {readFile} from 'node:fs/promises';
-import {pathToFileURL} from 'node:url';
-const dir=process.env.SCREENROOM_OPERATOR_WASM_DIR ?? 'target/client-core/wasm';
-const {default:init,OperatorClient}=await import(pathToFileURL(`${dir}/screenroom_client_core.js`));
-await init({module_or_path:await readFile(`${dir}/screenroom_client_core_bg.wasm`)});
-const f=JSON.parse(process.env.OPERATOR_CANONICAL_FIXTURES);
-const id=f.id;
-const calls=[];let mode='normal';
-const server=http.createServer(async(req,res)=>{
- const chunks=[];for await(const c of req)chunks.push(c);
- const body=Buffer.concat(chunks).toString();calls.push({url:req.url,body,headers:req.headers});
- if(mode==='disconnect'){req.socket.destroy();return;}
- if(mode==='hang')return;
- let response;
- if(req.url.endsWith('/policies')&&req.method==='POST')response=f.policy;
-  else if(req.url.includes('/policies?'))response=`{"items":[${f.policy}],"next_after":null}`;
-  else if(req.url.includes('/runs?'))response=`{"items":[${f.run}],"next_after":null}`;
-  else if(req.url.includes('/candidates?'))response=`{"items":[{"source_item_id":"${id}","public_id":"item","kind":"movie","state":"selected","code":null,"selection_reason":"unknown_age","selected_at":"2026-11-13T00:00:00Z","updated_at":"2026-11-13T00:00:00Z"}],"next_after":null}`;
- else if(req.url.endsWith('/progress'))response='null';
- else if(req.url.endsWith('/execution'))response='{"mode":"incremental","lower_watermark":null,"candidate_watermark":null,"settled_at":null,"fallback_reason":null}';
- else if(req.url.endsWith('/start'))response=f.run;
- else if(req.url.includes('/attempts?'))response=f.attempts;
- else if(req.url.includes('/redrives?'))response=`{"items":[{"request_id":"${id}","job_id":"${id}","generation":3}],"next_after":null}`;
- else if(req.url.endsWith('/redrive'))response=`{"request_id":"${id}","job_id":"${id}","generation":3}`;
- else if(req.url.includes('/jobs?'))response=`{"items":[{"id":"${id}","run_id":"${id}","kind":"ingest","state":"failed","available_at":"2026-11-12T00:00:00Z","lease_until":null,"attempts":5,"max_attempts":5,"generation":2,"redrive_allowed":true,"redrive_reason":null}],"next_after":null}`;
- else if(req.url.endsWith('/indexing/queue'))response=body.includes('"capabilities":[]')?f.empty:f.unknown;
- else response=f.status;
- res.writeHead(200,{'content-type':'application/json'});res.end(response);
-});
-await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-const origin=`http://127.0.0.1:${server.address().port}`;
-globalThis.location={origin};
-const originalFetch=globalThis.fetch;
-globalThis.fetch=(url,options)=>{
- assert.equal(options.redirect,'error');assert.equal(options.mode,'same-origin');assert.equal(options.cache,'no-store');assert.equal(options.credentials,'omit');
- assert.equal(new Headers(options.headers).has('origin'),false);
- if(options.method==='POST')assert.equal(new Headers(options.headers).get('content-type'),'application/json');
- return originalFetch(url,options);
-};
-const client=new OperatorClient({endpoint:origin+'/__operator/api',timeout_ms:1000});
-try{
- const policies=await client.indexing_policies(id,{after:null,limit:200});
- const p=policies.items[0];assert.equal(p.version,9007199254740993n);
- assert.equal(p.configuration.limits.work_requests,10n);assert.equal(p.configuration.automatic_runs,false);
- assert.equal(p.configuration.artwork.posters.skip_existing,true);assert.equal('operator_profile_id' in p.configuration,false);
- const admissionBefore=calls.length;
- await assert.rejects(client.indexing_start(id,{request_id:id,policy_id:id,policy_version:Number(p.version),scope:null}),e=>e.code==='invalid'&&!e.ambiguous);
- await assert.rejects(client.indexing_start(id,{request_id:id,policy_id:id,policy_version:9223372036854775808n,scope:null}),e=>e.code==='invalid'&&!e.ambiguous);
- await assert.rejects(client.indexing_configure(id,{request_id:id,existing:null,configuration:{...p.configuration,operator_profile_id:id}}),e=>e.code==='invalid'&&!e.ambiguous);
- assert.equal(calls.length,admissionBefore);
- await client.indexing_configure(id,{request_id:id,existing:{policy_id:id,expected_version:p.version},configuration:p.configuration});
- assert.match(calls.at(-1).body,/"expected_version":9007199254740993/);
- assert.equal(await client.indexing_progress(id,id),null);
- const scope={library_ids:['library:b','library:a'],item_kinds:['series','movie'],item_ids:[]};
-  const run=await client.indexing_start(id,{request_id:id,policy_id:id,policy_version:p.version,scope});
-  assert.equal('trigger' in run,false);
-  assert.equal((await client.indexing_runs(id,{after:null,limit:1000})).items[0].policy_version,p.version);
-  assert.equal((await client.indexing_candidates(id,id,{after:null,limit:1000},true)).items[0].selection_reason,'unknown_age');
-  assert.match(calls.at(-1).url,/\/indexing\/sources\/.*\/runs\/.*\/candidates\?limit=1000&pending_only=true$/);
-  await client.indexing_start(id,{request_id:id,policy_id:id,policy_version:p.version,scope});
- assert.equal(run.policy_version,p.version);assert.match(calls.at(-1).body,/"policy_version":9007199254740993/);
- assert.match(calls.at(-1).body,/"library_ids":\["library:b","library:a"\]/);
- const status=await client.indexing_run_status(id,id);assert.equal(status.observed_records,9007199254740993n);assert.equal(status.coverage.unresolved_attempts,1n);assert.equal(status.work_succeeded,false);
- assert.equal((await client.indexing_execution(id,id)).mode,'incremental');
- for(const action of ['indexing_pause','indexing_resume','indexing_cancel']){await client[action](id,id);assert.equal(calls.at(-1).body,'{}');}
- assert.equal((await client.indexing_jobs(id,id,{after:null,limit:200})).items[0].redrive_allowed,true);
- const attempts=await client.indexing_attempts(id,id,id,{after:'9007199254740992',limit:1});assert.equal(attempts.items[0].fence,9007199254740993n);assert.equal(attempts.next_after,'9007199254740993');
- assert.match(calls.at(-1).url,/after=9007199254740992$/);
- assert.equal((await client.indexing_redrives(id,id,id,{after:'2',limit:200})).items[0].generation,3);
- assert.equal((await client.indexing_redrive(id,id,id,{request_id:id})).generation,3);
- const unknown=await client.indexing_queue({run_id:null,capabilities:null});assert.equal(unknown.queue.ready,9007199254740993n);assert.equal(unknown.queue.claimable,null);assert.equal(unknown.blockers.capability,null);assert.equal(unknown.atomic,false);assert.equal(unknown.worker_liveness,'unknown');assert.equal('as_of' in unknown,false);
- const empty=await client.indexing_queue({run_id:id,capabilities:[]});assert.equal(empty.queue.claimable,9007199254740993n);
- const before=calls.length;mode='disconnect';
- await assert.rejects(client.indexing_redrive(id,id,id,{request_id:id}),e=>e.code==='unavailable'&&e.ambiguous===true);assert.equal(calls.length,before+1);
- mode='hang';const pending=client.indexing_redrive(id,id,id,{request_id:id});const checked=assert.rejects(pending,e=>e.code==='cancelled'&&e.ambiguous===true);setTimeout(()=>client.cancel_all(),10);await checked;
-}finally{client.free();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}
-"#;
-    let result = std::process::Command::new("node")
-        .args(["--input-type=module", "-e", script])
-        .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
-        .env("OPERATOR_CANONICAL_FIXTURES", fixtures.to_string())
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-}
 fn indexing_policy_fixture() -> serde_json::Value {
     serde_json::json!({"id":ID,"source_id":ID,"version":9007199254740993_i64,"enabled":true,"automatic_runs":false,"next_due_at":"2026-11-12T00:00:00Z","configuration":indexing_configuration_fixture()})
 }
@@ -781,13 +517,20 @@ async fn indexing_policy_configure_progress_and_execution_use_verified_routes() 
         .unwrap();
     assert_eq!(policy.version, 9007199254740993);
     let requests = server.requests.lock().unwrap().clone();
-    assert!(requests[0].starts_with(&format!("POST /api/indexing/sources/{ID}/policies HTTP")));
-    assert!(requests[0].contains("content-type: application/json\r\n"));
-    assert!(requests[0].contains("\"expected_version\":9007199254740993"));
-    assert!(!requests[0].contains("operator_profile_id"));
+    {
+        let call = &requests[0];
+        assert_eq!(call.rpc, "ConfigurePolicy");
+        assert_eq!(call.request.source_id, ID);
+    }
+
+    assert!(
+        requests[0]
+            .body()
+            .contains("\"expected_version\":9007199254740993")
+    );
+    assert!(!requests[0].body().contains("operator_profile_id"));
     assert_eq!(
-        serde_json::from_str::<serde_json::Value>(requests[0].split_once("\r\n\r\n").unwrap().1)
-            .unwrap(),
+        serde_json::from_str::<serde_json::Value>(requests[0].body()).unwrap(),
         serde_json::to_value(input).unwrap()
     );
     let server = Server::new(
@@ -817,9 +560,12 @@ async fn indexing_policy_configure_progress_and_execution_use_verified_routes() 
             .policy_version,
         9007199254740993
     );
-    assert!(server.requests.lock().unwrap()[0].starts_with(&format!(
-        "GET /api/indexing/sources/{ID}/policies/{ID}/progress HTTP"
-    )));
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "GetProgress");
+        assert_eq!(call.request.source_id, ID);
+        assert_eq!(call.request.policy_id, ID);
+    }
     let server = Server::new(200, "null".into(), 0, false);
     assert!(
         server
@@ -973,7 +719,16 @@ async fn indexing_jobs_and_numeric_history_are_sanitized_and_lossless() {
         .unwrap();
     assert_eq!(history.items[0].fence, 9007199254740993);
     assert!(!serde_json::to_string(&history).unwrap().contains("owner"));
-    assert!(server.requests.lock().unwrap()[0].starts_with(&format!("GET /api/indexing/sources/{ID}/runs/{ID}/jobs/{ID}/attempts?limit=1&after=9007199254740992 HTTP")));
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "ListAttempts");
+        assert_eq!(call.request.source_id, ID);
+        assert_eq!(call.request.run_id, ID);
+        assert_eq!(call.request.job_id, ID);
+        let page = call.request.page.as_ref().unwrap();
+        assert_eq!(page.limit, 1);
+        assert_eq!(page.after.as_deref(), Some("9007199254740992"));
+    }
     let server=Server::new(200,serde_json::json!({"items":[{"request_id":ID,"job_id":ID,"generation":2}],"next_after":"2"}).to_string(),0,false);
     assert_eq!(
         server
@@ -1072,15 +827,13 @@ async fn indexing_diagnostics_preserve_unknown_capability_context_and_observatio
                 .get("as_of")
                 .is_none()
         );
-        assert!(server.requests.lock().unwrap()[0].starts_with("POST /api/indexing/queue HTTP"));
+        {
+            let call = &server.requests.lock().unwrap()[0];
+            assert_eq!(call.rpc, "ObserveQueue");
+        }
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                server.requests.lock().unwrap()[0]
-                    .split_once("\r\n\r\n")
-                    .unwrap()
-                    .1
-            )
-            .unwrap(),
+            serde_json::from_str::<serde_json::Value>(server.requests.lock().unwrap()[0].body())
+                .unwrap(),
             serde_json::to_value(input).unwrap()
         );
     }
@@ -1134,9 +887,13 @@ async fn indexing_redrive_and_start_never_retry_ambiguous_mutations() {
             .generation,
         3
     );
-    assert!(server.requests.lock().unwrap()[0].starts_with(&format!(
-        "POST /api/indexing/sources/{ID}/runs/{ID}/jobs/{ID}/redrive HTTP"
-    )));
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "RedriveJob");
+        assert_eq!(call.request.source_id, ID);
+        assert_eq!(call.request.run_id, ID);
+        assert_eq!(call.request.job_id, ID);
+    }
     for operation in ["start", "configure", "redrive"] {
         let server = Server::new(200, "{}".into(), 0, true);
         let client = server.client(1000);
@@ -1211,7 +968,11 @@ async fn indexing_start_status_and_controls_preserve_canonical_outcomes() {
             .policy_version,
         9007199254740993
     );
-    assert!(server.requests.lock().unwrap()[0].contains("\"policy_version\":9007199254740993"));
+    assert!(
+        server.requests.lock().unwrap()[0]
+            .body()
+            .contains("\"policy_version\":9007199254740993")
+    );
     let server = Server::new(200, status.to_string(), 0, false);
     let client = server.client(1000);
     let result = client
@@ -1226,11 +987,13 @@ async fn indexing_start_status_and_controls_preserve_canonical_outcomes() {
     client.indexing_resume(ID.into(), ID.into()).await.unwrap();
     client.indexing_cancel(ID.into(), ID.into()).await.unwrap();
     let requests = server.requests.lock().unwrap();
-    for (request, action) in requests[1..].iter().zip(["pause", "resume", "cancel"]) {
-        assert!(request.starts_with(&format!(
-            "POST /api/indexing/sources/{ID}/runs/{ID}/{action} HTTP"
-        )));
-        assert!(request.ends_with("\r\n\r\n{}"));
+    let actions = &requests[1..];
+    assert_eq!(actions.len(), 3);
+    for (call, rpc) in actions.iter().zip(["PauseRun", "ResumeRun", "CancelRun"]) {
+        assert_eq!(call.rpc, rpc);
+        assert_eq!(call.request.source_id, ID);
+        assert_eq!(call.request.run_id, ID);
+        assert_eq!(call.body(), "{}");
     }
 }
 fn start() -> OperatorStartRequest {
@@ -1267,10 +1030,11 @@ async fn canonical_history_and_safe_candidates() {
         .await
         .unwrap();
     assert_eq!(runs.items[0].policy_version, 9007199254740993);
-    assert!(
-        server.requests.lock().unwrap()[0]
-            .starts_with(&format!("GET /api/indexing/sources/{ID}/runs?"))
-    );
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "ListRuns");
+        assert_eq!(call.request.source_id, ID);
+    }
     let server = Server::new(200, serde_json::json!({"items":[{
         "source_item_id":ID,"public_id":"item:1","kind":"movie","state":"selected","code":"ready","selected_at":"2026-11-11T00:00:00Z","updated_at":"2026-11-11T00:00:00Z",
         "external_id":"not-public","source_artwork_id":"not-public","job_payload":{"secret":"not-public"}
@@ -1285,10 +1049,15 @@ async fn canonical_history_and_safe_candidates() {
             .unwrap()
             .contains("not-public")
     );
-    assert!(server.requests.lock().unwrap()[0].contains("limit=2&pending_only=true"));
-    assert!(server.requests.lock().unwrap()[0].starts_with(&format!(
-        "GET /api/indexing/sources/{ID}/runs/{ID}/candidates?"
-    )));
+    {
+        let call = &server.requests.lock().unwrap()[0];
+        assert_eq!(call.rpc, "ListCandidates");
+        assert_eq!(call.request.source_id, ID);
+        assert_eq!(call.request.run_id, ID);
+        let page = call.request.page.as_ref().unwrap();
+        assert_eq!(page.limit, 2);
+        assert_eq!(page.pending_only, Some(true));
+    }
 }
 
 #[test]
@@ -1334,8 +1103,16 @@ async fn fresh_gets_pagination_and_encoded_library_cursor() {
         .unwrap();
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
-    assert!(requests[0].starts_with("GET /api/sources?limit=2 HTTP/1.1"));
-    assert!(requests[2].contains("after=a%26limit%3D999%2Fx%3F%23"));
+    {
+        let call = &requests[0];
+        assert_eq!(call.rpc, "ListSources");
+        let page = call.request.page.as_ref().unwrap();
+        assert_eq!(page.limit, 2);
+    }
+    assert_eq!(
+        requests[2].request.page.as_ref().unwrap().after.as_deref(),
+        Some("a&limit=999/x?#")
+    );
 }
 
 #[tokio::test]
@@ -1350,13 +1127,9 @@ async fn exact_start_body_and_one_ambiguous_attempt() {
     let requests = server.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
-    assert!(
-        request.starts_with(&format!("POST /api/indexing/sources/{ID}/start HTTP/1.1")),
-        "{request:?}"
-    );
-    assert!(request.contains("content-type: application/json\r\n"));
-    let body: serde_json::Value =
-        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(request.rpc, "StartRun");
+    assert_eq!(request.request.source_id, ID);
+    let body: serde_json::Value = serde_json::from_str(request.body()).unwrap();
     assert_eq!(body, serde_json::to_value(start()).unwrap());
     assert_eq!(body["policy_version"].as_i64(), Some(9_007_199_254_740_993));
 }
@@ -1510,8 +1283,11 @@ async fn discovery_read_post_does_not_claim_ambiguous_mutation() {
     );
     {
         let requests = server.requests.lock().unwrap();
-        assert!(requests[0].starts_with("POST /api/connections/jellyfin/discover"));
-        let bytes = requests[0].split_once("\r\n\r\n").unwrap().1;
+        {
+            let call = &requests[0];
+            assert_eq!(call.rpc, "DiscoverConnection");
+        }
+        let bytes = requests[0].body();
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(bytes).unwrap(),
             serde_json::json!({"base_url":"http://provider.test/jellyfin","api_key":"synthetic-secret"})

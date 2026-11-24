@@ -35,39 +35,17 @@ export function decodeOperator(pathname: string, bytes: Buffer) {
       bytes.readUInt32BE(1) !== bytes.length - 5) throw new Error('Expected unary operator RPC');
   const input = fields(bytes.subarray(5));
   const item = (tag: number) => input.get(tag)?.toString() ?? '';
-  const source = `/api/indexing/sources/${item(1)}`;
-  const run = `${source}/runs/${item(2)}`;
-  const job = `${run}/jobs/${item(4)}`;
-  const routes: Record<string, [string, string]> = {
-    Health: ['GET', '/api/health'],
-    DiscoverConnection: ['POST', '/api/connections/jellyfin/discover'],
-    SaveConnection: ['POST', '/api/connections/jellyfin'],
-    ListConnections: ['GET', '/api/connections/jellyfin'],
-    ListSources: ['GET', '/api/sources'],
-    ListLibraries: ['GET', `/api/sources/${item(1)}/libraries`],
-    ListRuns: ['GET', `${source}/runs`],
-    ListCandidates: ['GET', `${run}/candidates`],
-    ListPolicies: ['GET', `${source}/policies`],
-    ConfigurePolicy: ['POST', `${source}/policies`],
-    GetProgress: ['GET', `${source}/policies/${item(3)}/progress`],
-    StartRun: ['POST', `${source}/start`],
-    GetRunStatus: ['GET', run],
-    GetExecution: ['GET', `${run}/execution`],
-    PauseRun: ['POST', `${run}/pause`],
-    ResumeRun: ['POST', `${run}/resume`],
-    CancelRun: ['POST', `${run}/cancel`],
-    ListJobs: ['GET', `${run}/jobs`],
-    ListAttempts: ['GET', `${job}/attempts`],
-    ListRedrives: ['GET', `${job}/redrives`],
-    RedriveJob: ['POST', `${job}/redrive`],
-    ObserveQueue: ['POST', '/api/indexing/queue'],
-  };
-  const route = routes[pathname.slice(prefix.length)];
-  if (!route) throw new Error('Unknown operator RPC');
-  const [method, path] = route;
   const page = input.get(5);
-  return { method, path, body: item(6), after: Buffer.isBuffer(page) ? fields(page).get(1)?.toString() ?? null : null };
+  return {
+    rpc: pathname.slice(prefix.length),
+    sourceId: item(1), runId: item(2), policyId: item(3), jobId: item(4), body: item(6),
+    after: Buffer.isBuffer(page) ? fields(page).get(1)?.toString() ?? null : null,
+  };
 }
+
+const indexWrites = new Set(['ConfigurePolicy', 'StartRun', 'PauseRun', 'ResumeRun', 'CancelRun', 'RedriveJob']);
+export const isIndexWrite = (rpc: string) => indexWrites.has(rpc);
+export const isOperatorWrite = (rpc: string) => isIndexWrite(rpc) || rpc === 'SaveConnection';
 
 export function operatorFrame(flag: number, body: Buffer) {
   const header = Buffer.alloc(5);
